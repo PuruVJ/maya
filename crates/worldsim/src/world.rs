@@ -30,6 +30,15 @@ const MAX_CHASE2: f64 = 45.0 * 45.0; // give up a chase once this far from where
 const GIVEUP_CD: f64 = 5.0; // seconds it won't re-acquire prey after abandoning a chase
 const GIVEUP_ENERGY: f64 = 0.06; // ...or it abandons the chase early when this spent (stamina)
 
+// predation/combat behaviour (chunk c)
+const HUNT2: f64 = 34.0 * 34.0; // a predator breaks into a sprint for the kill once this close
+const FLEE_W: f64 = 2.6; // strong — overrides wander when running for your life
+const CHASE_W: f64 = 2.0;
+const FLEE_BOOST: f64 = 1.7; // panic-run speed multiplier
+const CHASE_BOOST: f64 = 1.45;
+const CONTACT_PAD: f64 = 0.4; // extra reach that counts as a catch
+const CAN_SPRINT: f64 = 0.03; // stamina above this can still sprint
+
 const ANIMAL_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround, Behavior::Sit, Behavior::Groom];
 const PERSON_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround];
 
@@ -152,7 +161,9 @@ pub struct World {
     seek_neighbors: Vec<u32>,      // reused scratch for a seek query (mem::take'd in → no per-agent alloc)
     player: (f64, f64),
     night: f64,                    // 0 day … 1 night → prey jumpier (wider danger radius)
-    forces: Vec<(f64, f64, u32)>,  // reused per-tick (fx, fz, crowd) buffer → no per-frame alloc
+    forces: Vec<(f64, f64, u32)>,  // reused per-tick (fx, fz, crowd) flock buffer → no per-frame alloc
+    behave: Vec<(f64, bool)>,      // reused per-tick (boost, pursuing) from the behaviour pass
+    kills: Vec<usize>,             // prey caught this tick → turned to corpses after the behaviour pass
 }
 
 impl Default for World {
@@ -173,6 +184,8 @@ impl World {
             player: (0.0, 0.0),
             night: 0.0,
             forces: Vec::new(),
+            behave: Vec::new(),
+            kills: Vec::new(),
         }
     }
 
@@ -239,15 +252,67 @@ impl World {
             self.forces[i] = f;
         }
 
-        // 4. step each agent (write the next positions)
+        // 4. behaviour — act on the targeting: FLEE a threat, else STALK + CATCH prey. Adds to the flock force
+        // and sets the sprint boost / forced-move, all from the previous positions (double-buffered). (Eating /
+        // stamina / sleep, plus player-scatter / rival / mobbing, are the next chunks.)
+        self.behave.clear();
+        self.behave.resize(n, (1.0, false));
+        self.kills.clear();
+        let hunt2 = HUNT2 * (1.0 + 0.4 * self.night); // keener at night
+        for i in 0..n {
+            if self.agents[i].dead {
+                continue;
+            }
+            let ax = self.agents[i].agent.x;
+            let az = self.agents[i].agent.z;
+            let a_max = self.agents[i].agent.max_speed;
+            let radius = self.agents[i].radius;
+            let can_sprint = self.agents[i].stamina > CAN_SPRINT;
+            let threat_pos = self.transient[i].threat.map(|t| (self.agents[t].agent.x, self.agents[t].agent.z));
+            let prey_info = self.transient[i].prey.map(|p| (p, self.agents[p].agent.x, self.agents[p].agent.z, self.agents[p].radius));
+            if let Some((tx, tz)) = threat_pos {
+                // flee the nearest hunter
+                let dx = ax - tx;
+                let dz = az - tz;
+                let d = dx.hypot(dz).max(0.1);
+                self.forces[i].0 += (dx / d) * a_max * FLEE_W;
+                self.forces[i].1 += (dz / d) * a_max * FLEE_W;
+                self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
+            } else if let Some((p, prx, prz, pr)) = prey_info {
+                // stalk toward prey; sprint once close; CATCH on contact
+                let dx = prx - ax;
+                let dz = prz - az;
+                let d = dx.hypot(dz).max(0.1);
+                let close = d * d < hunt2;
+                self.forces[i].0 += (dx / d) * a_max * CHASE_W;
+                self.forces[i].1 += (dz / d) * a_max * CHASE_W;
+                self.behave[i] = (if close && can_sprint { CHASE_BOOST } else { 1.0 }, true);
+                if close && d < radius + pr + CONTACT_PAD {
+                    self.kills.push(p); // caught — turned to a corpse below
+                    self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
+                }
+            }
+        }
+
+        // 5. apply kills → corpses (deferred so the behaviour pass reads only previous, live positions)
+        for k in 0..self.kills.len() {
+            let p = self.kills[k];
+            self.agents[p].dead = true;
+            self.agents[p].asleep = false;
+            self.agents[p].agent.vx = 0.0;
+            self.agents[p].agent.vz = 0.0;
+        }
+
+        // 6. step each agent (write the next positions)
         for i in 0..n {
             if self.agents[i].dead {
                 continue;
             }
             let (fx, fz, crowd) = self.forces[i];
+            let (boost, pursuing) = self.behave[i];
             self.agents[i].crowd = crowd;
             let menu = menu_for(self.agents[i].kind);
-            self.agents[i].agent.update(tick, DT, menu, Some((fx, fz)), 1.0, false);
+            self.agents[i].agent.update(tick, DT, menu, Some((fx, fz)), boost, pursuing);
         }
     }
 
@@ -554,5 +619,35 @@ mod tests {
         let claimers = cats.iter().filter(|&&c| w.transient[c].prey == Some(rabbit)).count();
         assert_eq!(claimers, MAX_HUNTERS as usize); // exactly 3 claim the one rabbit; the rest fan out
         assert_eq!(w.transient[rabbit].hunted_by, MAX_HUNTERS);
+    }
+
+    #[test]
+    fn predator_catches_prey() {
+        let mut w = World::new();
+        let cat = w.spawn(animal(0.0, 0.0, 10), Kind::Cat, 0.35, 10);
+        let rabbit = w.spawn(animal(0.5, 0.0, 11), Kind::Rabbit, 0.35, 11); // within contact (0.35+0.35+0.4)
+        assert!(!w.agents[rabbit].dead);
+        w.tick_once(1);
+        assert!(w.agents[rabbit].dead, "cat in contact should catch + kill the rabbit");
+        let _ = cat;
+        // a corpse stops + no longer flocks/targets
+        w.tick_once(2);
+        assert_eq!(w.agents[rabbit].agent.vx, 0.0);
+    }
+
+    #[test]
+    fn prey_flees_threat() {
+        // cat at -20, rabbit at origin → the rabbit should flee +x (faster than the cat chases) and pull away
+        let mut w = World::new();
+        let cat = w.spawn(animal(-20.0, 0.0, 10), Kind::Cat, 0.35, 10);
+        let rabbit = w.spawn(animal(0.0, 0.0, 11), Kind::Rabbit, 0.35, 11);
+        let gap0 = w.agents[cat].agent.x.hypot(0.0) - w.agents[rabbit].agent.x; // ~20
+        for t in 1..=60 {
+            w.tick_once(t);
+        }
+        assert!(!w.agents[rabbit].dead, "the rabbit is faster (FLEE_BOOST) → never caught");
+        assert!(w.agents[rabbit].agent.x > 1.0, "rabbit fled +x, got {}", w.agents[rabbit].agent.x);
+        let gap1 = (w.agents[rabbit].agent.x - w.agents[cat].agent.x).abs();
+        assert!(gap1 > gap0 - 1.0, "the rabbit kept its distance");
     }
 }
