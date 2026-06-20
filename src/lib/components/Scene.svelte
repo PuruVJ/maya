@@ -35,6 +35,7 @@
 	import Critter from './Critter.svelte';
 	import SkyDome from './SkyDome.svelte';
 	import { SKY_FOG, kindDef } from '$lib/kinds';
+	import { treeAt, treeRadius, onPath, SCATTER_STEP } from '$lib/scatter';
 	import { agentManager } from '$lib/agents.svelte';
 	import { setRustObstacles } from '$lib/rustSim';
 	import { playerState } from '$lib/playerState.svelte';
@@ -76,8 +77,39 @@
 	// the living kinds steer themselves (flocking) — every OTHER object is a solid prop that ambient
 	// animals must route around, so feed their footprints to the agent manager whenever the world changes
 	const CREATURES = new Set(['person', 'cat', 'lion', 'rabbit', 'kangaroo', 'dinosaur']);
+	type Obstacle = { x: number; z: number; r: number; hx?: number; hz?: number; cos?: number; sin?: number };
+	// the STATIC solids (placed props/buildings + ponds) — recomputed only when the world changes
+	let baseObstacles: Obstacle[] = [];
+	const TREE_FEED_R = 140; // feed the ambient-forest trunks within this radius of the player as obstacles
+	const TREE_REFEED2 = 24 * 24; // re-feed once the player has moved this far (the 140m radius gives margin)
+	let lastTreeFeedX = NaN;
+	let lastTreeFeedZ = NaN;
+
+	// The Rust sim has no ambient forest of its own (it's a deterministic per-cell function shared with the
+	// renderer + player — NOT bit-exact to port). So instead of porting the scatter, we feed the SAME trunks
+	// the renderer draws (treeAt, path-culled) near the player as circle-obstacles → animals route around the
+	// very trees you see, no divergence. Combined with the static props/ponds each feed.
+	function feedObstacles(px: number, pz: number): void {
+		const trees: Obstacle[] = [];
+		const c0 = Math.floor((px - TREE_FEED_R) / SCATTER_STEP);
+		const c1 = Math.floor((px + TREE_FEED_R) / SCATTER_STEP);
+		const d0 = Math.floor((pz - TREE_FEED_R) / SCATTER_STEP);
+		const d1 = Math.floor((pz + TREE_FEED_R) / SCATTER_STEP);
+		const paths = world.paths;
+		for (let ci = c0; ci <= c1; ci++) {
+			for (let cj = d0; cj <= d1; cj++) {
+				const tr = treeAt(ci, cj);
+				if (!tr || onPath(paths, tr.x, tr.z)) continue; // culled on roads → not drawn → don't collide
+				trees.push({ x: tr.x, z: tr.z, r: treeRadius(tr.scale) });
+			}
+		}
+		lastTreeFeedX = px;
+		lastTreeFeedZ = pz;
+		setRustObstacles([...baseObstacles, ...trees]); // the Rust sim resolves these solids (push-out, no tunnelling)
+	}
+
 	$effect(() => {
-		const props = world.objects
+		const props: Obstacle[] = world.objects
 			.filter((o) => !CREATURES.has(o.kind))
 			.map((o) => {
 				const def = kindDef(o.kind);
@@ -97,11 +129,11 @@
 		// ponds are obstacles too — animals route AROUND water (the player may still wade in). The organic blob
 		// BULGES out to ~1.03× size at some angles, so the avoidance radius must be a bit bigger than `size` or
 		// animals wander onto the bulges (looked like "cats walking on the lake").
-		const ponds = (world.zones ?? [])
+		const ponds: Obstacle[] = (world.zones ?? [])
 			.filter((z) => z.material === 'water')
 			.map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
-		const obstacles = [...props, ...ponds];
-		setRustObstacles(obstacles); // the Rust sim resolves these solids (push-out, no tunnelling)
+		baseObstacles = [...props, ...ponds];
+		feedObstacles(playerState.pos[0], playerState.pos[2]); // re-feed with the current near-forest
 	});
 
 	// Reveal objects a few per frame so a big batch ("add 120 cats") mounts gradually instead of all at once
@@ -194,6 +226,11 @@
 				}
 			}
 			visible = next;
+		}
+		// re-feed the near-forest trunks to the Rust collision as the player moves (coarse threshold — the 140m
+		// feed radius has margin, so animals always have the trees around them even before the next re-feed)
+		if (Number.isNaN(lastTreeFeedX) || (px - lastTreeFeedX) ** 2 + (pz - lastTreeFeedZ) ** 2 > TREE_REFEED2) {
+			feedObstacles(px, pz);
 		}
 		// time-slice the MOUNT of the near set (a few/frame) so striding into a dense block doesn't hitch
 		const n = visible.length;
