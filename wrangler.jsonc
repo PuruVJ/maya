@@ -1,0 +1,30 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "generative-webgame",
+	"main": ".svelte-kit/cloudflare/_worker.js",
+	"compatibility_date": "2025-06-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"assets": {
+		"binding": "ASSETS",
+		"directory": ".svelte-kit/cloudflare"
+	},
+	"observability": { "enabled": true }
+
+	// ── Future "Mother Nature" shared-world backend (docs/big-world.md) ───────────────────────────────
+	// The single ever-living world layers a DB-stored DELTA over the deterministic client-side base. Add
+	// these when that phase lands (mirror ~/Projects/puru-passport for the patterns):
+	//
+	//   "durable_objects": { "bindings": [{ "name": "REGION", "class_name": "Region" }] },
+	//   "migrations":      [{ "tag": "v1", "new_sqlite_classes": ["Region"] }],
+	//   "kv_namespaces":   [{ "binding": "KV", "id": "<silhouette/summary cache>" }],
+	//   "d1_databases":    [{ "binding": "DB", "database_name": "world", "database_id": "<id>" }]
+	//
+	// One Durable Object per region = authoritative delta + serialized writes (no conflicts) + an Alarm
+	// that runs that region's macro sim tick (settlements/populations/biomes + decay). Idle regions
+	// hibernate. "Mother Nature" (the LLM director / evolutionary engine) nudges via committed ops.
+	//
+	// ── Model weights ─────────────────────────────────────────────────────────────────────────────────
+	// The ~840 MB / ~280 MB fine-tunes in static/models/** are EXCLUDED from CF assets (25 MiB/file limit)
+	// via static/.assetsignore. For prod they live in R2 (or Hugging Face); point TUNED[...].url in
+	// src/lib/llm.svelte.ts at that absolute URL. Local `vite dev` keeps serving them from static/models/.
+}

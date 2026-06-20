@@ -1,0 +1,5 @@
+# Cloudflare Workers Static Assets honours this at the deployed assets root. The fine-tuned model weights
+# (static/models/**, ~840 MB / 68 MB shards) blow past CF's 25 MiB-per-file asset limit, so they are NEVER
+# uploaded. In prod they're served from R2 (or Hugging Face) — set TUNED[...].url in src/lib/llm.svelte.ts
+# to that absolute URL. Local `vite dev` still serves them from static/models/ as normal.
+models/

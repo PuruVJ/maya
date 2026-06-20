@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Crux Test — NL → ops (local LLM)</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #0d0f14; color: #e6e8ee; padding: 24px; max-width: 1100px; margin-inline: auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #8b93a7; margin: 0 0 20px; }
+  .sub b { color: #c7cdda; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;
+    padding: 14px; background: #151823; border: 1px solid #232838; border-radius: 12px; }
+  select, button {
+    font: inherit; padding: 8px 12px; border-radius: 9px; border: 1px solid #2c3146;
+    background: #1c2030; color: #e6e8ee; cursor: pointer;
+  }
+  select { min-width: 280px; }
+  button.primary { background: #3b6cf6; border-color: #3b6cf6; color: #fff; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #progress { color: #8b93a7; font-variant-numeric: tabular-nums; min-height: 18px; flex-basis: 100%; }
+  .stat { display: inline-flex; gap: 6px; align-items: baseline; padding: 6px 12px; background: #151823;
+    border: 1px solid #232838; border-radius: 9px; margin-right: 8px; }
+  .stat b { font-size: 18px; }
+  .stat.good b { color: #46d39a; } .stat.warn b { color: #f0c14b; } .stat.bad b { color: #f0726b; }
+  #summary { margin: 16px 0; min-height: 30px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 10px; border-bottom: 1px solid #1f2433; vertical-align: top; }
+  th { color: #8b93a7; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td.instr { width: 230px; font-weight: 500; }
+  td.lat { width: 90px; font-variant-numeric: tabular-nums; color: #aeb6c9; white-space: nowrap; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0a0c11; border: 1px solid #1c2030; border-radius: 8px; padding: 8px 10px; max-width: 480px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+  .pill.ok { background: rgba(70,211,154,.15); color: #46d39a; }
+  .pill.no { background: rgba(240,114,107,.15); color: #f0726b; }
+  .pill.q  { background: rgba(240,193,75,.15); color: #f0c14b; }
+  .err { color: #f0726b; font-size: 12px; }
+  a { color: #6f9bff; }
+  code { background:#1c2030; padding:1px 5px; border-radius:5px; }
+</style>
+</head>
+<body>
+  <h1>Crux test — can a small local model turn plain language into our ops?</h1>
+  <p class="sub">100% in-browser via <b>WebLLM + WebGPU</b>. No key, no server. Output is grammar-constrained to a fixed op vocabulary.
+     Needs Chrome/Edge (or another WebGPU browser). First load downloads model weights (cached after).</p>
+
+  <div class="bar">
+    <select id="model"></select>
+    <button id="load" class="primary">Load model</button>
+    <button id="run" disabled>Run all ▶</button>
+    <button id="clear" disabled>Reset rows</button>
+    <div id="progress">Pick a model and click “Load model”.</div>
+  </div>
+
+  <div id="summary"></div>
+  <table id="grid">
+    <thead><tr><th>Instruction</th><th>Emitted ops</th><th>Valid?</th><th>Intent?</th><th>Time</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+<script type="module">
+import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+
+/* ---------- the locked vocabulary (single source of truth) ---------- */
+const KINDS  = ["tree","pine","bush","flower","rock","house","cabin","tower","well","lamp","fence","bridge"];
+const GROUND = ["grass","sand","stone","snow","water","void"];
+const SKY    = ["day","night","sunset","space","fog"];
+const AREAS  = ["north","south","east","west","center","everywhere"];
+const ZONEMAT= ["water","path","plaza","sand","flowers","ice","lava","grass"];
+const SHAPE  = ["blob","rect","ring"];
+const TERRAIN= ["flat","hills","mountains","dunes","valley","plateau"];
+
+/* a tiny "current world" so remove/move/paint have ids to reference (mirrors real app context) */
+const WORLD = [
+  { id: "t1", kind: "tower", pos: [10,0,-5] },
+  { id: "h1", kind: "house", pos: [0,0,0] },
+];
+
+/* ---------- JSON schema → XGrammar constrains generation to exactly this ---------- */
+const VEC3 = { type:"array", items:{ type:"number" }, minItems:3, maxItems:3 };
+const OP_VARIANTS = [
+  { type:"object", additionalProperties:false, required:["op","kind","pos"],
+    properties:{ op:{const:"add"}, kind:{enum:KINDS}, pos:VEC3, scale:VEC3, color:{type:"string"}, rot:{type:"number"} } },
+  { type:"object", additionalProperties:false, required:["op","kind","count","area"],
+    properties:{ op:{const:"scatter"}, kind:{enum:KINDS}, count:{type:"integer"}, area:{enum:AREAS} } },
+  { type:"object", additionalProperties:false, required:["op","id"],
+    properties:{ op:{const:"remove"}, id:{type:"string"} } },
+  { type:"object", additionalProperties:false, required:["op","id","pos"],
+    properties:{ op:{const:"move"}, id:{type:"string"}, pos:VEC3 } },
+  { type:"object", additionalProperties:false, required:["op","id","color"],
+    properties:{ op:{const:"paint"}, id:{type:"string"}, color:{type:"string"} } },
+  { type:"object", additionalProperties:false, required:["op","value"],
+    properties:{ op:{const:"setGround"}, value:{enum:GROUND} } },
+  { type:"object", additionalProperties:false, required:["op","value"],
+    properties:{ op:{const:"setSky"}, value:{enum:SKY} } },
+  { type:"object", additionalProperties:false, required:["op","material","shape"],
+    properties:{ op:{const:"addZone"}, material:{enum:ZONEMAT}, shape:{enum:SHAPE}, at:{type:"string"}, pos:VEC3, size:{type:"number"} } },
+  { type:"object", additionalProperties:false, required:["op","material"],
+    properties:{ op:{const:"addPath"}, material:{enum:ZONEMAT}, from:{type:"string"}, to:{type:"string"}, width:{type:"number"} } },
+  { type:"object", additionalProperties:false, required:["op","preset"],
+    properties:{ op:{const:"setTerrain"}, preset:{enum:TERRAIN}, amplitude:{type:"number"} } },
+];
+const SCHEMA = {
+  type:"object", additionalProperties:false, required:["ops"],
+  properties:{ ops:{ type:"array", items:{ anyOf: OP_VARIANTS } } },
+};
+const SCHEMA_STR = JSON.stringify(SCHEMA);
+
+/* ---------- system prompt: vocabulary + 3 few-shot examples ---------- */
+const SYSTEM = `You are the world-builder engine for a 3D sandbox. The user describes a change in plain language; you reply with ONLY a JSON object {"ops":[ ... ]} — an ordered list of operations. No prose, no markdown.
+
+Use ONLY this vocabulary:
+- kinds: ${KINDS.join(", ")}
+- ground values: ${GROUND.join(", ")}
+- sky values: ${SKY.join(", ")}
+- scatter areas: ${AREAS.join(", ")}
+- zone materials: ${ZONEMAT.join(", ")}
+- zone shapes: ${SHAPE.join(", ")}
+- terrain presets: ${TERRAIN.join(", ")}
+
+Operations:
+- {"op":"add","kind":<kind>,"pos":[x,y,z],"scale":[sx,sy,sz],"color":"#rrggbb","rot":deg}  (scale, color, rot optional)
+- {"op":"scatter","kind":<kind>,"count":N,"area":<area>}   // one op spawns many — use for "forest/lots/many"
+- {"op":"remove","id":<id>}
+- {"op":"move","id":<id>,"pos":[x,y,z]}
+- {"op":"paint","id":<id>,"color":"#rrggbb"}
+- {"op":"setGround","value":<ground>}
+- {"op":"setSky","value":<sky>}
+- {"op":"addZone","material":<zoneMat>,"shape":<shape>,"at":<anchor|area>,"size":radius}   // lakes, ponds, plazas, flower fields
+- {"op":"addPath","material":"water"|"path","from":<anchor|area>,"to":<anchor|area>,"width":N}   // rivers, roads
+- {"op":"setTerrain","preset":<terrainPreset>,"amplitude":N}   // rolling hills, mountains — relief, not flat ground
+
+Anchors usable for at/from/to: here, front, north, south, east, west, center, near:<id>.
+
+Ground is the XZ plane, y is up, 1 unit ≈ 1m, the world spans roughly -50..50. Translate color words to hex (red=#b22222, white=#ffffff, blue=#4682b4, green=#2e8b57). Pick sensible numbers for vague amounts. Water features (lake, pond, puddle, pool) are addZone with material "water" — NOT the "well" kind (a well is only the small stone draw-water structure). When the user says "here", use at:"here"; only emit an explicit pos when real coordinates are spoken. To create a NEW object use add (with at:"near:<id>" for "next to X", e.g. "put a lamp by the tower" → add lamp at near:t1); use move ONLY to relocate an object that already exists — never move an existing object when the user is asking to place a new one beside it.
+
+Current world objects you may reference by id:
+${WORLD.map(o => `  ${o.id} = ${o.kind} at [${o.pos}]`).join("\n")}
+
+Examples:
+User: add a blue lamp at the edge
+{"ops":[{"op":"add","kind":"lamp","pos":[40,0,0],"color":"#4682b4"}]}
+User: plant a forest to the south and make it snowy
+{"ops":[{"op":"scatter","kind":"pine","count":24,"area":"south"},{"op":"setGround","value":"snow"}]}
+User: get rid of the house
+{"ops":[{"op":"remove","id":"h1"}]}
+User: dig a lake over to the east
+{"ops":[{"op":"addZone","material":"water","shape":"blob","at":"east","size":12}]}
+User: make rolling hills with a river down the middle
+{"ops":[{"op":"setTerrain","preset":"hills"},{"op":"addPath","material":"water","from":"north","to":"south","width":4}]}`;
+
+/* ---------- the 15 instructions, each with the op type(s) we expect ---------- */
+const TESTS = [
+  { t:"add a red tower on the hill",            expect:["add"] },
+  { t:"make it night",                          expect:["setSky"] },
+  { t:"5 pine trees in a row",                  expect:["add","scatter"] },
+  { t:"delete the tower",                       expect:["remove"] },
+  { t:"build a small village",                  expect:["add","scatter"] },
+  { t:"turn the ground to snow",                expect:["setGround"] },
+  { t:"scatter a forest in the north",          expect:["scatter"] },
+  { t:"move the house to the center",           expect:["move"] },
+  { t:"paint the tower white",                  expect:["paint"] },
+  { t:"add three houses near the water",        expect:["add","scatter"] },
+  { t:"make the sky a sunset",                  expect:["setSky"] },
+  { t:"put a well next to the house",           expect:["add"] },
+  { t:"remove the house",                       expect:["remove"] },
+  { t:"add a tall stone tower at 20, 0, 20",    expect:["add"] },
+  { t:"make a row of lamps along the path",     expect:["add","scatter"] },
+  // --- complex / scenery (the harder asks) ---
+  { t:"dig a big lake to the east",                       expect:["addZone"] },
+  { t:"make a small pond right here",                     expect:["addZone"] },
+  { t:"carve a river down the middle",                    expect:["addPath"] },
+  { t:"add rolling hills across the whole area",          expect:["setTerrain"] },
+  { t:"raise some mountains in the north",                expect:["setTerrain","scatter","add"] },
+  { t:"lay a stone path from the house to the well",      expect:["addPath","add"] },
+  { t:"build a lakeside village with a forest behind it", expect:["addZone","scatter","add"] },
+  { t:"a field of flowers in the south",                  expect:["addZone","scatter"] },
+  { t:"surround the house with a fence",                  expect:["add","scatter"] },
+  { t:"turn this into a snowy mountain scene at night",   expect:["setTerrain","setGround","setSky","scatter"] },
+];
+
+/* ---------- client-side validator (belt & suspenders on top of the grammar) ---------- */
+const isVec3 = v => Array.isArray(v) && v.length===3 && v.every(n => typeof n==="number");
+function validateOps(ops) {
+  const errs = [];
+  if (!Array.isArray(ops)) return ["`ops` is not an array"];
+  if (ops.length === 0) errs.push("empty ops array");
+  ops.forEach((o,i) => {
+    const p = `op[${i}]`;
+    switch (o.op) {
+      case "add":     if(!KINDS.includes(o.kind)) errs.push(`${p}: bad kind '${o.kind}'`); if(!isVec3(o.pos)) errs.push(`${p}: bad pos`); break;
+      case "scatter": if(!KINDS.includes(o.kind)) errs.push(`${p}: bad kind '${o.kind}'`); if(!AREAS.includes(o.area)) errs.push(`${p}: bad area '${o.area}'`); if(!(o.count>0)) errs.push(`${p}: bad count`); break;
+      case "remove":  if(typeof o.id!=="string") errs.push(`${p}: missing id`); break;
+      case "move":    if(typeof o.id!=="string") errs.push(`${p}: missing id`); if(!isVec3(o.pos)) errs.push(`${p}: bad pos`); break;
+      case "paint":   if(typeof o.id!=="string") errs.push(`${p}: missing id`); if(typeof o.color!=="string") errs.push(`${p}: bad color`); break;
+      case "setGround": if(!GROUND.includes(o.value)) errs.push(`${p}: bad ground '${o.value}'`); break;
+      case "setSky":    if(!SKY.includes(o.value)) errs.push(`${p}: bad sky '${o.value}'`); break;
+      case "addZone":   if(!ZONEMAT.includes(o.material)) errs.push(`${p}: bad material '${o.material}'`); if(!SHAPE.includes(o.shape)) errs.push(`${p}: bad shape '${o.shape}'`); break;
+      case "addPath":   if(!ZONEMAT.includes(o.material)) errs.push(`${p}: bad material '${o.material}'`); break;
+      case "setTerrain":if(!TERRAIN.includes(o.preset)) errs.push(`${p}: bad preset '${o.preset}'`); break;
+      default: errs.push(`${p}: unknown op '${o.op}'`);
+    }
+  });
+  return errs;
+}
+
+/* ---------- DOM ---------- */
+const $ = s => document.querySelector(s);
+const modelSel = $("#model"), loadBtn = $("#load"), runBtn = $("#run"), clearBtn = $("#clear");
+const progress = $("#progress"), summary = $("#summary"), tbody = $("#grid tbody");
+let engine = null;
+
+/* populate model list from WebLLM's prebuilt config, preferring small instruct models */
+const prefer = /(Llama-3\.2-(1B|3B)|Qwen2\.5-(0\.5B|1\.5B|3B))-Instruct/;
+const all = webllm.prebuiltAppConfig.model_list.map(m => m.model_id);
+const picks = all.filter(id => prefer.test(id));
+(picks.length ? picks : all).forEach(id => {
+  const opt = document.createElement("option");
+  opt.value = id; opt.textContent = id; modelSel.appendChild(opt);
+});
+// default to Qwen2.5-1.5B q4f16 (chosen model: 24/25 clean on the full crux set)
+const def = picks.find(id => /Qwen2\.5-1\.5B-Instruct-q4f16/.test(id))
+         || picks.find(id => /Qwen2\.5-1\.5B-Instruct/.test(id))
+         || picks.find(id => /1B-Instruct/.test(id))
+         || picks.find(id => /3B/.test(id));
+if (def) modelSel.value = def;
+
+function row(test) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td class="instr">${test.t}</td><td><pre class="ops">—</pre></td><td class="v"></td><td class="ix"></td><td class="lat"></td>`;
+  tbody.appendChild(tr);
+  return tr;
+}
+const rows = TESTS.map(row);
+
+loadBtn.onclick = async () => {
+  loadBtn.disabled = modelSel.disabled = true;
+  const id = modelSel.value;
+  // ask the browser to make this origin's storage non-evictable, so cached weights survive "forever"
+  if (navigator.storage?.persist) {
+    const persisted = await (navigator.storage.persisted?.() ) || await navigator.storage.persist();
+    progress.textContent = persisted
+      ? "Persistent storage granted — cached weights won't be auto-evicted. Loading…"
+      : "Note: storage is best-effort (browser may evict under disk pressure). Loading…";
+  }
+  try {
+    engine = await webllm.CreateMLCEngine(id, {
+      initProgressCallback: r => { progress.textContent = r.text; },
+    });
+    progress.textContent = `✓ ${id} ready. Click “Run all”.`;
+    runBtn.disabled = clearBtn.disabled = false;
+  } catch (e) {
+    progress.innerHTML = `<span class="err">Load failed: ${e.message}. Is WebGPU available? (chrome://gpu)</span>`;
+    loadBtn.disabled = modelSel.disabled = false;
+  }
+};
+
+async function runOne(test, tr) {
+  const pre = tr.querySelector(".ops"), v = tr.querySelector(".v"), ix = tr.querySelector(".ix"), lat = tr.querySelector(".lat");
+  pre.textContent = "…"; v.innerHTML = ix.innerHTML = lat.textContent = "";
+  const t0 = performance.now();
+  let raw = "";
+  try {
+    const reply = await engine.chat.completions.create({
+      messages: [{ role:"system", content: SYSTEM }, { role:"user", content: test.t }],
+      response_format: { type:"json_object", schema: SCHEMA_STR },
+      temperature: 0, max_tokens: 512,
+    });
+    raw = reply.choices[0].message.content;
+  } catch (e) {
+    pre.innerHTML = `<span class="err">${e.message}</span>`;
+    v.innerHTML = `<span class="pill no">error</span>`;
+    return { ok:false, intent:false };
+  }
+  const ms = Math.round(performance.now() - t0);
+  lat.textContent = (ms/1000).toFixed(1) + "s";
+
+  let parsed, ops, errs;
+  try { parsed = JSON.parse(raw); ops = parsed.ops; errs = validateOps(ops); }
+  catch { pre.textContent = raw; v.innerHTML = `<span class="pill no">bad JSON</span>`; return { ok:false, intent:false }; }
+
+  pre.textContent = JSON.stringify(ops, null, 1);
+  const ok = errs.length === 0;
+  v.innerHTML = ok ? `<span class="pill ok">valid</span>`
+                   : `<span class="pill no">invalid</span><div class="err">${errs.join("; ")}</div>`;
+  const intent = Array.isArray(ops) && ops.some(o => test.expect.includes(o.op));
+  ix.innerHTML = intent ? `<span class="pill ok">✓</span>` : `<span class="pill q">check</span>`;
+  return { ok, intent };
+}
+
+runBtn.onclick = async () => {
+  runBtn.disabled = clearBtn.disabled = loadBtn.disabled = true;
+  let valid=0, intent=0; const t0 = performance.now();
+  for (let i=0;i<TESTS.length;i++) {
+    progress.textContent = `Running ${i+1}/${TESTS.length}…`;
+    const r = await runOne(TESTS[i], rows[i]);
+    if (r.ok) valid++; if (r.intent) intent++;
+    renderSummary(valid, intent, i+1, performance.now()-t0);
+  }
+  progress.textContent = `Done.`;
+  runBtn.disabled = clearBtn.disabled = loadBtn.disabled = false;
+};
+
+clearBtn.onclick = () => rows.forEach(tr => {
+  tr.querySelector(".ops").textContent="—"; tr.querySelector(".v").innerHTML="";
+  tr.querySelector(".ix").innerHTML=""; tr.querySelector(".lat").textContent="";
+  summary.innerHTML="";
+});
+
+function renderSummary(valid, intent, done, elapsedMs) {
+  const cls = n => n===done ? "good" : n>=done*0.8 ? "warn" : "bad";
+  summary.innerHTML =
+    `<span class="stat ${cls(valid)}">valid grammar <b>${valid}/${done}</b></span>` +
+    `<span class="stat ${cls(intent)}">matched intent <b>${intent}/${done}</b></span>` +
+    `<span class="stat">avg <b>${(elapsedMs/done/1000).toFixed(1)}s</b></span>`;
+}
+</script>
+</body>
+</html>

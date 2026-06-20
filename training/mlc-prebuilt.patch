@@ -1,0 +1,67 @@
+diff --git a/python/mlc_llm/__init__.py b/python/mlc_llm/__init__.py
+index ee7da3a..3a20235 100644
+--- a/python/mlc_llm/__init__.py
++++ b/python/mlc_llm/__init__.py
+@@ -5,9 +5,7 @@ MLC Chat is the app runtime of MLC LLM.
+ 
+ from tvm import register_global_func
+ 
+-from . import protocol, serve
+ from .libinfo import __version__
+-from .serve import AsyncMLCEngine, MLCEngine
+ 
+ 
+ @register_global_func("runtime.disco.create_socket_session_local_workers", override=True)
+diff --git a/python/mlc_llm/interface/gen_config.py b/python/mlc_llm/interface/gen_config.py
+index 3be0193..44bb638 100644
+--- a/python/mlc_llm/interface/gen_config.py
++++ b/python/mlc_llm/interface/gen_config.py
+@@ -14,7 +14,10 @@ from mlc_llm.protocol.mlc_chat_config import MLCChatConfig
+ from mlc_llm.quantization import Quantization
+ from mlc_llm.support import convert_tiktoken, logging
+ from mlc_llm.support.style import bold, green, red
+-from mlc_llm.tokenizers import Tokenizer
++try:
++    from mlc_llm.tokenizers import Tokenizer
++except Exception:  # prebuilt CPU wheel: no compiled mlc.Tokenizer registration
++    Tokenizer = None
+ 
+ from .compiler_flags import ModelConfigOverride
+ 
+@@ -235,7 +238,11 @@ def gen_config(
+             logger.exception("%s with the exception below. Skipping", FAILED)
+ 
+     # 3.4. Detect tokenizer info
+-    mlc_chat_config.tokenizer_info = asdict(Tokenizer.detect_tokenizer_info(str(output)))
++    try:  # WORLDGEN_TOK_FALLBACK
++        mlc_chat_config.tokenizer_info = asdict(Tokenizer.detect_tokenizer_info(str(output)))
++    except Exception:
++        logger.warning("detect_tokenizer_info unavailable (no C++ lib); using Qwen2.5 byte_level defaults")
++        mlc_chat_config.tokenizer_info = {"token_postproc_method": "byte_level", "prepend_space_in_encode": False, "strip_space_in_decode": False}
+     logger.info("Detected tokenizer info: %s", mlc_chat_config.tokenizer_info)
+ 
+     # 3.5. Ensure added_tokens do not have duplicated added_tokens, a mistake from model releaser
+diff --git a/python/mlc_llm/support/auto_target.py b/python/mlc_llm/support/auto_target.py
+index 91b4e85..da89e82 100644
+--- a/python/mlc_llm/support/auto_target.py
++++ b/python/mlc_llm/support/auto_target.py
+@@ -5,7 +5,18 @@ from pathlib import Path
+ from typing import TYPE_CHECKING, Callable, List, Optional, Tuple  # noqa: UP035
+ 
+ from tvm import IRModule, relax
+-from tvm.contrib import ndk, tar, xcode
++try:
++    from tvm.contrib import tar
++except Exception:
++    tar = None
++try:
++    from tvm.contrib import ndk
++except Exception:
++    ndk = None
++try:
++    from tvm.contrib import xcode
++except Exception:
++    xcode = None
+ from tvm.ir.transform import Pass
+ from tvm.target import Target
+ from tvm_ffi import get_global_func, register_global_func
