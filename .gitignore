@@ -45,3 +45,5 @@ static/models/
 /target/
 crates/*/target/
 crates/*/pkg/
+# build:wasm now emits the web bundle here (served by SvelteKit at /worldsim/, like static/models/)
+/static/worldsim/

@@ -264,6 +264,11 @@ class AgentManager {
 		this.#night = Math.max(0, Math.min(1, n));
 	}
 
+	/** Current night value (0..1) — read by the optional Rust/WASM sim backend to mirror the day/night mood. */
+	get nightValue(): number {
+		return this.#night;
+	}
+
 	/** The world's paths (roads/rivers) — ambient trees are culled on them, so animals skip those ghost trunks. */
 	setPaths(paths: Path[]): void {
 		this.#paths = paths;
