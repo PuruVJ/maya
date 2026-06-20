@@ -10,7 +10,7 @@
 //! onto this in the next chunks; the `ManagedAgent` already carries that state, seeded by `make_managed`.
 
 use crate::clock::{SimClock, DT};
-use crate::eco::{self, eco, prize, slash_max, Hunts, Kind};
+use crate::eco::{self, eco, prize, sleep_secs, slash_max, Hunts, Kind};
 use crate::spatialhash::SpatialHashGrid;
 use crate::steering::{Agent, Behavior};
 
@@ -50,6 +50,11 @@ const HEAL: f64 = 0.04; // health/s regained while unharmed
 // tick, so its prey flip-flopped flee↔doze. Latched in `hungry`.
 const HUNGRY_LO: f64 = 0.5;
 const HUNGRY_HI: f64 = 0.72;
+
+// sleep (chunk d2)
+const SLEEP_MULT: f64 = 2.4; // recover this much faster while asleep
+const WAKE_REST: f64 = 3.0; // after waking, stay up at least this long before dozing again (anti sleep/wake flip)
+const WAKE_R: f64 = 2.0; // the player within this wakes a sleeper (TODO: scale with player speed → sneak mechanic)
 
 const ANIMAL_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround, Behavior::Sit, Behavior::Groom];
 const PERSON_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround];
@@ -176,6 +181,7 @@ pub struct World {
     forces: Vec<(f64, f64, u32)>,  // reused per-tick (fx, fz, crowd) flock buffer → no per-frame alloc
     behave: Vec<(f64, bool)>,      // reused per-tick (boost, pursuing) from the behaviour pass
     kills: Vec<usize>,             // prey caught this tick → turned to corpses after the behaviour pass
+    slept: Vec<bool>,              // was asleep AT TICK START → handled by the sleep pass, skipped elsewhere
 }
 
 impl Default for World {
@@ -198,6 +204,7 @@ impl World {
             forces: Vec::new(),
             behave: Vec::new(),
             kills: Vec::new(),
+            slept: Vec::new(),
         }
     }
 
@@ -253,26 +260,73 @@ impl World {
             self.target(i, danger2);
         }
 
-        // 3. compute every flock force from the previous positions (double-buffered → order-independent)
+        // 3. SLEEP — agents asleep AT TICK START (snapshot) recover faster, drift to a stop, and WAKE if
+        // disturbed (a hunter near, a fresh scare, or the player too close). They stay grid neighbours but do
+        // NOT act this tick (skipped in the flock/behaviour/metabolism/step passes via `slept`).
+        self.slept.clear();
+        self.slept.resize(n, false);
+        for i in 0..n {
+            self.slept[i] = self.agents[i].asleep && !self.agents[i].dead;
+        }
+        for i in 0..n {
+            if !self.slept[i] {
+                continue;
+            }
+            // heal + cooldown timers (the awake path does these in the metabolism pass)
+            self.agents[i].health = (self.agents[i].health + HEAL * DT).min(1.0);
+            if self.agents[i].spooked > 0.0 {
+                self.agents[i].spooked -= DT;
+            }
+            if self.agents[i].give_up_cd > 0.0 {
+                self.agents[i].give_up_cd -= DT;
+            }
+            if self.agents[i].wake_cd > 0.0 {
+                self.agents[i].wake_cd -= DT;
+            }
+            // recover faster while asleep (a carnivore's only non-eating recovery); run the sleep timer down
+            self.agents[i].stamina = (self.agents[i].stamina + RECOVER * self.agents[i].endurance * SLEEP_MULT * DT).min(1.0);
+            self.agents[i].sleep_timer -= DT;
+            // drift to a stop
+            let decay = (1.0 - 3.0 * DT).max(0.0);
+            self.agents[i].agent.vx *= decay;
+            self.agents[i].agent.vz *= decay;
+            let (vx, vz) = (self.agents[i].agent.vx, self.agents[i].agent.vz);
+            self.agents[i].agent.x += vx * DT;
+            self.agents[i].agent.z += vz * DT;
+            self.agents[i].agent.speed = vx.hypot(vz);
+            // wake check
+            let player_woke = (self.agents[i].agent.x - px).hypot(self.agents[i].agent.z - pz) < WAKE_R;
+            let disturbed = self.transient[i].near_predator || self.transient[i].threat.is_some() || self.agents[i].spooked > 0.0 || player_woke;
+            if self.agents[i].sleep_timer <= 0.0 || disturbed {
+                self.agents[i].asleep = false;
+                self.agents[i].meals = 0;
+                self.agents[i].wake_cd = WAKE_REST; // don't immediately re-doze (anti sleep/wake flip)
+                if player_woke && self.agents[i].rank < 4 {
+                    self.agents[i].spooked = self.agents[i].spooked.max(1.0); // prey startles awake → bolts
+                }
+            }
+        }
+
+        // 4. compute every AWAKE agent's flock force from the previous positions (double-buffered)
         self.forces.clear();
         self.forces.resize(n, (0.0, 0.0, 0));
         for i in 0..n {
-            if self.agents[i].dead {
+            if self.agents[i].dead || self.slept[i] {
                 continue;
             }
             let f = self.flock(i, px, pz);
             self.forces[i] = f;
         }
 
-        // 4. behaviour — act on the targeting: FLEE a threat, else STALK + CATCH prey. Adds to the flock force
-        // and sets the sprint boost / forced-move, all from the previous positions (double-buffered). (Eating /
-        // stamina / sleep, plus player-scatter / rival / mobbing, are the next chunks.)
+        // 5. behaviour — act on the targeting: FLEE a threat, else STALK + CATCH prey (+ EAT / food-coma).
+        // Adds to the flock force and sets the sprint boost / forced-move, from the previous positions.
+        // (player-scatter / huntPlayer / rival / mobbing are the remaining behaviour bits.)
         self.behave.clear();
         self.behave.resize(n, (1.0, false));
         self.kills.clear();
         let hunt2 = HUNT2 * (1.0 + 0.4 * self.night); // keener at night
         for i in 0..n {
-            if self.agents[i].dead {
+            if self.agents[i].dead || self.slept[i] {
                 continue;
             }
             let ax = self.agents[i].agent.x;
@@ -303,14 +357,19 @@ impl World {
                     self.kills.push(p); // caught — turned to a corpse below
                     self.agents[i].meals += 1;
                     self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
-                    // EAT — a kill refuels energy. (The food-coma after `full_after` kills needs the sleep
-                    // state, so it lands with chunk d2; here a meal always refuels.)
-                    self.agents[i].stamina = (self.agents[i].stamina + EAT_GAIN).min(1.0);
+                    // EAT — a kill refuels energy; once gorged (full_after kills) it drops into a food-coma
+                    if eco(self.agents[i].kind).full_after.map_or(false, |fa| self.agents[i].meals >= fa) {
+                        self.agents[i].stamina = self.agents[i].stamina.min(0.15);
+                        self.agents[i].asleep = true; // (takes effect next tick — this tick it's still awake)
+                        self.agents[i].sleep_timer = sleep_secs(self.agents[i].kind);
+                    } else {
+                        self.agents[i].stamina = (self.agents[i].stamina + EAT_GAIN).min(1.0);
+                    }
                 }
             }
         }
 
-        // 5. apply kills → corpses (deferred so the behaviour pass reads only previous, live positions)
+        // 6. apply kills → corpses (deferred so the behaviour pass reads only previous, live positions)
         for k in 0..self.kills.len() {
             let p = self.kills[k];
             self.agents[p].dead = true;
@@ -319,12 +378,11 @@ impl World {
             self.agents[p].agent.vz = 0.0;
         }
 
-        // 6. metabolism — sprinting + a carnivore's basal drain ebb stamina (the energy unit); prey/people
-        // rest-recover. The LATCHED hunger (hysteresis LO/HI) is the flip-flop fix: a carnivore commits to
-        // hunting below LO and won't resume until eating lifts it past HI. Plus slow healing + the cooldown
-        // timers. (Sleep / food-coma / wake → chunk d2; this pass currently runs for all live agents.)
+        // 7. metabolism (AWAKE agents) — sprinting + a carnivore's basal drain ebb stamina; prey/people
+        // rest-recover. The LATCHED hunger (hysteresis LO/HI) is the flip-flop fix. Plus slow healing, the
+        // cooldown timers, and the exhaustion-sleep trigger. (Asleep agents recovered in the sleep pass.)
         for i in 0..n {
-            if self.agents[i].dead {
+            if self.agents[i].dead || self.slept[i] {
                 continue;
             }
             let boost = self.behave[i].0;
@@ -357,11 +415,23 @@ impl World {
             if self.agents[i].wake_cd > 0.0 {
                 self.agents[i].wake_cd -= DT;
             }
+            // an exhausted carnivore lies down to sleep it off — but never with a threat / nearby peer / fresh
+            // scare keeping it on edge, and not right after waking (wake_cd → anti sleep/wake flip).
+            if is_carnivore
+                && self.agents[i].stamina <= 0.0
+                && self.agents[i].wake_cd <= 0.0
+                && self.agents[i].spooked <= 0.0
+                && self.transient[i].threat.is_none()
+                && !self.transient[i].near_predator
+            {
+                self.agents[i].asleep = true;
+                self.agents[i].sleep_timer = sleep_secs(self.agents[i].kind);
+            }
         }
 
-        // 7. step each agent (write the next positions)
+        // 8. step each AWAKE agent (write the next positions)
         for i in 0..n {
-            if self.agents[i].dead {
+            if self.agents[i].dead || self.slept[i] {
                 continue;
             }
             let (fx, fz, crowd) = self.forces[i];
@@ -756,5 +826,50 @@ mod tests {
         }
         assert!(w.agents[rabbit].stamina > 0.5, "a resting rabbit recovers");
         assert!(w.agents[cat].stamina < 0.5, "an idle carnivore's energy still ebbs");
+    }
+
+    #[test]
+    fn food_coma_after_full_after_kills() {
+        let mut w = World::new();
+        let lion = w.spawn(animal(50.0, 50.0, 5), Kind::Lion, 0.5, 5); // far from the player (no wake)
+        let rabbit = w.spawn(animal(50.6, 50.0, 6), Kind::Rabbit, 0.35, 6); // in contact
+        w.agents[lion].meals = 4; // one more kill → gorged (lion full_after = 5)
+        w.tick_once(1);
+        assert!(w.agents[rabbit].dead);
+        assert_eq!(w.agents[lion].meals, 5);
+        assert!(w.agents[lion].asleep, "the 5th kill drops the lion into a food-coma");
+        assert!(w.agents[lion].sleep_timer > 0.0);
+    }
+
+    #[test]
+    fn exhausted_carnivore_sleeps() {
+        let mut w = World::new();
+        let cat = w.spawn(animal(50.0, 50.0, 1), Kind::Cat, 0.35, 1); // alone, far from the player
+        w.agents[cat].stamina = 0.0;
+        w.tick_once(1);
+        assert!(w.agents[cat].asleep, "an exhausted carnivore with nothing threatening it sleeps");
+    }
+
+    #[test]
+    fn asleep_recovers_and_stays_asleep_undisturbed() {
+        let mut w = World::new();
+        let cat = w.spawn(animal(50.0, 50.0, 1), Kind::Cat, 0.35, 1);
+        w.agents[cat].asleep = true;
+        w.agents[cat].sleep_timer = 10.0;
+        w.agents[cat].stamina = 0.2;
+        w.tick_once(1);
+        assert!(w.agents[cat].asleep, "still asleep (timer not up, nothing disturbing)");
+        assert!(w.agents[cat].stamina > 0.2, "recovers faster while asleep");
+    }
+
+    #[test]
+    fn sleeper_wakes_when_a_hunter_nears() {
+        let mut w = World::new();
+        let rabbit = w.spawn(animal(50.0, 50.0, 1), Kind::Rabbit, 0.35, 1);
+        w.agents[rabbit].asleep = true;
+        w.agents[rabbit].sleep_timer = 10.0;
+        let _cat = w.spawn(animal(55.0, 50.0, 2), Kind::Cat, 0.35, 2); // 5 m away, hunting → marks the threat
+        w.tick_once(1);
+        assert!(!w.agents[rabbit].asleep, "a hunter within danger range startles the rabbit awake");
     }
 }
