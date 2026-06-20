@@ -157,12 +157,24 @@ export function tickRust(dt: number): void {
 	for (let i = 0; i < tracked.length; i++) tracked[i]?.agent.savePrev();
 	sim.step(dt);
 	refreshViews();
+	const TAU = Math.PI * 2;
 	for (let i = 0; i < tracked.length; i++) {
 		const m = tracked[i];
 		if (!m) continue;
-		m.agent.x = xs[i];
-		m.agent.z = zs[i];
-		m.agent.heading = headings[i];
+		const a = m.agent;
+		const nx = xs[i];
+		const nz = zs[i];
+		const nh = headings[i];
+		// derive speed + turnRate from the per-tick delta (prev pose was snapshot by savePrev above) so the
+		// renderers' gait (leg swing) + banking animate — the Rust read-back gives pose, not velocity.
+		a.speed = Math.hypot(nx - a.prevX, nz - a.prevZ) / dt;
+		let dh = nh - a.prevHeading;
+		while (dh > Math.PI) dh -= TAU;
+		while (dh < -Math.PI) dh += TAU;
+		a.turnRate = dh / dt;
+		a.x = nx;
+		a.z = nz;
+		a.heading = nh;
 		m.health = healths[i];
 		const f = flags[i];
 		m.dead = (f & 1) !== 0;
