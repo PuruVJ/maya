@@ -23,12 +23,28 @@
 	const bulbMat = new THREE.MeshStandardMaterial({ color: bulbColor, emissive: bulbColor, flatShading: true });
 	const haloMat = new THREE.MeshBasicMaterial({ color: '#ffdca0', transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
 
+	// warm LIGHT POOL cast on the ground beneath the lamp — a cheap additive radial disc (NO real point light),
+	// so a lamp actually lights its patch of ground at night instead of just glowing in the dark. Only near
+	// lamps mount (Scene's lazy reveal), so the additive overdraw is bounded → FPS-safe.
+	const POOL_R = 4.5;
+	const poolGeo = new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2);
+	const poolMat = new THREE.ShaderMaterial({
+		uniforms: { uOpacity: { value: 0 }, uColor: { value: new THREE.Color('#ffca7a') } },
+		transparent: true,
+		depthWrite: false,
+		blending: THREE.AdditiveBlending,
+		vertexShader: /* glsl */ `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+		fragmentShader: /* glsl */ `uniform float uOpacity; uniform vec3 uColor; varying vec2 vUv; void main(){ float d = distance(vUv, vec2(0.5)) * 2.0; float a = smoothstep(1.0, 0.12, d); a *= a; gl_FragColor = vec4(uColor, a * uOpacity); }`
+	});
+	poolMat.toneMapped = false;
+
 	// 0 (full day) → 1 (full night). bulb glows brighter and the halo fades in as it gets darker.
 	const NIGHT: Record<string, number> = { day: 0.08, sunset: 0.5, fog: 0.3, night: 1, space: 1 };
 	$effect(() => {
 		const n = NIGHT[world.sky] ?? 0.08;
 		bulbMat.emissiveIntensity = 0.25 + n * 1.6;
 		haloMat.opacity = n * 0.55;
+		poolMat.uniforms.uOpacity.value = n * 0.5; // warm ground pool fades in with the dark
 		const c = obj.color ?? bulb.color; // react to paint → recolour the bulb (glow follows its colour)
 		bulbMat.color.set(c);
 		bulbMat.emissive.set(c);
@@ -59,4 +75,6 @@
 		<!-- additive glow halo (a big soft sphere around the bulb; opacity tracks night) -->
 		<T.Mesh geometry={PRIM.sphere} position={bulb.pos} scale={2.4} material={haloMat} />
 	</T.Group>
+	<!-- warm light pool cast on the ground (additive radial disc, night-gated; not part of the pop-in) -->
+	<T.Mesh geometry={poolGeo} position={[0, 0.04, 0]} scale={[POOL_R * O.sx, 1, POOL_R * O.sz]} material={poolMat} />
 </T.Group>
