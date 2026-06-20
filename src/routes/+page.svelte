@@ -8,6 +8,7 @@
 	import Player from '$lib/components/Player.svelte';
 	import EditController from '$lib/components/EditController.svelte';
 	import BuildBar from '$lib/components/BuildBar.svelte';
+	import FpsPanel from '$lib/components/FpsPanel.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld } from '$lib/world';
@@ -146,10 +147,13 @@
 	style:box-shadow="inset 0 0 16vw 3vw rgba(150,0,0,0.6)"
 ></div>
 
+<!-- live FPS / frame-time meter, top-centre -->
+<FpsPanel />
+
 <!-- home compass — only once you've wandered off; the arrow points back to spawn, with the distance -->
 {#if homeDist > 60}
 	<div
-		class="pointer-events-none fixed left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-black/35 px-3 py-1 text-xs font-semibold text-white/85 backdrop-blur"
+		class="pointer-events-none fixed left-1/2 top-12 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-black/35 px-3 py-1 text-xs font-semibold text-white/85 backdrop-blur"
 	>
 		<span class="inline-block text-sm leading-none" style:transform="rotate({homeDeg}deg)">↑</span>
 		<span>home · {homeDist < 1000 ? Math.round(homeDist) + ' m' : (homeDist / 1000).toFixed(1) + ' km'}</span>
