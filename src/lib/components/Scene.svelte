@@ -12,6 +12,7 @@
 	import Terrain from './Terrain.svelte';
 	import AmbientScatter from './AmbientScatter.svelte';
 	import Skyline from './Skyline.svelte';
+	import SettlementGlows from './SettlementGlows.svelte';
 	import Chimneys from './Chimneys.svelte';
 	import DustPuffs from './DustPuffs.svelte';
 	import SpawnPuffs from './SpawnPuffs.svelte';
@@ -225,6 +226,7 @@
 <Terrain {world} />
 <AmbientScatter {world} />
 <Skyline {world} />
+<SettlementGlows {world} />
 <Chimneys {world} />
 <DustPuffs {world} />
 <SpawnPuffs {world} />

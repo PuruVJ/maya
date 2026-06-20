@@ -217,9 +217,11 @@ export const ZONE_TRANSLUCENT = new Set(['water', 'ice', 'lava']);
 // Distance fog per sky — kept light so you can see clear across the valley to the far side / city;
 // just enough haze that the far folded-over edge still dissolves softly near the top of the fold.
 export const SKY_FOG: Record<string, { color: string; density: number }> = {
-	day: { color: '#cfe0f2', density: 0.0012 },
-	night: { color: '#0c1830', density: 0.0017 },
-	sunset: { color: '#f0b07a', density: 0.0014 },
+	// Denser than before → a sense of dread + distance: far buildings dissolve into the murk, so a settlement
+	// reads from afar only as its lamp-GLOWS (SettlementGlows.svelte) until you walk in and the blocks reveal.
+	day: { color: '#cfe0f2', density: 0.0018 },
+	night: { color: '#0c1830', density: 0.0025 },
+	sunset: { color: '#f0b07a', density: 0.0021 },
 	space: { color: '#05060c', density: 0.0019 },
-	fog: { color: '#d6dade', density: 0.0045 }
+	fog: { color: '#d6dade', density: 0.005 }
 };
