@@ -28,11 +28,11 @@ mod world;
 mod steering;
 
 pub use clock::{SimClock, DT};
-pub use eco::{aggressive, eco, prize, sleep_secs, slash_max, speed_for, Eco, Hunts, Kind, DEFAULT_SLEEP_SECS};
+pub use eco::{aggressive, eco, kind_from_code, prize, sleep_secs, slash_max, speed_for, Eco, Hunts, Kind, DEFAULT_SLEEP_SECS};
 pub use rng::{hash, hash_keys, rand, seed_from};
 pub use spatialhash::SpatialHashGrid;
 pub use steering::{Agent, AgentOpts, Behavior};
-pub use world::{make_managed, ManagedAgent, World};
+pub use world::{make_managed, opts_for, ManagedAgent, Snapshot, World};
 
 // Thin wasm-bindgen surface — only compiled for the wasm target. JS calls in for the parity check now,
 // and (later) for the per-tick sim. Native `cargo test` skips this entirely.
@@ -55,5 +55,82 @@ mod wasm_api {
     #[wasm_bindgen]
     pub fn rng_seed_from(s: &str) -> u32 {
         crate::rng::seed_from(s)
+    }
+
+    // ───────────────────────── the agent-sim bridge ─────────────────────────
+    // One `Sim` per world. JS spawns agents (by kind-code + seedId), drives it with `step(dt)` once per frame
+    // (the Rust clock sub-steps to fixed DT internally), and reads transforms back as typed-array VIEWS over
+    // WASM memory — NEVER a JS↔WASM call per agent. Pointers are stable between spawns; re-fetch them after any
+    // `spawn` (the buffers may grow/reallocate) or if `memory.buffer` detaches on growth.
+    use crate::steering::Agent;
+    use crate::world::{opts_for, Snapshot, World};
+
+    #[wasm_bindgen]
+    pub struct Sim {
+        world: World,
+        snap: Snapshot,
+    }
+
+    #[wasm_bindgen]
+    impl Sim {
+        #[wasm_bindgen(constructor)]
+        pub fn new() -> Sim {
+            Sim { world: World::new(), snap: Snapshot::default() }
+        }
+
+        /// Spawn an agent from a kind-code (0 rabbit·1 cat·2 kangaroo·3 person·4 lion·5 dinosaur) + a stable
+        /// per-individual `seed_id` (its traits/speed key off this). Returns its index = its read-back slot.
+        pub fn spawn(&mut self, x: f64, z: f64, kind_code: u8, radius: f64, seed_id: i32) -> usize {
+            let kind = crate::eco::kind_from_code(kind_code);
+            let agent = Agent::new(x, z, seed_id, &opts_for(kind, seed_id));
+            self.world.spawn(agent, kind, radius, seed_id)
+        }
+
+        pub fn set_player(&mut self, x: f64, z: f64) {
+            self.world.set_player(x, z);
+        }
+
+        pub fn set_night(&mut self, n: f64) {
+            self.world.set_night(n);
+        }
+
+        /// Replace the lake-fish lure points from a flat [x0,z0,x1,z1,…] buffer.
+        pub fn set_fish(&mut self, xz: &[f64]) {
+            self.world.set_fish(xz);
+        }
+
+        /// Advance by real elapsed seconds (the clock emits N fixed-DT ticks), then refresh the read-back.
+        pub fn step(&mut self, real_dt: f64) {
+            self.world.step(real_dt);
+            self.snap.fill(&self.world);
+        }
+
+        pub fn count(&self) -> usize {
+            self.snap.xs.len()
+        }
+
+        /// 0..1 — how imminent a player-hunting predator is (eased; drives the UI danger vignette).
+        pub fn danger(&self) -> f64 {
+            self.world.danger
+        }
+
+        // Pointers into WASM linear memory for zero-copy typed-array views (length = `count()`):
+        //   new Float32Array(memory.buffer, sim.xs_ptr(), sim.count())   // likewise zs / headings / healths
+        //   new Uint32Array (memory.buffer, sim.flags_ptr(), sim.count())// bit0 dead · bit1 asleep · bit2 moving
+        pub fn xs_ptr(&self) -> *const f32 {
+            self.snap.xs.as_ptr()
+        }
+        pub fn zs_ptr(&self) -> *const f32 {
+            self.snap.zs.as_ptr()
+        }
+        pub fn headings_ptr(&self) -> *const f32 {
+            self.snap.headings.as_ptr()
+        }
+        pub fn healths_ptr(&self) -> *const f32 {
+            self.snap.healths.as_ptr()
+        }
+        pub fn flags_ptr(&self) -> *const u32 {
+            self.snap.flags.as_ptr()
+        }
     }
 }

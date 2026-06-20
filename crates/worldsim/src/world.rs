@@ -12,7 +12,7 @@
 use crate::clock::{SimClock, DT};
 use crate::eco::{self, eco, prize, sleep_secs, slash_max, Hunts, Kind};
 use crate::spatialhash::SpatialHashGrid;
-use crate::steering::{Agent, Behavior};
+use crate::steering::{Agent, AgentOpts, Behavior};
 
 const NEIGHBOR_RADIUS: f64 = 4.0; // also the grid cell size (flocking only)
 const DENSITY_THRESHOLD: f64 = 1.0; // a lone neighbour is cozy; spread ramps in from the 2nd
@@ -119,6 +119,58 @@ pub struct ManagedAgent {
 }
 
 /// Build a fully-seeded managed agent from its kind (so callers don't repeat the eco wiring).
+/// Default steering opts for a kind — mirrors the JS `Critter`/`Npc` Agent configs so the bridge can spawn an
+/// agent from just `(kind, seedId)`. People roam a wide leash and EXPLORE (high wanderlust → they disperse,
+/// don't clump); animals keep a tighter leash + loose flocks. `max_speed` is the per-individual eco roll.
+pub fn opts_for(kind: Kind, seed_id: i32) -> AgentOpts {
+    let max_speed = eco::speed_for(kind, seed_id);
+    if kind == Kind::Person {
+        AgentOpts { max_speed, home_radius: 40.0, wander_rate: 1.3, accel: 7.0, turn_speed: 5.0, wanderlust: 0.55 }
+    } else {
+        AgentOpts { max_speed, home_radius: 30.0, wander_rate: 1.3, accel: 7.0, turn_speed: 5.0, wanderlust: 0.3 }
+    }
+}
+
+/// A flat struct-of-arrays read-back the JS renderer consumes by index (no per-agent JS↔WASM calls). Filled
+/// from the AoS agent Vec after each tick; the wasm wrapper hands JS typed-array VIEWS over these buffers.
+#[derive(Default)]
+pub struct Snapshot {
+    pub xs: Vec<f32>,       // world X per agent
+    pub zs: Vec<f32>,       // world Z per agent
+    pub headings: Vec<f32>, // facing (radians)
+    pub healths: Vec<f32>,  // 0..1 (drives injury/blood/limp on the view side)
+    pub flags: Vec<u32>,    // bit0 = dead, bit1 = asleep, bit2 = moving (speed past a walk)
+}
+
+impl Snapshot {
+    /// Resize + fill every buffer from the world's current agents (stable order = spawn order = JS index).
+    pub fn fill(&mut self, world: &World) {
+        let n = world.agents.len();
+        self.xs.resize(n, 0.0);
+        self.zs.resize(n, 0.0);
+        self.headings.resize(n, 0.0);
+        self.healths.resize(n, 0.0);
+        self.flags.resize(n, 0);
+        for (i, m) in world.agents.iter().enumerate() {
+            self.xs[i] = m.agent.x as f32;
+            self.zs[i] = m.agent.z as f32;
+            self.headings[i] = m.agent.heading as f32;
+            self.healths[i] = m.health as f32;
+            let mut f = 0u32;
+            if m.dead {
+                f |= 1;
+            }
+            if m.asleep {
+                f |= 2;
+            }
+            if m.agent.speed > 1.0 {
+                f |= 4;
+            }
+            self.flags[i] = f;
+        }
+    }
+}
+
 pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> ManagedAgent {
     let e = eco(kind);
     let sm = slash_max(kind, seed_id);
@@ -1313,6 +1365,40 @@ mod tests {
         }
         assert!(w.agents[l1].health < h0, "two crowded apex rivals bleed in a scrap (got {})", w.agents[l1].health);
         assert!(w.agents[l2].health < h0, "...and both of them take blows");
+    }
+
+    #[test]
+    fn snapshot_mirrors_the_agents_by_index() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let r = w.spawn(animal(2.0, -3.0, 1), Kind::Rabbit, 0.35, 1);
+        let l = w.spawn(animal(20.0, 0.0, 2), Kind::Lion, 0.5, 2);
+        for t in 1..=20 {
+            w.tick_once(t);
+        }
+        let mut snap = Snapshot::default();
+        snap.fill(&w);
+        assert_eq!(snap.xs.len(), 2);
+        assert_eq!(snap.flags.len(), 2);
+        // buffers mirror the live agents by index (= spawn order = JS index)
+        assert_eq!(snap.xs[r], w.agents[r].agent.x as f32);
+        assert_eq!(snap.zs[l], w.agents[l].agent.z as f32);
+        assert_eq!(snap.headings[l], w.agents[l].agent.heading as f32);
+        assert!(snap.xs.iter().all(|v| v.is_finite()));
+        // a healthy, live, awake agent has no dead/asleep bits set
+        assert_eq!(snap.flags[r] & 3, 0, "a live awake agent sets neither dead nor asleep");
+        assert!((snap.healths[r] - w.agents[r].health as f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn opts_for_matches_the_view_configs() {
+        // people EXPLORE (wide leash + high wanderlust → disperse); animals keep a tighter leash
+        assert_eq!(opts_for(Kind::Person, 1).home_radius, 40.0);
+        assert_eq!(opts_for(Kind::Person, 1).wanderlust, 0.55);
+        assert_eq!(opts_for(Kind::Rabbit, 1).home_radius, 30.0);
+        assert_eq!(opts_for(Kind::Rabbit, 1).wanderlust, 0.3);
+        // max_speed is the per-individual eco roll
+        assert_eq!(opts_for(Kind::Cat, 100).max_speed, eco::speed_for(Kind::Cat, 100));
     }
 
     #[test]

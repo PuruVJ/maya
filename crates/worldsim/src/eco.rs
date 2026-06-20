@@ -49,6 +49,18 @@ pub struct Eco {
 
 pub const DEFAULT_SLEEP_SECS: f64 = 10.0;
 
+/// Stable u8 code ↔ Kind, for the JS bridge (JS passes a small int per spawn). Order = the enum order.
+pub const fn kind_from_code(code: u8) -> Kind {
+    match code {
+        0 => Kind::Rabbit,
+        1 => Kind::Cat,
+        2 => Kind::Kangaroo,
+        3 => Kind::Person,
+        4 => Kind::Lion,
+        _ => Kind::Dinosaur,
+    }
+}
+
 /// The eco profile for a kind (the `ECO` table).
 pub const fn eco(kind: Kind) -> Eco {
     match kind {
