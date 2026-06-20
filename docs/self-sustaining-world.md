@@ -472,9 +472,173 @@ Constraints + decisions (for whoever builds it):
 - Energy/grazing: one scalar add per agent + one grid-cell read = negligible vs the existing O(N·neighbours)
   steering. Food field is one `Float32Array`, regrown by amortizing a fraction of cells per frame.
 - Reproduction: gated by cooldown + density → rare per frame. Spawns reuse `makeManaged` (no heavy alloc).
-- Director: one LLM call / `DIRECTOR_PERIOD`. At 30 s that's ~2 calls/min — trivial next to interactive use,
-  and it runs in the existing Web Worker so it never blocks the render loop.
+- Director: one LLM call / nap. Runs in the existing Web Worker → never blocks the render loop.
 - Keep the global agent cap; surface counts in the debug pipe (`dlog`) to watch frame cost as populations swing.
+
+### 6.5 Concurrency — what runs off the main thread (DECIDED 2026-06-21)
+> **Platform target (DECIDED): latest Chrome only — last 2–3 versions — gated** ("works in Chrome" check on
+> load). So WebGPU, WASM threads, SharedArrayBuffer, OffscreenCanvas and bleeding-edge APIs are all freely
+> usable with **zero cross-browser fallback code**. Caveat that Chrome-only does NOT remove: `COOP`/`COEP` is a
+> security *header* (set on Cloudflare), not a browser feature — still required to enable SAB/threads, and it
+> still blocks cross-origin resources → keep model weights same-origin (R2). Tighten the existing WebGPU gate
+> in `llm.svelte.ts` to say "Chrome only."
+
+Principle: **move pure *compute* (work that produces data) to Web Workers; keep *rendering*, *input*, and
+*latency-critical control* on the main thread.** Not "move everything" — moving the wrong things hurts.
+
+- ✅ **LLM — already in a worker** (`llm-worker.ts`). Done. Mother Nature reuses it.
+- ✅ **The sim (`agentManager` tick) → a worker** — the big win at scale. Steering / food-chain
+  (O(N·neighbours)) / energy / breeding / spatial-hash is pure number-crunching. Run it in a worker, write
+  agent transforms into a **SharedArrayBuffer**; the render thread reads that buffer each frame and
+  **interpolates via `clock.alpha`** (the sub-tick getter — exactly its purpose). Determinism (`f(seed,tick)`)
+  makes this clean: the worker owns the truth; the main thread only feeds `dt`/`seek` and reads back. Do it
+  when the population grows (Phase 2+).
+- ✅ **Procedural generation → a worker** — region/city/forest/terrain primitives + meshing produce
+  geometry/instance buffers; generate in a worker, transfer the buffers in → **hitch-free region streaming**
+  (no frame spike realizing a town). Pairs with the deterministic base world ([big-world §4](./big-world.md)).
+- ✅ **Big World: a worker owns backend delta sync** (fetch/reconcile region deltas off the render loop).
+- ⚠️ **OffscreenCanvas for the main 3D render → SKIP.** Threlte builds the scene graph from **Svelte
+  components reacting to `$state` on the main thread** — that can't live in a worker. Full OffscreenCanvas
+  rendering ≈ abandoning Threlte (hand-managed scene + forwarded input + cross-boundary raycasting). Renderer
+  rewrite, not a perf tweak — not worth it for the POC.
+- ⚠️ **Player physics (Rapier) → SKIP** (keep main-thread): tied to input + camera per frame; offloading adds
+  a frame of latency → mushy control. It's one light character controller, not the bottleneck.
+- **Gotcha — SharedArrayBuffer needs cross-origin isolation (COOP/COEP).** Trivial to set on Cloudflare, BUT
+  COEP can block cross-origin fetches (e.g. model weights from a Hugging Face CDN) unless they send
+  `Cross-Origin-Resource-Policy`. Resolution: serve models from **our own R2** (same-origin → CORP is ours, so
+  COEP is fine — already the plan), OR skip SAB and use **transferable double-buffered `ArrayBuffer`s** via
+  `postMessage` (zero-copy, no COEP requirement, a bit more plumbing). R2 path → SAB is the clean choice.
+
+### 6.6 Rust/WASM sim core (URGENT — the FIRST thing built; see §7 Phase 0)
+The agent manager's hot loop (spatial hash, steering/flocking, O(N·neighbours) food-chain, energy/breed math)
+is exactly the kind of numeric code Rust/WASM eats for breakfast. **Decision: do it FIRST** — port the existing
+stable sim to Rust/WASM, verify parity, *then* build the loop-closers (§2) on top.
+
+> **Threading reality (don't be fooled): WASM does NOT run on its own thread.** A WASM export executes
+> *synchronously on whatever thread calls it* — call `tick()` from the main thread and it runs on (and blocks)
+> the main thread, just faster than JS. Only *compilation* (`instantiateStreaming`) is async/off-thread, not
+> execution; WASM threads need explicit Workers + SharedArrayBuffer. So to get the per-frame tick off the
+> render thread you still instantiate the `.wasm` **inside a Web Worker** (§6.5). (`engine.ts`'s `applyOps` is
+> occasional — a build / Mother Nature nudge, not 60 fps — so it's fine on the main thread regardless; it's the
+> per-frame TICK that needs the worker, and only at scale.)
+
+**Why it's unusually compelling here** (beyond raw speed):
+- **Same core, both sides.** Cloudflare Workers/DOs run WASM → the *same compiled sim* can run in the browser
+  worker AND the authoritative server tick ([big-world §3](./big-world.md)) → **identical deterministic
+  evolution, zero client/server divergence.** With the no-true-random north star, replay/time-travel is
+  bit-exact everywhere. This is the real prize.
+- **No GC** → kills the exact class of jank the JS sim keeps fighting (reused buffers, alloc-free flock force…).
+- **Deterministic floats** — WASM IEEE-754 is portable by spec (more reproducible than native); the squirrel
+  RNG is pure integer ops → ports to Rust trivially, determinism intact.
+- Struct-of-arrays over linear memory → cache-friendly, SIMD-able; slots into §6.5 (WASM-in-worker → SAB →
+  render reads + `clock.alpha` interpolation).
+
+**The boundary cost (why it's a real rewrite):** the win only lands if **all agent state lives in WASM linear
+memory** and `tick(dt)` is **one call per step** — crossing JS↔WASM per-agent kills it. Agents stop being rich
+JS objects; JS becomes thin glue reading typed-array views (transforms + `dead/asleep/lod` flags by index).
+Rendering, registration, Mother Nature, and the LLM stay JS. Clean split: **Rust owns sim state + tick; JS
+owns everything visible.**
+
+**Timing — DECIDED 2026-06-21: Rust-FIRST** (user call, overriding the earlier "do it later" lean). Rationale
+that flips the sequencing: we're **not porting a moving target** — the *current* sim core (spatial hash,
+steering/flocking, food-chain, combat, stamina) is already mature + stable, so porting it now is porting a
+KNOWN quantity. The new loop-closers (energy/breeding/genome/construction) then get built **directly in Rust
+on top** → avoids the build-in-JS-then-re-port double-work, and everything inherits worker/WASM + the shared
+CF server tick + bit-exact determinism from day one. Cheap AI authoring defuses the old "Rust iteration is
+slow" worry.
+
+**Two conditions (one is a real risk):**
+- **Coordinate with the game chat — the thing that bites.** Rust-first moves the engine's HOME to a Rust/WASM
+  core + a thin JS binding; new sim features are authored IN Rust. The game chat must **stop parallel JS
+  feature-work on `agents.svelte.ts` during the port** (or own the port). Two chats editing the sim in
+  parallel — JS in one, Rust in the other — is the one scenario that makes a mess. Make it an explicit handoff.
+- **Tunables stay data-driven** — the `ECO` table + steering weights live in a JS/JSON config the Rust reads,
+  so balancing stays instant (no recompile).
+
+**Port plan:** do it AS the §6.7 boundary refactor. Rust owns world + sim + clock + rng (the already-pure
+modules port cleanly; the squirrel RNG is pure int ops → trivial; floats stay deterministic per WASM spec),
+state lives in linear memory, exposed via wasm-bindgen as a `tick(dt)` call + typed-array buffer reads. JS
+keeps rendering / registration / Mother Nature / the LLM. THEN build the loop-closers (§2.1–2.8) in Rust, run
+it in the §6.5 worker, and later reuse the same `.wasm` on the CF server tick.
+
+### 6.7 The headless engine core (the KEYSTONE — enables §6.5, §6.6 + the server tick)
+**Decision (2026-06-21): formally split a headless ENGINE CORE (pure, non-reactive, framework-free) that the
+Svelte/Threlte VIEW calls.** Rationale: Svelte runes (`$state`) are a **view concern** — they can't run in a
+worker (correct observation), so reactivity must NOT be in the compute layer. The clean split makes all the
+perf moves above possible at once (you can't move `$state`/Threlte anywhere; a clean engine core you can).
+
+- **Already ~halfway there:** `engine.ts` (`applyOps`/world), `clock.ts`, `rng.ts`, `steering.ts`,
+  `spatialhash.ts`, `terrain.ts`, `water.ts`, `scatter.ts`, `world.ts`, `kinds.ts` are pure; **`agents.svelte.ts`
+  is already deliberately non-reactive** (plain objects, "NOT `$state` in the hot path") — engine-shaped despite
+  the filename. So this is consolidation + walling-off, **not a rewrite**.
+- **Reactive ring stays in the VIEW:** the Svelte components (`Scene`/`Critter`/`Npc`/`BuildBar`/HUD) + the
+  `$state` singletons (`playerState`, `editor`, `history`, `llm`).
+- **Boundary / "call it":** engine owns world + sim + clock + rng + region/terrain gen and exposes `step(dt)`,
+  `applyOps(ops)` (player builds AND Mother Nature), input/intent commands, and a **read surface** (direct
+  reads main-thread; a transferable/shared buffer when worker-ized). The view reads transforms/state each
+  frame → renders + interpolates (`clock.alpha`) + mirrors only HUD scalars into `$state`. Engine = `f(seed,
+  tick)`; view = a pure projection.
+- **This is the prerequisite for §6.5 (engine→worker), §6.6 (hot loop→Rust/WASM), and the shared CF server
+  tick (big-world §3).** One enabling refactor, three payoffs. Also just clarifies the codebase: engine =
+  "what is true," view = "how it looks."
+- **Caveat:** keep the **player controller low-latency** (view-side prediction / main-thread) even if the
+  ambient sim moves to a worker → the split may be "ambient engine in worker / player in view," not all-or-
+  nothing.
+- **Timing:** this boundary is established **by the Rust port itself** (§6.6 / §7 Phase 0) — it's the FIRST
+  thing, not a someday-refactor. The port carves engine-from-view as it goes.
+
+### 6.8 Multithreading the WASM sim (YES — at scale, LATER, thread-count-invariant)
+**Does it work?** Yes — WASM threads = shared `WebAssembly.Memory` + Web Workers + atomics; in Rust the easy
+path is **`wasm-bindgen-rayon`** (`par_iter`). Needs **COOP/COEP** — the *same* requirement as the SAB plan
+(§6.5), so once that's on, threads come ~free. Broad modern-browser support.
+
+**Does it make sense?** Yes, but **only at scale** — the per-tick force pass is data-parallel (build the
+neighbour grid, then each agent computes its next state from a *read-only* grid view → `par_iter`s cleanly).
+At POC scale (~120) single-threaded WASM is already fast and thread overhead would *lose*; the win is
+thousands-of-agents / big-world.
+
+**The hard constraint (north star): parallel must be BIT-IDENTICAL to single-threaded** — else replay /
+time-travel / client-server consistency break. Golden rule: **the result is invariant to thread count** (1
+thread ≡ 8 threads). Requires:
+- **Double-buffer** state (read prev tick, write next) → no same-tick cross-reads, no races, order-independent.
+- **Addressed RNG** keyed by `(tick, agentId, channel)` — *already the design*; each draw is addressed (not a
+  shared stream), so agents run in any order on any thread and get the same numbers. **This is the enabler.**
+- **Thread-count-invariant reductions** — per-agent neighbour sums (fixed grid order) are fine; avoid
+  order-dependent global float accumulation (fixed order or integers).
+
+**Server caveat:** Cloudflare's runtime is **single-threaded** — WASM threads/SAB aren't available there like
+in the browser. So the *same* `.wasm` runs **single-threaded on the CF server tick** (fine — coarse + low-freq).
+Threads are a **client-only scale knob**, and the "invariant to thread count" rule is exactly what guarantees
+the 8-thread browser and the single-thread server compute the identical world.
+
+**Sequencing:** NOT first. Phase 0 stays single-threaded (correctness + parity). Multithreading is a later
+opt-in once the single-threaded core is correct and N is genuinely large — don't pay the determinism-bug tax
+before you need the throughput.
+
+### 6.9 Scaling to "millions" — unified entities + tiered (LOD) simulation, NOT brute force
+**Decision (2026-06-21):** *everything is a mini-agent* — organisms, trees, AND houses share one lifecycle
+(age/energy/growth/decay/flags + a `kind` discriminant) in a single struct-of-arrays entity buffer. Uniform +
+clean in the Rust core.
+
+**But you cannot full-sim millions per tick — not threaded, not in any browser, not on one server.** A million
+neighbour-querying agents at 30 Hz is nobody's budget. Massive worlds (Dwarf Fortress, RimWorld, SimCity, MMOs)
+all use **tiered / LOD simulation**:
+- **Near (active region): full per-agent sim** — hundreds–low-thousands of real entities. This is what the
+  threaded WASM core (§6.8) is for.
+- **Far: entities collapse to AGGREGATE fields** — a distant forest = a *coverage/density* number that grows +
+  decays; a distant city = a *population stat*; NOT a million individual ticks. The "millions" live as cheap
+  per-region aggregates advanced by the coarse server tick ([big-world §3](./big-world.md)).
+- **Realize individuals on demand** — approaching a region spawns real entities deterministically from `seed` +
+  the aggregate (the §4 "silhouette → real on arrival" streaming). Leave → collapse back to stats.
+
+**Fidelity split (what persists vs what regenerates):**
+- **Durable** things (player/family-built structures, named settlements) persist EXACTLY as DB deltas.
+- **Ambient** individuals (the millions of rabbits/trees) are *statistically regenerated* from the seed — you
+  don't need the same individual rabbit to survive your absence, only the population trend. Keeps state bounded
+  AND makes "millions" tractable + deterministic.
+
+So: unified entity model ✓ + threaded WASM for the active thousands ✓ — the millions are **aggregate, with
+individuals realized on demand.** This is the same region/streaming model already chosen, applied to the sim.
 
 ---
 
@@ -484,19 +648,28 @@ Phased, cheapest-highest-impact first. **Each phase is shippable alone.**
 
 | # | Phase | Owner | Touches | Depends on |
 |---|---|---|---|---|
-| 1 | **Energy + starvation** (§2.1) | game chat | `agents.svelte.ts` (+food field) | — |
-| 2 | **Reproduction — gender, children, cycles** (§2.2–2.3) | game chat | `agents.svelte.ts`, ambient renderer (§5) | 1 |
-| 3 | **Genome + mutation** (§2.4) | game chat | `agents.svelte.ts`, `Critter.svelte` (size) | 2 |
-| 3b | **Emergent construction** — families build, cities self-assemble (§2.7) | game chat | `agents.svelte.ts` + `applyOps`, reuse `city.ts` | 2 (nicer w/ 3) |
+| **0** | **🚨 URGENT — Rust/WASM engine port (§6.6/§6.7)** — port the EXISTING sim to a headless Rust core, verify parity, run it in a worker. Everything else is built ON it. | game chat / coding chat | replaces `agents.svelte.ts` hot loop w/ a Rust/WASM core + thin JS binding; engine-from-view split | §1.6 done first (clock+rng-keyed, fixed-step) |
+| 1 | **Energy + starvation** (§2.1) — built **in Rust** | game chat | the Rust engine (+food field) | 0 |
+| 2 | **Reproduction — gender, children, cycles** (§2.2–2.3) — in Rust | game chat | the Rust engine, ambient renderer (§5) | 0, 1 |
+| 3 | **Genome + mutation** (§2.4) — in Rust | game chat | the Rust engine, `Critter.svelte` (size) | 2 |
+| 3b | **Emergent construction** — families build, cities self-assemble (§2.7) — in Rust | game chat | the Rust engine + `applyOps`, reuse `city.ts` | 2 (nicer w/ 3) |
 | 4 | **Director — narration only** (§3.1–3.3) | **this chat** | NEW `director.svelte.ts`, `worldSummary.ts`, HUD ticker | counts only (works pre-1) |
 | 5 | **Director — events & balancing** (§3.4) | **this chat** | director prompt + reuse `applyOps` | 4 (+ richer summary from 1) |
 | 6 | **Seasons / new ops** (§3.5) | this chat + game chat | `engine.ts`+`llm-prompt.ts` (lockstep), sim modifiers | 5 |
 | 7 | **Autopilot / time-lapse mode** (§3.1) | this chat | camera + clock `rate`, "Living World" toggle | 2, 4 |
-| 8 | **Time-travel checkpoint/replay** (§5.5) | game chat | NEW `SimHistory`, snapshot/restore of sim state | 1–3 |
+| 8 | **Time-travel checkpoint/replay** (§5.5) | game chat | `SimHistory` — with a Rust engine, a snapshot is just a **copy of the WASM linear-memory buffer** (trivial + fast) | 0–3 |
 
-**Before any of the above (foundations, DONE):** `clock.ts` + `rng.ts` are built + tested. The game chat's
-**first** step is §1.6 — drive the existing sim from `clock` at fixed `DT` and replace its `Math.random()`
-with the seeded `rng`. Everything deterministic (time travel, shared evolution) depends on that migration.
+**Order of operations:**
+1. **Foundations (DONE):** `clock.ts` + `rng.ts` (built + tested).
+2. **§1.6 first** — drive the *current* sim from `clock` at fixed `DT` + replace `Math.random()` with seeded
+   `rng` keyed by `(tick, seedId, channel)`. This makes the sim deterministic + worker-ready, which is the
+   precondition for a clean port. (Can be folded into the port itself.)
+3. **🚨 Phase 0 — the Rust/WASM engine port (URGENT, FIRST).** Port the existing stable sim to a headless Rust
+   core, verify parity with the JS behaviour, run it in a worker. **Coordinate with the game chat — they must
+   pause JS feature-work on `agents.svelte.ts` during the port** (two chats editing the sim in parallel, one
+   JS one Rust, is the failure mode). See §6.6.
+4. **Everything else (Phases 1+) is then built IN the Rust engine**, inheriting worker/WASM + the shared CF
+   server tick + bit-exact determinism for free.
 
 **Clean seam:** Phase 4 (the LLM Director, narration) needs **no `agents.svelte.ts` edit** — it reads
 populations through the already-public `agentManager.forEach()` and `world`. So this chat can build a

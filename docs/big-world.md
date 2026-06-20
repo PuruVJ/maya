@@ -36,19 +36,27 @@ The trap is "store the whole giant world in a DB." Don't. Split it in two:
 > This is the project's founding principle — **"ops/regions, not geometry"** — applied to the network layer:
 > ship the *recipe + the diff*, never the millions of objects.
 
-## 3. Who runs the sim — server-authoritative durable layer
-For "the world keeps evolving while you're away," the durable layer must be **server-authoritative**:
+## 3. Who runs the sim — the CLIENT does (browser-only), via lazy deterministic fast-forward
+**DECIDED 2026-06-21: the Rust/WASM sim runs ONLY in the browser. Cloudflare NEVER runs the sim** — it's pure
+storage + API + DDoS/abuse. No server-side tick, no server compute. (This is cheaper *and* simpler.)
 
-- A **backend sim tick** (cron / worker) advances the MACRO world on its own schedule: settlement growth +
-  decay, population summaries per region, biome spread/recession, big director events. It writes deltas to
-  the DB. This is the coarse, low-frequency truth (minutes/hours, not 30 Hz).
-- **Clients render + run the FINE detail locally**, deterministically from `(worldSeed, region, tick)` + the
-  durable deltas they fetch: per-agent walk/flee/graze motion, particle/shader life. None of this hits the
-  server — it's cosmetic confabulation over the authoritative coarse state (same trick as
-  [§1.6 fixed-timestep determinism](./self-sustaining-world.md#16-wiring-the-existing-sim-to-the-clock--rng-game-chat--required)).
-- **Authority rule** (carried over from the per-user spec, now networked): the server owns durable structures
-  + settlement/population truth; clients may *propose* changes (the player's builds, locally-simulated births)
-  which the server validates + commits. Player edits and AI-director ops both become committed deltas.
+"The world keeps evolving while you're away" still holds — without any server CPU — because the world is
+`f(seed, tick)` and **fast-forward is a built-in capability**:
+- Each region stores just `{ committed aggregate/deltas, lastTick }`. With no one nearby it is **FROZEN —
+  zero cost** (no alarm, no tick).
+- When a client **arrives** at a region, it reads `{state, lastTick}` and **deterministically fast-forwards
+  the cheap AGGREGATE** from `lastTick → now` (the LOD aggregate, not per-individual — see
+  [self-sustaining §6.9](./self-sustaining-world.md#69-scaling-to-millions--unified-entities--tiered-lod-simulation-not-brute-force)),
+  then realizes individuals for what's near. The player **cannot distinguish** "continuously simulated" from
+  "computed on arrival" — it's the same function. The world *appears* to have lived on, for $0 of server CPU.
+- On leave / commit, the client writes the new `{aggregate, lastTick, durable deltas}` back to the region DO.
+- **Determinism now guarantees client↔client consistency** (two players visiting the same region from the
+  same committed state compute the same world) + client-now↔client-later. That's *more* critical here, not
+  less — it's what makes a shared browser-run world coherent.
+
+Tradeoff (acceptable for ambient life): things needing *active* sim across two simultaneously-empty regions
+(a herd migrating between two unvisited areas) won't happen during full dormancy until visited; aggregate
+diffusion can approximate it later if wanted.
 
 ### 3.5 Backend = Cloudflare (DECIDED 2026-06-20)
 Cloudflare Workers (paid/Standard) + **Durable Objects** — DOs are almost purpose-built for this.
@@ -108,6 +116,9 @@ Cloudflare Workers (paid/Standard) + **Durable Objects** — DOs are almost purp
   patterns); mid → coarse proxies; near → fully realize the region (run the primitive, spawn real objects,
   wake the sim + fetch that region's durable deltas). It's real on arrival **by construction** — the
   silhouette and the realized town come from the *same* definition, so there's no bait-and-switch.
+  **Realize regions in a Web Worker** (generate geometry/instance buffers off-thread, transfer in) so
+  streaming never spikes the framerate; delta-sync runs in a worker too — see
+  [self-sustaining §6.5 Concurrency](./self-sustaining-world.md#65-concurrency--what-runs-off-the-main-thread-decided-2026-06-21).
 - `curveWorld.ts` (the Inception fold) + fog already hide the finite far edge → the horizon reads endless.
 
 ## 5. The full cycle of life — death + decay at every scale

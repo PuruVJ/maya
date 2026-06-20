@@ -39,3 +39,8 @@ training/*.log
 
 # local-served MLC model weights (~840MB; host on HF for prod)
 static/models/
+
+# Rust/WASM engine core — crate SOURCE is committed; build output is generated (`pnpm build:wasm`)
+# see docs/self-sustaining-world.md §6.6
+crates/*/target/
+crates/*/pkg/
