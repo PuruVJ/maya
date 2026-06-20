@@ -11,7 +11,7 @@
 	import { heightAt } from '$lib/terrain';
 	import { playerState } from '$lib/playerState.svelte';
 	import { Agent, Spring, type Behavior } from '$lib/steering';
-	import { agentManager, makeManaged, speedFor, type ManagedAgent } from '$lib/agents.svelte';
+	import { agentManager, makeManaged, speedFor, LOD2_DIST, type ManagedAgent } from '$lib/agents.svelte';
 	import { seedFrom } from '$lib/rng';
 	import { clock } from '$lib/clock';
 	import { PRIM, litMat, creatureMat, EYE_MAT, type CoatPattern } from '$lib/sharedAssets';
@@ -125,21 +125,35 @@
 
 	let phase = 0;
 	let t = 0;
+	// MESH-LOD: a far+alive agent is drawn by the instanced impostor (AgentImpostors), so it doesn't need its
+	// articulated ~15-node mesh hierarchy at all — we shed it (the `{#if showMesh}` below) to keep the scene
+	// graph small at herd scale (1000 agents). Spawned-far agents start mesh-LESS so a big scatter never builds
+	// 1000 bodies up front (the mount-storm hang). Corpses + the companion always keep their mesh.
+	const MESH_GRACE = 1.2; // seconds an agent stays meshed after going far → no thrash at the LOD2 boundary
+	const spawnDist = untrack(() => Math.hypot((obj?.pos[0] ?? 5) - playerState.pos[0], (obj?.pos[2] ?? 5) - playerState.pos[2]));
+	let showMesh = $state(untrack(() => companion || !!obj?.dead || spawnDist < LOD2_DIST));
+	let farTime = 0;
 
 	useTask((dt) => {
-		if (!group || !core) return;
 		t += dt;
 		if (sleeping !== managed.asleep) sleeping = managed.asleep; // toggle the zzz billboard
 		// companion pet → its wander-leash centre tracks you, so it trails along and never strays far (set
 		// before any early-out so it keeps following even if it briefly falls behind)
 		if (companion) agent.setHome(playerState.pos[0], playerState.pos[2]);
 
-		// far & ALIVE → the instanced impostor draws it, so skip all per-agent work (heightAt, matrix writes,
-		// gait). Corpses are NOT impostored, so the dead branch below still runs at any distance.
+		// far & ALIVE → the impostor draws it: hide the body and, after a short grace, SHED the mesh entirely.
+		// Corpses are NOT impostored, so the dead branch below still runs (keeps its mesh) at any distance.
 		if (managed.lod === 2 && !managed.dead) {
-			group.visible = false;
+			if (group) group.visible = false;
+			if (showMesh) {
+				farTime += dt;
+				if (farTime > MESH_GRACE) showMesh = false; // unmount the articulated body
+			}
 			return;
 		}
+		farTime = 0;
+		if (!showMesh) showMesh = true; // came near (or died) → remount the body (refs bind next frame)
+		if (!group || !core) return; // mesh still mounting this frame
 		group.visible = true;
 
 		agent.interpolate(clock.alpha); // smooth the fixed-rate (30 Hz) sim across render frames
@@ -314,32 +328,36 @@
 	});
 </script>
 
-<T.Group bind:ref={group} userData={{ objectId: obj?.id }}>
-	<T.Group bind:ref={core}>
-		{#if species === 'rabbit'}
-			{@render rabbitBody()}
-		{:else if species === 'kangaroo'}
-			{@render kangarooBody()}
-		{:else if species === 'lion'}
-			{@render lionBody()}
-		{:else if species === 'dinosaur'}
-			{@render dinoBody()}
-		{:else}
-			{@render catBody()}
+<!-- the articulated body is mounted only when NEAR (showMesh); a far+alive agent draws via the instanced
+     impostor instead, so the scene graph stays small at herd scale. -->
+{#if showMesh}
+	<T.Group bind:ref={group} userData={{ objectId: obj?.id }}>
+		<T.Group bind:ref={core}>
+			{#if species === 'rabbit'}
+				{@render rabbitBody()}
+			{:else if species === 'kangaroo'}
+				{@render kangarooBody()}
+			{:else if species === 'lion'}
+				{@render lionBody()}
+			{:else if species === 'dinosaur'}
+				{@render dinoBody()}
+			{:else}
+				{@render catBody()}
+			{/if}
+		</T.Group>
+
+		<!-- sleep "zzz" — a camera-facing cluster of glyphs that floats above a resting animal -->
+		{#if sleeping}
+			<Billboard position={[0, ZZZ_Y, 0]}>
+				<T.Group bind:ref={zzz}>
+					{@render zChar(0, 0, 0.22)}
+					{@render zChar(0.28, 0.34, 0.32)}
+					{@render zChar(0.64, 0.8, 0.46)}
+				</T.Group>
+			</Billboard>
 		{/if}
 	</T.Group>
-
-	<!-- sleep "zzz" — a camera-facing cluster of glyphs that floats above a resting animal -->
-	{#if sleeping}
-		<Billboard position={[0, ZZZ_Y, 0]}>
-			<T.Group bind:ref={zzz}>
-				{@render zChar(0, 0, 0.22)}
-				{@render zChar(0.28, 0.34, 0.32)}
-				{@render zChar(0.64, 0.8, 0.46)}
-			</T.Group>
-		</Billboard>
-	{/if}
-</T.Group>
+{/if}
 
 {#snippet zChar(x: number, y: number, s: number)}
 	<T.Group position={[x, y, 0]} scale={s}>

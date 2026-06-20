@@ -7,7 +7,7 @@
 	import * as THREE from 'three';
 	import { heightAt } from '$lib/terrain';
 	import { Agent, Spring, type Behavior } from '$lib/steering';
-	import { agentManager, makeManaged, speedFor, type ManagedAgent } from '$lib/agents.svelte';
+	import { agentManager, makeManaged, speedFor, LOD2_DIST, type ManagedAgent } from '$lib/agents.svelte';
 	import { seedFrom } from '$lib/rng';
 	import { clock } from '$lib/clock';
 	import { NPC, PRIM, creatureMat, EYE_MAT } from '$lib/sharedAssets';
@@ -83,18 +83,30 @@
 	const idlePhase = (H % 628) / 100; // 0–6.28, per-person → standing-idle sway/breath is desynchronised across a crowd
 	let phase = 0;
 	let t = 0;
+	// MESH-LOD (see Critter.svelte): a far+alive person is drawn by the instanced impostor, so shed the
+	// articulated body to keep the scene graph small at crowd scale. Spawned-far people start mesh-LESS.
+	const MESH_GRACE = 1.2; // seconds meshed after going far → no thrash at the LOD2 boundary
+	const spawnDist = untrack(() => Math.hypot(obj.pos[0] - playerState.pos[0], obj.pos[2] - playerState.pos[2]));
+	let showMesh = $state(untrack(() => !!obj.dead || spawnDist < LOD2_DIST));
+	let farTime = 0;
 
 	useTask((dt) => {
-		if (!group || !core) return;
 		t += dt;
 		// the manager already stepped `agent` this frame — we only read & render it
 
-		// far & ALIVE → the instanced impostor draws it, so skip all per-agent work (heightAt, matrix writes,
-		// gait). Corpses are NOT impostored, so the dead branch below still runs at any distance.
+		// far & ALIVE → the impostor draws it: hide and, after a short grace, SHED the mesh. Corpses are NOT
+		// impostored, so the dead branch below still runs (keeps its mesh) at any distance.
 		if (managed.lod === 2 && !managed.dead) {
-			group.visible = false;
+			if (group) group.visible = false;
+			if (showMesh) {
+				farTime += dt;
+				if (farTime > MESH_GRACE) showMesh = false;
+			}
 			return;
 		}
+		farTime = 0;
+		if (!showMesh) showMesh = true; // came near (or died) → remount (refs bind next frame)
+		if (!group || !core) return; // mesh still mounting this frame
 		group.visible = true;
 
 		agent.interpolate(clock.alpha); // smooth the fixed-rate (30 Hz) sim across render frames
@@ -160,9 +172,12 @@
 	});
 </script>
 
-<T.Group bind:ref={group} userData={{ objectId: obj.id }}>
-	<!-- objScale scales the whole avatar from the feet (group origin = ground); world pos is set on `group` -->
-	<T.Group bind:ref={core} scale={objScale}>
+<!-- the articulated body mounts only when NEAR (showMesh); a far+alive person draws via the instanced
+     impostor instead, so the scene graph stays small at crowd scale. -->
+{#if showMesh}
+	<T.Group bind:ref={group} userData={{ objectId: obj.id }}>
+		<!-- objScale scales the whole avatar from the feet (group origin = ground); world pos is set on `group` -->
+		<T.Group bind:ref={core} scale={objScale}>
 		<!-- torso · SHARED geometry + cached material -->
 		<T.Mesh position={[0, 1.05, 0]} geometry={NPC.torso} material={creatureMat(SHIRT)} castShadow />
 		<!-- head pivot -->
@@ -188,3 +203,4 @@
 		</T.Group>
 	</T.Group>
 </T.Group>
+{/if}

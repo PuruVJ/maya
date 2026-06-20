@@ -55,7 +55,9 @@ export function speedFor(kind: string, seedId: number): number {
 
 // render-side perf-flag thresholds (the only sim-ish constants left — used by assignPerfFlags / #assignShadows)
 const LOD1_DIST = 26;
-const LOD2_DIST = 62;
+// LOD2 = "far": the full articulated Critter/Npc mesh is shed and the agent draws via the instanced impostor.
+// Exported so those components can init their mesh-mounted state from spawn distance (avoid the mount storm).
+export const LOD2_DIST = 62;
 const SHADOW_AGENTS = 12; // only the nearest few cast shadows (shadows are the dominant cost at scale)
 
 export interface ManagedAgent {
