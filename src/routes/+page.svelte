@@ -77,14 +77,12 @@
 		editTimer = setTimeout(pushUrl, 500);
 		return () => clearTimeout(editTimer);
 	});
-	// (b) live animal state → 1 Hz, but skip the encode entirely when there are no animals (edit-effect covers those)
-	$effect(() => {
-		if (!liveUrl) return;
-		const id = setInterval(() => {
-			if (agentManager.liveSnapshot().size > 0) pushUrl();
-		}, 1000);
-		return () => clearInterval(id);
-	});
+	// (b) REMOVED for perf (2026-06-21) — the 1 Hz live-snapshot re-encode (gzip the WHOLE world + every agent
+	// position + replaceState) was a periodic main-thread STALL every second whenever animals were present
+	// (i.e. effectively always), dropping the frame rate even while standing still. Live agent POSITIONS no
+	// longer persist across reload (they respawn at their placed spots — a minor nicety); BUILDS still persist
+	// via the on-edit effect above, and Share captures the live moment on demand. The durable, ever-living
+	// world belongs in the DB (docs/big-world.md), not a per-second URL gzip. See docs/sim-decisions.md C2.
 
 	function reset() {
 		if (!confirm('Reset to the demo world? This clears everything you’ve built here.')) return;
