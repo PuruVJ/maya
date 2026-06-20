@@ -79,6 +79,10 @@ const COAT: Record<CoatPattern, string> = {
 		float crGrain = crNoise(vec2(vCreatureP.x * 34.0, vCreatureP.z * 7.0));
 		diffuseColor.rgb *= 0.88 + 0.22 * crGrain;`
 };
+// shared NIGHT level (0 day … 1 night) → drives a cool moonlit RIM on every creature so living things separate
+// from the dark backdrop and read as solid forms (one uniform object, like wind.uTime, referenced by every
+// cached creatureMat). Set by setEyeshine alongside the eyeshine.
+export const creatureNight = { value: 0 };
 const creatureCache = new Map<string, THREE.MeshStandardMaterial>();
 export function creatureMat(color: string, pattern: CoatPattern = 'plain'): THREE.MeshStandardMaterial {
 	const key = color + '|' + pattern;
@@ -86,6 +90,7 @@ export function creatureMat(color: string, pattern: CoatPattern = 'plain'): THRE
 	if (m) return m;
 	m = new THREE.MeshStandardMaterial({ color, flatShading: true });
 	m.onBeforeCompile = (shader) => {
+		shader.uniforms.uNight = creatureNight;
 		shader.vertexShader = shader.vertexShader
 			.replace('#include <common>', '#include <common>\nvarying vec3 vCreatureN;\nvarying vec3 vCreatureP;')
 			.replace(
@@ -96,6 +101,7 @@ export function creatureMat(color: string, pattern: CoatPattern = 'plain'): THRE
 			.replace(
 				'#include <common>',
 				/* glsl */ `#include <common>
+				uniform float uNight;
 				varying vec3 vCreatureN;
 				varying vec3 vCreatureP;
 				float crHash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -123,6 +129,14 @@ export function creatureMat(color: string, pattern: CoatPattern = 'plain'): THRE
 				float crAO = 0.72 + 0.28 * (vCreatureN.y * 0.5 + 0.5);          // undersides darker, tops lit
 				float crMott = crNoise(vCreatureP.xz * 6.0 + vCreatureP.y * 4.0); // faint coat tone variation
 				diffuseColor.rgb *= crAO * (0.93 + 0.14 * crMott);${COAT[pattern]}`
+			)
+			.replace(
+				'#include <emissivemap_fragment>',
+				/* glsl */ `#include <emissivemap_fragment>
+				// cool MOONLIT RIM — a grazing edge-light (Fresnel) only at night, so a creature lifts off the dark
+				// backdrop and reads as a solid form. Additive emissive, night-gated → daytime is byte-identical.
+				float crRim = pow(1.0 - clamp(dot(normalize(normal), normalize(vViewPosition)), 0.0, 1.0), 2.5);
+				totalEmissiveRadiance += vec3(0.40, 0.50, 0.72) * (crRim * uNight * 0.55);`
 			);
 	};
 	creatureCache.set(key, m);
@@ -407,6 +421,7 @@ export function setEyeshine(night: number): void {
 	EYE_PREY_MAT.emissiveIntensity = 0.7 * n;
 	EYE_PRED_MAT.emissiveIntensity = 1.15 * n;
 	EYE_HUNT_MAT.emissiveIntensity = 1.7 * n;
+	creatureNight.value = n; // the moonlit rim on every creature ramps with the night too
 }
 
 // Unit primitives — scale per body part via <T.Mesh scale={[w,h,d]}>. One geometry each, shared by
