@@ -9,10 +9,8 @@
 //! JS reference that re-implements the same logic with this same addressed RNG. The `Spring` helper (lerp
 //! secondary motion) is a VIEW concern and stays in JS.
 
-use crate::rng;
+use crate::simrng::{rand, range};
 
-/// = `rng::seed_from("worldgen-agents")` — the sim's base seed (verified by the rng parity tests).
-const BASE_SEED: u32 = 4_204_040_608;
 const TAU: f64 = std::f64::consts::TAU;
 const PI: f64 = std::f64::consts::PI;
 
@@ -29,15 +27,6 @@ const CH_HEADING: i32 = 10;
 const CH_EXPLORER: i32 = 11;
 const CH_PERSONALITY: i32 = 12;
 const CH_DURATION: i32 = 13;
-
-#[inline]
-fn rand(keys: &[i32]) -> f64 {
-    rng::rand(BASE_SEED, keys)
-}
-#[inline]
-fn range(lo: f64, hi: f64, keys: &[i32]) -> f64 {
-    lo + (hi - lo) * rand(keys)
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Behavior {

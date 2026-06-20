@@ -20,11 +20,14 @@
 //! JS implementation (pinned in `tests` against values produced by rng.ts).
 
 mod clock;
+mod eco;
 mod rng;
+mod simrng;
 mod spatialhash;
 mod steering;
 
 pub use clock::{SimClock, DT};
+pub use eco::{aggressive, eco, prize, sleep_secs, slash_max, speed_for, Eco, Hunts, Kind, DEFAULT_SLEEP_SECS};
 pub use rng::{hash, hash_keys, rand, seed_from};
 pub use spatialhash::SpatialHashGrid;
 pub use steering::{Agent, AgentOpts, Behavior};
