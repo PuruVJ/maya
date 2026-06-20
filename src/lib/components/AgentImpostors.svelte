@@ -122,7 +122,10 @@
 				animals.setColorAt(na, col.set(m.tint ?? KIND_COLOR[m.kind] ?? KIND_COLOR.cat));
 				// eyeshine: a far PREDATOR glints amber at you from the dark; prey a cool pale; corpses/day → none.
 				// (A hunting predator is always within ~24m → a near Critter, not an impostor, so it glares there.)
-				const glow = m.dead ? 0 : night * (PREDATORS.has(m.kind) ? 1.2 : 0.65);
+				// Living eyes BLINK — a brief, per-agent-staggered dim so the distant stare reads as ALIVE, not a
+				// static LED. Phase by seedId → unsynchronised; ~0.3s dim every ~7s; corpses (glow 0) unaffected.
+				const blink = Math.sin(wind.uTime.value * 0.9 + (m.seedId & 1023) * 0.0123) > 0.99 ? 0.06 : 1;
+				const glow = m.dead ? 0 : night * (PREDATORS.has(m.kind) ? 1.2 : 0.65) * blink;
 				const ec = PREDATORS.has(m.kind) ? EYE_PRED : EYE_PREY;
 				aEye[na * 3] = ec[0] * glow;
 				aEye[na * 3 + 1] = ec[1] * glow;
