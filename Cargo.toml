@@ -3,3 +3,8 @@
 [workspace]
 members = ["crates/worldsim"]
 resolver = "2"
+
+# release profile lives at the workspace root (cargo ignores member-package profiles)
+[profile.release]
+opt-level = 3
+lto = true

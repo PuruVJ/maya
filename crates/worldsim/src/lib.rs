@@ -22,10 +22,12 @@
 mod clock;
 mod rng;
 mod spatialhash;
+mod steering;
 
 pub use clock::{SimClock, DT};
 pub use rng::{hash, hash_keys, rand, seed_from};
 pub use spatialhash::SpatialHashGrid;
+pub use steering::{Agent, AgentOpts, Behavior};
 
 // Thin wasm-bindgen surface — only compiled for the wasm target. JS calls in for the parity check now,
 // and (later) for the per-tick sim. Native `cargo test` skips this entirely.
