@@ -5,11 +5,19 @@
 //! breeding / genome / construction) directly in Rust on top. JS keeps rendering / registration /
 //! Mother Nature / the LLM and reads agent transforms back as typed-array views.
 //!
+//! The sim runs BROWSER-ONLY (main thread or, at scale, a Web Worker — §6.5/§6.8); Cloudflare stores the
+//! durable deltas, it does NOT run the sim. Bit-exact determinism is what lets any visiting client
+//! fast-forward a dormant region from the same `(seed, state, lastTick)` to the IDENTICAL world (§6.9),
+//! and is the enabler for later thread-count-invariant multithreading (§6.8).
+//!
+//! Per §6.9 the eventual core is a UNIFIED entity buffer — organisms, trees, AND houses share one
+//! struct-of-arrays lifecycle with a `kind` discriminant; near regions full-sim, far ones collapse to
+//! aggregate fields realized on demand. (Not built yet — the port lands the pure modules first.)
+//!
 //! FIRST module ported here: the squirrel-noise RNG (mirrors src/lib/rng.ts) — the deterministic
-//! foundation everything else keys off. All math is pure `u32` wrapping arithmetic, so it is BIT-EXACT
-//! with the JS implementation (pinned in `tests` against values produced by rng.ts). That bit-exactness
-//! is the whole prize: a world evolves identically in the browser, a Web Worker, and the Cloudflare
-//! server tick → replay / time-travel / shared-world all reproduce exactly.
+//! foundation everything else keys off, and (addressed by `(tick, id, channel)`) the exact thing that
+//! makes order-independent parallelism bit-identical. Pure `u32` wrapping arithmetic → BIT-EXACT with the
+//! JS implementation (pinned in `tests` against values produced by rng.ts).
 
 mod rng;
 
