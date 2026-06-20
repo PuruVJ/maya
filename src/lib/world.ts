@@ -38,6 +38,32 @@ export interface TerrainFeature {
 	rough: number; // 0 = smooth mound, >0 = rolling ripple
 }
 
+/** Heal duplicate / missing object|zone|path ids in a world loaded from outside (a decoded share link or a
+ *  restored cache). Legacy worlds built before the zone/path id-counter fix could carry colliding 'p'/'z' ids
+ *  after a remove → Svelte `each_key_duplicate` crash on render. Reassigns any dup/missing id to a fresh unique
+ *  one (per-prefix, past the highest existing). Structural type → no World-import ordering. Mutates + returns. */
+export function repairIds<T extends { objects: { id: string }[]; zones?: { id: string }[]; paths?: { id: string }[] }>(world: T): T {
+	const fix = (items: { id: string }[] | undefined, prefix: string): void => {
+		if (!items) return;
+		let next = 0;
+		for (const it of items) {
+			if (it.id && it.id[0] === prefix) {
+				const v = parseInt(it.id.slice(1), 36);
+				if (Number.isFinite(v) && v >= next) next = v + 1;
+			}
+		}
+		const seen = new Set<string>();
+		for (const it of items) {
+			if (!it.id || seen.has(it.id)) it.id = prefix + (next++).toString(36);
+			seen.add(it.id);
+		}
+	};
+	fix(world.objects, 'o');
+	fix(world.zones, 'z');
+	fix(world.paths, 'p');
+	return world;
+}
+
 export interface World {
 	v: number;
 	name: string;

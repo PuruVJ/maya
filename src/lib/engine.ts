@@ -240,8 +240,23 @@ export function applyOps(
 	if (!world.zones) world.zones = [];
 	if (!world.paths) world.paths = [];
 	if (!world.terrain) world.terrain = [];
-	let zn = world.zones.length;
-	let pn = world.paths.length;
+	// zone/path id counters must start past the highest EXISTING id (not the array length) — after a remove a
+	// length-based next id collides with a survivor → duplicate 'p'/'z' keys → Svelte each_key_duplicate crash
+	// (the same guard the 'o' object ids have above; paths/zones lacked it — e.g. two 'pc' paths after a remove).
+	let zn = 0;
+	for (const z of world.zones) {
+		if (z.id[0] === 'z') {
+			const v = parseInt(z.id.slice(1), 36);
+			if (Number.isFinite(v) && v >= zn) zn = v + 1;
+		}
+	}
+	let pn = 0;
+	for (const p of world.paths) {
+		if (p.id[0] === 'p') {
+			const v = parseInt(p.id.slice(1), 36);
+			if (Number.isFinite(v) && v >= pn) pn = v + 1;
+		}
+	}
 	// never settle a solid object on a lake — placement routes around water (the blob shape the shader draws)
 	const water = (x: number, z: number) => inWater(world.zones, x, z);
 

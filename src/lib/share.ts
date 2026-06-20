@@ -1,7 +1,7 @@
 // "The world is a link." Pack the World into a compact positional form (short keys, arrays, and the
 // derived ground-Y dropped — recomputed from heightAt on load), gzip it with the browser-native
 // CompressionStream, and base64url it for the URL hash. No deps, no server. Round-trips via decode.
-import type { World } from './world';
+import { repairIds, type World } from './world';
 import { heightAt } from './terrain';
 
 const r1 = (n: number) => Math.round(n * 10) / 10;
@@ -105,7 +105,7 @@ export async function encodeWorld(w: World, live?: Live, player?: PlayerPos): Pr
 	return toB64url(await gzip(JSON.stringify(pack(w, live, player))));
 }
 
-/** `#w=` token → World (Y re-grounded from terrain; ids regenerated). */
+/** `#w=` token → World (Y re-grounded from terrain; ids regenerated + de-duplicated). */
 export async function decodeWorld(token: string): Promise<World> {
-	return unpack(JSON.parse(await gunzip(fromB64url(token))));
+	return repairIds(unpack(JSON.parse(await gunzip(fromB64url(token)))));
 }
