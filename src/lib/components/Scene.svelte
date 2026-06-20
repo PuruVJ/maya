@@ -36,6 +36,7 @@
 	import SkyDome from './SkyDome.svelte';
 	import { SKY_FOG, kindDef } from '$lib/kinds';
 	import { treeAt, treeRadius, onPath, SCATTER_STEP } from '$lib/scatter';
+	import { setEyeshine } from '$lib/sharedAssets';
 	import { agentManager } from '$lib/agents.svelte';
 	import { setRustObstacles } from '$lib/rustSim';
 	import { playerState } from '$lib/playerState.svelte';
@@ -72,7 +73,11 @@
 
 	// tell the food chain how nocturnal it is → prey jumpier, predators keener after dark
 	const NIGHTNESS: Record<string, number> = { day: 0, sunset: 0.4, fog: 0.25, night: 1, space: 1 };
-	$effect(() => agentManager.setNight(NIGHTNESS[world.sky] ?? 0));
+	$effect(() => {
+		const n = NIGHTNESS[world.sky] ?? 0;
+		agentManager.setNight(n);
+		setEyeshine(n); // animal eyes glow after dark (eyeshine) — predators brighter, a threat in the gloom
+	});
 
 	// the living kinds steer themselves (flocking) — every OTHER object is a solid prop that ambient
 	// animals must route around, so feed their footprints to the agent manager whenever the world changes

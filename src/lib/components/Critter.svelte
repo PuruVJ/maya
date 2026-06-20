@@ -14,7 +14,7 @@
 	import { agentManager, makeManaged, speedFor, LOD2_DIST, type ManagedAgent } from '$lib/agents.svelte';
 	import { seedFrom } from '$lib/rng';
 	import { clock } from '$lib/clock';
-	import { PRIM, litMat, creatureMat, EYE_MAT, type CoatPattern } from '$lib/sharedAssets';
+	import { PRIM, litMat, creatureMat, EYE_PREY_MAT, EYE_PRED_MAT, type CoatPattern } from '$lib/sharedAssets';
 	import type { World, WorldObject } from '$lib/world';
 
 	type Gait = 'quad' | 'hop' | 'bipedHop' | 'bipedWalk';
@@ -35,6 +35,8 @@
 	let { world, obj, species = 'cat', companion = false }: { world: World; obj?: WorldObject; species?: string; companion?: boolean } = $props();
 	const S = untrack(() => SPECIES[species] ?? SPECIES.cat);
 	const isHerb = untrack(() => species === 'rabbit' || species === 'kangaroo'); // grazers: nibble grass when idle
+	// predators get the warm/bright eyeshine (a threat watching from the dark); prey the cool pale glint
+	const eyeMat = untrack(() => (species === 'cat' || species === 'lion' || species === 'dinosaur' ? EYE_PRED_MAT : EYE_PREY_MAT));
 	// EFFECTIVE size = species scale × the requested obj.scale (averaged → uniform), so "a giant dinosaur" /
 	// "tiny cats" actually render (and collide + impostor) at that size. Was fixed to the species default,
 	// silently ignoring obj.scale on animals while buildings/props honour it.
@@ -371,8 +373,8 @@
 <!-- a pair of glossy dark eyes on the head front (child of the head group → they turn with the gaze, so the
 	 creature visibly LOOKS at you). dx=spacing, (y,z)=position on the head, s=size. Sized per species below. -->
 {#snippet eyes(dx: number, y: number, z: number, s: number)}
-	<T.Mesh geometry={PRIM.sphere} scale={[s, s, s]} position={[dx, y, z]} material={EYE_MAT} />
-	<T.Mesh geometry={PRIM.sphere} scale={[s, s, s]} position={[-dx, y, z]} material={EYE_MAT} />
+	<T.Mesh geometry={PRIM.sphere} scale={[s, s, s]} position={[dx, y, z]} material={eyeMat} />
+	<T.Mesh geometry={PRIM.sphere} scale={[s, s, s]} position={[-dx, y, z]} material={eyeMat} />
 {/snippet}
 
 {#snippet catBody()}

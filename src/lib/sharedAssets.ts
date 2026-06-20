@@ -385,9 +385,24 @@ export function leafColorHex(h: number): string {
 		: LEAF_AUTUMN[Math.min(LEAF_AUTUMN.length - 1, Math.floor(((h - 0.92) / 0.08) * LEAF_AUTUMN.length))];
 }
 
-// Shared glossy-dark EYE material for all critters — low roughness so the directional light leaves a tiny
-// catch-light, which reads as a living eye. One material for every animal (eyes use the shared PRIM.sphere).
+// Shared glossy-dark EYE material — low roughness so the directional light leaves a tiny catch-light, which
+// reads as a living eye. Used by PEOPLE (humans have no tapetum lucidum → no eyeshine, so it never glows).
 export const EYE_MAT = new THREE.MeshStandardMaterial({ color: '#16131c', roughness: 0.22, metalness: 0.0 });
+
+// ANIMAL eyes glow at NIGHT — eyeshine (a tapetum lucidum reflecting the moonlight). Two tones: PREY a cool
+// pale glint, PREDATORS a warmer, brighter amber so a hunter watching you from the dark reads as a threat.
+// Driven by `setEyeshine(night)` (Scene calls it from the sky) — emissiveIntensity ramps 0→glow after dark.
+export const EYE_PREY_MAT = new THREE.MeshStandardMaterial({ color: '#16131c', roughness: 0.22, emissive: '#b9d8c0' });
+export const EYE_PRED_MAT = new THREE.MeshStandardMaterial({ color: '#1a1410', roughness: 0.22, emissive: '#ffb347' });
+EYE_PREY_MAT.emissiveIntensity = 0;
+EYE_PRED_MAT.emissiveIntensity = 0;
+/** Ramp the animal eyeshine with how nocturnal it is (0 day … 1 night). Shared mats → one call lights every
+ *  animal's eyes (predators brighter). Day → 0 (eyes just dark with a catch-light, like the human EYE_MAT). */
+export function setEyeshine(night: number): void {
+	const n = Math.max(0, Math.min(1, night));
+	EYE_PREY_MAT.emissiveIntensity = 0.7 * n;
+	EYE_PRED_MAT.emissiveIntensity = 1.15 * n;
+}
 
 // Unit primitives — scale per body part via <T.Mesh scale={[w,h,d]}>. One geometry each, shared by
 // every animal part (scaling a shared geometry is free — no extra GPU upload), so the distinct
