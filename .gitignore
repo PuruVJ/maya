@@ -42,5 +42,6 @@ static/models/
 
 # Rust/WASM engine core — crate SOURCE is committed; build output is generated (`pnpm build:wasm`)
 # see docs/self-sustaining-world.md §6.6
+/target/
 crates/*/target/
 crates/*/pkg/
