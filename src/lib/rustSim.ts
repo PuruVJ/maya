@@ -19,6 +19,7 @@
  */
 import { base } from '$app/paths';
 import { agentManager, type ManagedAgent } from './agents.svelte';
+import { fishRegistry } from './fish.svelte';
 import { playerState } from './playerState.svelte';
 
 // kind string → the stable code the Rust `kind_from_code` expects (enum order: see crates/worldsim/src/eco.rs)
@@ -30,6 +31,7 @@ interface RustSim {
 	spawn(x: number, z: number, kindCode: number, radius: number, seedId: number): number;
 	set_player(x: number, z: number): void;
 	set_night(n: number): void;
+	set_fish(xz: Float64Array): void;
 	set_obstacles(flat: Float64Array): void;
 	step(dt: number): void;
 	count(): number;
@@ -160,6 +162,7 @@ export function tickRust(dt: number): void {
 	syncRoster();
 	sim.set_player(playerState.pos[0], playerState.pos[2]);
 	sim.set_night(agentManager.nightValue);
+	feedFish();
 	// snapshot prev pose BEFORE the step so interpolate(alpha) blends prev→new (mirrors agents.svelte.ts:428)
 	for (let i = 0; i < tracked.length; i++) tracked[i]?.agent.savePrev();
 	sim.step(dt);
@@ -178,4 +181,31 @@ export function tickRust(dt: number): void {
 	// the Rust read-back has positions but not the per-agent perf flags — recompute LOD + shadow budget so the
 	// impostor/shadow culling (and thus FPS) is identical to the JS path.
 	agentManager.assignPerfFlags(playerState.pos[0], playerState.pos[2]);
+	// mirror the eased Rust danger onto playerState so the UI vignette swells/fades (the JS tick — which would
+	// otherwise write this — doesn't run in rust mode).
+	playerState.danger = sim.danger();
+}
+
+// reused buffer for the lure points fed to the Rust sim each tick (fish move every frame, so re-feed)
+let fishScratch = new Float64Array(0);
+
+/** Push the live lake-fish positions into the Rust sim so an idle cat is lured to the bank (the pond obstacle
+ *  then stops it dry). Reuses a scratch buffer; feeds an empty set to clear when the last school unregisters. */
+function feedFish(): void {
+	if (!sim) return;
+	const fc = fishRegistry.count;
+	if (fc === 0) {
+		if (fishScratch.length > 0) {
+			fishScratch = new Float64Array(0);
+			sim.set_fish(fishScratch);
+		}
+		return;
+	}
+	if (fishScratch.length !== fc * 2) fishScratch = new Float64Array(fc * 2);
+	let i = 0;
+	fishRegistry.forEach((f) => {
+		fishScratch[i++] = f.x;
+		fishScratch[i++] = f.z;
+	});
+	sim.set_fish(fishScratch);
 }

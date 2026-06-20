@@ -17,6 +17,18 @@ class FishRegistry {
 		return () => this.#schools.delete(school);
 	}
 
+	/** Total live fish across all schools — for sizing the Rust sim's lure buffer. */
+	get count(): number {
+		let n = 0;
+		for (const s of this.#schools) n += s.length;
+		return n;
+	}
+
+	/** Visit every live fish position — used to feed the Rust sim's lure points (it owns no fish of its own). */
+	forEach(cb: (f: FishPos) => void): void {
+		for (const s of this.#schools) for (const f of s) cb(f);
+	}
+
 	/** Nearest fish to (x, z) within `maxD` metres, or null — used to lure cats to the water's edge. */
 	nearest(x: number, z: number, maxD: number): FishPos | null {
 		let best: FishPos | null = null;
