@@ -34,6 +34,10 @@ const GIVEUP_ENERGY: f64 = 0.06; // ...or it abandons the chase early when this 
 const MOB_MIN: u32 = 4; // this many prey fleeing ONE hunter flips them flee → swarm
 const MOB_RELEASE: u32 = 3; // hysteresis: a mobbed hunter stays mobbed until the swarm thins BELOW this
 const MOB_W: f64 = 2.2; // converge force as the mob charges the predator
+const MOB_KILL_DPS: f64 = 0.03; // health/s a hunter loses PER attacker pressed against it (size+health combo)
+const SLASH_CD: f64 = 1.2; // seconds between a cornered hunter's retaliatory slashes (each kills one attacker)
+const HURT_AT: f64 = 0.45; // below this health an animal is injured → limps (HURT_SPEED) and flees
+const HURT_SPEED: f64 = 0.6; // injured locomotion multiplier (so a healthy hunter can run it down)
 
 // predation/combat behaviour (chunk c)
 const HUNT2: f64 = 34.0 * 34.0; // a predator breaks into a sprint for the kill once this close
@@ -159,6 +163,7 @@ pub struct Transient {
     pub mob_count: u32,         // prey currently fleeing THIS agent → ≥MOB_MIN swarms it
     mob_x: f64,                 // running sum of those mobbers' positions → their centroid (for break-away)
     mob_z: f64,
+    pub attackers: u32,         // mobbers actually pressed into CONTACT → they wound it; it slashes them
 }
 
 impl Transient {
@@ -175,6 +180,7 @@ impl Transient {
             mob_count: 0,
             mob_x: 0.0,
             mob_z: 0.0,
+            attackers: 0,
         }
     }
 }
@@ -299,10 +305,18 @@ impl World {
                 continue;
             }
             if let Some(t) = self.transient[i].threat {
-                let (mx, mz) = (self.agents[i].agent.x, self.agents[i].agent.z);
+                let mx = self.agents[i].agent.x;
+                let mz = self.agents[i].agent.z;
                 self.transient[t].mob_count += 1;
                 self.transient[t].mob_x += mx;
                 self.transient[t].mob_z += mz;
+                // a mobber pressed into contact is actively attacking → it wounds the hunter + can be slashed
+                let dx = mx - self.agents[t].agent.x;
+                let dz = mz - self.agents[t].agent.z;
+                let reach = self.agents[i].radius + self.agents[t].radius + CONTACT_PAD + 0.4;
+                if dx * dx + dz * dz < reach * reach {
+                    self.transient[t].attackers += 1;
+                }
             }
         }
 
@@ -399,6 +413,10 @@ impl World {
             let threat_pos = self.transient[i].threat.map(|t| (self.agents[t].agent.x, self.agents[t].agent.z));
             let prey_info = self.transient[i].prey.map(|p| (p, self.agents[p].agent.x, self.agents[p].agent.z, self.agents[p].radius));
             let mobbed = self.agents[i].mobbed; // a hunter swarmed by ≥MOB_MIN prey (latched, §2c)
+            if !mobbed {
+                self.agents[i].slash_budget = self.agents[i].slash_max; // fresh ferocity for the next fight
+                self.agents[i].slash_cd = 0.0;
+            }
 
             // HUNT-PLAYER — a LONE (crowd<3) apex (rank≥4) predator, hungry + not otherwise busy, stalks the
             // player when you're within reach AND closer than its animal prey. Non-lethal (you're uncatchable);
@@ -433,6 +451,21 @@ impl World {
                 self.forces[i].0 += (dx / d) * a_max * FLEE_W;
                 self.forces[i].1 += (dz / d) * a_max * FLEE_W;
                 self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
+                // ...but if it CAN'T shake the attackers pressed against it, they WOUND it (faster the more of
+                // them, and the weaker it already is) while it SLASHES back — thinning the mob in real time
+                // until its ferocity is spent and the survivors drag it down.
+                let attackers = self.transient[i].attackers;
+                if attackers >= MOB_MIN {
+                    self.agents[i].health = (self.agents[i].health - MOB_KILL_DPS * attackers as f64 * DT).max(0.0);
+                    self.agents[i].slash_cd -= DT;
+                    if self.agents[i].slash_cd <= 0.0 && self.agents[i].slash_budget > 0 {
+                        if let Some(victim) = self.nearest_attacker(i) {
+                            self.kills.push(victim); // slashed dead (corpse applied below)
+                            self.agents[i].slash_budget -= 1;
+                            self.agents[i].slash_cd = SLASH_CD;
+                        }
+                    }
+                }
             } else if let Some((tx, tz)) = threat_pos {
                 // if the hunter is MOBBED the herd has the numbers → CHARGE it (drive it off); else FLEE it
                 let threat_mobbed = self.transient[i].threat.map_or(false, |t| self.agents[t].mobbed);
@@ -508,6 +541,11 @@ impl World {
                     self.forces[i].1 += (adz / ad) * a_max * AVOID_W * w;
                 }
             }
+
+            // a wound makes it LIMP — caps every gait (flee / charge / walk) so a healthy hunter runs it down
+            if self.agents[i].health < HURT_AT {
+                self.behave[i].0 *= HURT_SPEED;
+            }
         }
 
         // ease the danger level toward this tick's peak → the UI vignette swells/fades smoothly
@@ -527,6 +565,14 @@ impl World {
         // cooldown timers, and the exhaustion-sleep trigger. (Asleep agents recovered in the sleep pass.)
         for i in 0..n {
             if self.agents[i].dead || self.slept[i] {
+                continue;
+            }
+            // a slash / scrap that emptied the health bar this tick is fatal (checked BEFORE the heal regen)
+            if self.agents[i].health <= 0.0 {
+                self.agents[i].dead = true;
+                self.agents[i].asleep = false;
+                self.agents[i].agent.vx = 0.0;
+                self.agents[i].agent.vz = 0.0;
                 continue;
             }
             let boost = self.behave[i].0;
@@ -803,6 +849,32 @@ impl World {
                 self.agents[i].chase_ox = f64::NAN; // not chasing → reset the origin for the next hunt
             }
         }
+    }
+
+    /// The closest living mobber pressed against hunter `i` (a prey currently fleeing it) — the one it slashes.
+    fn nearest_attacker(&self, i: usize) -> Option<usize> {
+        let ax = self.agents[i].agent.x;
+        let az = self.agents[i].agent.z;
+        let ri = self.agents[i].radius;
+        let agents = &self.agents;
+        let transient = &self.transient;
+        let mut best: Option<usize> = None;
+        let mut best_d2 = f64::INFINITY;
+        self.grid.for_each_neighbor(ax, az, |ju| {
+            let j = ju as usize;
+            if j == i || agents[j].dead || transient[j].threat != Some(i) {
+                return; // must be one of THIS hunter's own mobbers
+            }
+            let dx = agents[j].agent.x - ax;
+            let dz = agents[j].agent.z - az;
+            let d2 = dx * dx + dz * dz;
+            let reach = ri + agents[j].radius + CONTACT_PAD + 0.4;
+            if d2 < reach * reach && d2 < best_d2 {
+                best_d2 = d2;
+                best = Some(j);
+            }
+        });
+        best
     }
 }
 
@@ -1095,5 +1167,40 @@ mod tests {
         w.spawn(animal(3.5, 0.0, 101), Kind::Rabbit, 0.35, 101);
         w.tick_once(1);
         assert!(!w.agents[lion].mobbed, "only 2 prey is below MOB_MIN=4 → no mob");
+    }
+
+    fn ring(w: &mut World, n: usize, r: f64) -> Vec<usize> {
+        (0..n)
+            .map(|k| {
+                let a = (k as f64 / n as f64) * std::f64::consts::TAU;
+                w.spawn(animal(a.cos() * r, a.sin() * r, 100 + k as i32), Kind::Rabbit, 0.35, 100 + k as i32)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mob_wounds_the_hunter_and_it_slashes_back() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
+        let rabbits = ring(&mut w, 6, 1.0); // 6 rabbits pressed into contact (reach ≈ 1.65)
+        let h0 = w.agents[lion].health;
+        for t in 1..=20 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[lion].health < h0, "the swarm wounds the cornered lion (got {})", w.agents[lion].health);
+        let slashed = rabbits.iter().filter(|&&r| w.agents[r].dead).count();
+        assert!(slashed >= 1, "the lion slashes back, killing attackers (got {slashed} dead)");
+    }
+
+    #[test]
+    fn a_near_dead_hunter_is_dragged_down() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
+        ring(&mut w, 5, 1.0); // 5 attackers → ≥MOB_MIN
+        w.agents[lion].health = 0.004; // one mob-tick (0.03·5·DT ≈ 0.005) from empty
+        w.tick_once(1);
+        assert!(w.agents[lion].dead, "the mob drags down a hunter whose health it empties");
     }
 }
