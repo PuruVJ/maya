@@ -102,7 +102,6 @@
 			.map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
 		const obstacles = [...props, ...ponds];
 		setRustObstacles(obstacles); // the Rust sim resolves these solids (push-out, no tunnelling)
-		agentManager.setPaths(world.paths ?? []); // (legacy) tree-cull paths — used by the not-yet-ported tree push-out
 	});
 
 	// Reveal objects a few per frame so a big batch ("add 120 cats") mounts gradually instead of all at once
