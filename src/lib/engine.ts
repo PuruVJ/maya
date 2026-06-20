@@ -30,8 +30,12 @@ export interface PlacementConflict {
 type Vec3 = [number, number, number];
 
 const TAU = Math.PI * 2;
-// safety cap so "add 9999 cats" can't lock up the renderer (each count-N op is clamped to this)
-const MAX_COUNT = 120;
+// safety cap so "add 9999 cats" can't lock up the renderer (each count-N op is clamped to this). Raised to
+// 1000 now that the Rust/WASM sim holds a steady 120fps at herd scale (far agents → impostors, nearest-N shadows).
+const MAX_COUNT = 1000;
+// the wandering agents (vs static props) — they don't need spawn-time non-overlap placement (they scatter on
+// tick 1, and ponds are collision obstacles), so a big herd skips the O(n²) findFreeSpot search entirely.
+const CREATURE_KINDS = new Set(['person', 'cat', 'lion', 'rabbit', 'kangaroo', 'dinosaur']);
 
 const kr = (k: string) => kindDef(k).r;
 const dist2 = (a: Vec3, b: Vec3) => {
@@ -305,13 +309,22 @@ export function applyOps(
 				const dir = AREA[op.area] ?? [0, 0, 0];
 				const center: Vec3 = [player.pos[0] + dir[0] * 0.6, 0, player.pos[2] + dir[2] * 0.6];
 				const total = Math.max(1, Math.min(Math.floor(op.count), MAX_COUNT));
-				const spread = op.area === 'everywhere' ? 28 : 15;
+				// scale the scatter radius with √count so a big herd spreads over the world instead of piling into
+				// one disc (small counts keep their tuned spread via the max(1,…) floor → density ≈ constant).
+				const spread = (op.area === 'everywhere' ? 28 : 15) * Math.max(1, Math.sqrt(total / 12));
+				const isCreature = CREATURE_KINDS.has(op.kind);
 				const GA = Math.PI * (3 - Math.sqrt(5)); // golden angle → even, deterministic spread
 				for (let i = 0; i < total; i++) {
 					const rr = spread * Math.sqrt((i + 0.5) / total);
 					const a = i * GA;
 					const anchor: Vec3 = [center[0] + Math.cos(a) * rr, 0, center[2] + Math.sin(a) * rr];
-					place(op.kind, findFreeSpot(anchor, r, world.objects, { step: r * 1.5, avoid, water }), { color: op.color });
+					// CREATURES wander off their spawn immediately AND ponds are now collision obstacles (they're
+					// shoved to the bank on tick 1), so they need NEITHER the O(n²) findFreeSpot non-overlap search
+					// NOR a water check — drop them straight on the spiral. This is what lets a 1000-strong scatter
+					// place instantly instead of hanging the page for 15 s on the collision search. Static scatter
+					// (trees/rocks/flowers) still resolves non-overlap.
+					const pos = isCreature ? ([snap(anchor[0]), 0, snap(anchor[2])] as Vec3) : findFreeSpot(anchor, r, world.objects, { step: r * 1.5, avoid, water });
+					place(op.kind, pos, { color: op.color });
 				}
 				break;
 			}
