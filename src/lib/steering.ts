@@ -62,6 +62,16 @@ export class Agent {
 	speed = 0; // planar speed (m/s)
 	turnRate = 0; // signed yaw rate (rad/s) → banking / tail lag
 
+	// RENDER INTERPOLATION — the sim now steps at a fixed 30 Hz (clock-driven), but renderers refresh at the
+	// display rate. savePrev() snapshots the pre-step pose; interpolate(alpha) blends prev→current by the
+	// clock's sub-tick fraction into rx/rz/rh, so motion is smooth at any FPS (no 30 Hz stutter). No alloc.
+	prevX: number;
+	prevZ: number;
+	prevHeading: number;
+	rx = 0;
+	rz = 0;
+	rh = 0;
+
 	hx: number; // home (leash centre)
 	hz: number;
 	wanderAngle: number;
@@ -93,6 +103,26 @@ export class Agent {
 		this.explorer = rand() < (opts.wanderlust ?? 0.14);
 		this.personality = rand(0.3, 0.85);
 		this.duration = rand(2, 5);
+		this.prevX = x;
+		this.prevZ = z;
+		this.prevHeading = this.heading;
+	}
+
+	/** Snapshot the current pose as the interpolation "previous" — call once per sim step, BEFORE moving. */
+	savePrev(): void {
+		this.prevX = this.x;
+		this.prevZ = this.z;
+		this.prevHeading = this.heading;
+	}
+
+	/** Blend prev→current pose by `alpha` (0..1, the clock's sub-tick fraction) into rx/rz/rh for rendering. */
+	interpolate(alpha: number): void {
+		this.rx = this.prevX + (this.x - this.prevX) * alpha;
+		this.rz = this.prevZ + (this.z - this.prevZ) * alpha;
+		let dh = this.heading - this.prevHeading; // shortest-arc so a ±π wrap doesn't spin the model
+		while (dh > Math.PI) dh -= TAU;
+		while (dh < -Math.PI) dh += TAU;
+		this.rh = this.prevHeading + dh * alpha;
 	}
 
 	/** 0..1 progress through the current behaviour (drives pounce arcs, groom cycles, …). */

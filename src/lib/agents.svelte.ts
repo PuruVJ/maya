@@ -425,6 +425,7 @@ class AgentManager {
 		for (const m of live) {
 			if (m.dead) continue; // may have just been caught this tick
 			const a = m.agent;
+			a.savePrev(); // snapshot pose for render interpolation, before any movement this tick
 
 			// a slash that emptied the health bar is fatal; otherwise wounds knit back slowly
 			if (m.health <= 0) {

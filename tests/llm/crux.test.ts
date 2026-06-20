@@ -10,7 +10,8 @@ import { SCENARIOS } from './scenarios';
 // single-op INTENT, one-shot COMPOUND/CRUD, and a big realistic SCENARIO suite (messy human prompts,
 // overreach + boundary notes, adversarial junk). llama.cpp + GBNF here vs WebLLM + XGrammar in prod
 // → an APPROXIMATION, great for comparisons + catching prompt/vocab/grammar regressions.
-// our fine-tune (training/to_gguf.sh): prefer q4_k_m, fall back to the f16 export
+// optional: a worldgen-*.gguf in .models/ is picked up if present. NOTE: the GBNF battery UNDER-COUNTS the
+// fine-tune — use training/eval-native.py for the faithful tuned signal (this stays for stock comparison).
 const tuned = ['.models/worldgen-1.5b-instruct-q4_k_m.gguf', '.models/worldgen-1.5b-instruct-f16.gguf']
 	.map((p) => path.resolve(p))
 	.find(existsSync);

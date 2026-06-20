@@ -33,6 +33,14 @@ export class SimClock {
 		return this.tick * DT;
 	}
 
+	/** Sub-tick interpolation factor (0..1): how far real time has advanced from the current tick toward the
+	 *  next. Renderers lerp between an agent's previous and current sim step by this, so motion stays smooth
+	 *  at any frame rate despite the fixed-DT (30 Hz) sim. Cheap getter, read once per render frame. */
+	get alpha(): number {
+		const a = this.#acc / DT;
+		return a < 0 ? 0 : a > 1 ? 1 : a;
+	}
+
 	/** Not advancing right now (stopped or rate 0). */
 	get paused(): boolean {
 		return !this.playing || this.rate === 0;

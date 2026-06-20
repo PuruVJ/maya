@@ -80,18 +80,22 @@ Each variant keeps separate `adapters*/` `fused*/` and `dist/<NAME>` dirs so the
 training knobs: `ITERS=4000 ./train_lora.sh`. Conversion is **reproducible** — `convert-mlc.sh` always
 spins a fresh pinned container, so re-running yields identical weights.
 
-### Evaluate it (recommended before shipping)
+### Evaluate it (recommended before shipping) — NATIVE eval
 
-Convert to GGUF and run the **existing battery** — it scores the tuned model next to the stock 1.5B/3B
-on intent, compound/CRUD, and the messy scenario suite:
+Score the fused model on the real scenario suite in its **exact training format** (Qwen chat template, no
+grammar constraint). This is the **faithful** signal — the node-llama-cpp GBNF battery under-counts the
+fine-tune (grammar-constrained decoding fights its sharp distribution; it reported 36/49 vs native 44/49),
+so we use native MLX generate instead:
 
 ```bash
-./to_gguf.sh         # needs llama.cpp at $LLAMA_CPP (default ~/llama.cpp) → .models/worldgen-*.gguf
-cd .. && pnpm test:llm
+pnpm tsx training/eval-emit.ts          # SCENARIOS → training/data/eval-cases.jsonl (compact prompt)
+.venv/bin/python training/eval-native.py   # fused model generates → eval-out.jsonl   (point at training/fused[-0.5b])
+pnpm tsx training/eval-grade.ts         # grade vs the real predicates → by-tier + GATED pass rate
 ```
 
-> Note: GBNF-grammar battery scoring under-counts the fine-tune; the **native** MLX generate
-> (`eval-native.py`) is the faithful signal (the 1.5B scored 44/49, matching stock 3B).
+Look for the tuned model to **meet or beat** the stock numbers it prints (stock 1.5B=38/49, 3B=45/49),
+especially the refusal + messy-scenario tiers. (`eval-native.py` loads `training/fused`; edit the path for
+the 0.5B.)
 
 ### Host + turn it on
 

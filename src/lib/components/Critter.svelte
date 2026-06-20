@@ -13,6 +13,7 @@
 	import { Agent, Spring, type Behavior } from '$lib/steering';
 	import { agentManager, makeManaged, speedFor, type ManagedAgent } from '$lib/agents.svelte';
 	import { seedFrom } from '$lib/rng';
+	import { clock } from '$lib/clock';
 	import { PRIM, litMat, creatureMat, EYE_MAT, type CoatPattern } from '$lib/sharedAssets';
 	import type { World, WorldObject } from '$lib/world';
 
@@ -141,9 +142,10 @@
 		}
 		group.visible = true;
 
-		const gy = heightAt(agent.x, agent.z, world.terrain);
-		group.position.set(agent.x, gy, agent.z);
-		group.rotation.y = agent.heading;
+		agent.interpolate(clock.alpha); // smooth the fixed-rate (30 Hz) sim across render frames
+		const gy = heightAt(agent.rx, agent.rz, world.terrain);
+		group.position.set(agent.rx, gy, agent.rz);
+		group.rotation.y = agent.rh;
 
 		if (managed.castShadow !== lastShadow) {
 			lastShadow = managed.castShadow;
