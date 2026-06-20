@@ -85,7 +85,7 @@ const WAKE_REST: f64 = 3.0; // after waking, stay up at least this long before d
 const WAKE_BASE: f64 = 1.5; // a tiptoeing player can get this close to a sleeper; sprinting startles it from
 const WAKE_MAX: f64 = 7.0; // …farther (scaled by player speed) — the sneak mechanic
 
-const ANIMAL_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround, Behavior::Sit, Behavior::Groom];
+const ANIMAL_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround, Behavior::Sit, Behavior::Groom, Behavior::Pounce];
 const PERSON_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround];
 
 fn menu_for(kind: Kind) -> &'static [Behavior] {
@@ -154,8 +154,10 @@ pub struct Snapshot {
     pub xs: Vec<f32>,       // world X per agent
     pub zs: Vec<f32>,       // world Z per agent
     pub headings: Vec<f32>, // facing (radians)
-    pub healths: Vec<f32>,  // 0..1 (drives injury/blood/limp on the view side)
-    pub flags: Vec<u32>,    // bit0 = dead, bit1 = asleep, bit2 = moving (speed past a walk)
+    pub healths: Vec<f32>,    // 0..1 (drives injury/blood/limp on the view side)
+    pub flags: Vec<u32>,      // bit0 = dead, bit1 = asleep, bit2 = moving (speed past a walk)
+    pub behaviors: Vec<u8>,   // current idle-FSM behaviour code (0 wander·1 pause·2 lookAround·3 groom·4 sit·5 pounce)
+    pub progress: Vec<f32>,   // 0..1 through the current behaviour → drives groom cycles / pounce arcs on the view
 }
 
 impl Snapshot {
@@ -167,6 +169,8 @@ impl Snapshot {
         self.headings.resize(n, 0.0);
         self.healths.resize(n, 0.0);
         self.flags.resize(n, 0);
+        self.behaviors.resize(n, 0);
+        self.progress.resize(n, 0.0);
         for (i, m) in world.agents.iter().enumerate() {
             self.xs[i] = m.agent.x as f32;
             self.zs[i] = m.agent.z as f32;
@@ -183,6 +187,8 @@ impl Snapshot {
                 f |= 4;
             }
             self.flags[i] = f;
+            self.behaviors[i] = m.agent.behavior.code();
+            self.progress[i] = (m.agent.elapsed / m.agent.duration).min(1.0) as f32;
         }
     }
 }
@@ -1519,6 +1525,24 @@ mod tests {
         // a healthy, live, awake agent has no dead/asleep bits set
         assert_eq!(snap.flags[r] & 3, 0, "a live awake agent sets neither dead nor asleep");
         assert!((snap.healths[r] - w.agents[r].health as f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn idle_agents_cycle_behaviours_into_the_snapshot() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4); // nothing to flee → it just idles + wanders
+        w.spawn(animal(0.0, 0.0, 7), Kind::Rabbit, 0.35, 7);
+        let mut snap = Snapshot::default();
+        let mut seen_idle = false;
+        for t in 1..=900 {
+            w.tick_once(t);
+            snap.fill(&w);
+            if snap.behaviors[0] != 0 {
+                seen_idle = true; // picked pause / lookAround / sit / groom / pounce, not just wander
+            }
+            assert!(snap.progress[0] >= 0.0 && snap.progress[0] <= 1.0, "progress is a 0..1 fraction");
+        }
+        assert!(seen_idle, "an idle animal cycles through the idle behaviours, not only wander → renderer can pose it");
     }
 
     #[test]

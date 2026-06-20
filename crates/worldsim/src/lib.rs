@@ -143,5 +143,11 @@ mod wasm_api {
         pub fn flags_ptr(&self) -> *const u32 {
             self.snap.flags.as_ptr()
         }
+        pub fn behaviors_ptr(&self) -> *const u8 {
+            self.snap.behaviors.as_ptr()
+        }
+        pub fn progress_ptr(&self) -> *const f32 {
+            self.snap.progress.as_ptr()
+        }
     }
 }

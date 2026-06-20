@@ -76,7 +76,8 @@ export class Agent {
 	hx: number; // home / leash centre (companion-pet follow target — the Rust port reads this in Phase C)
 	hz: number;
 
-	behavior: Behavior = 'wander'; // pose hint for the renderers (idle FSM not yet fed back from Rust)
+	behavior: Behavior = 'wander'; // current idle-FSM behaviour — set each tick by rustSim from the Rust read-back
+	progress = 0; // 0..1 through that behaviour (Rust read-back) → drives groom cycles / pounce arcs / lookAround
 
 	readonly maxSpeed: number; // scales gaitRate()
 
@@ -107,12 +108,6 @@ export class Agent {
 		while (dh > Math.PI) dh -= TAU;
 		while (dh < -Math.PI) dh += TAU;
 		this.rh = this.prevHeading + dh * alpha;
-	}
-
-	/** 0..1 progress through the current behaviour (drives pounce arcs, groom cycles, …). Static until the Rust
-	 *  read-back feeds idle-behaviour timing (Phase C) — kept so the renderers stay source-compatible. */
-	get progress(): number {
-		return 0;
 	}
 
 	/** Move the leash centre (e.g. keep a critter loosely near the player) — the companion-pet follow. */

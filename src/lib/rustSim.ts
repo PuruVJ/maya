@@ -37,6 +37,8 @@ interface RustSim {
 	headings_ptr(): number;
 	healths_ptr(): number;
 	flags_ptr(): number;
+	behaviors_ptr(): number;
+	progress_ptr(): number;
 }
 interface WasmExports {
 	memory: WebAssembly.Memory;
@@ -61,6 +63,10 @@ let zs: Float32Array = new Float32Array();
 let headings: Float32Array = new Float32Array();
 let healths: Float32Array = new Float32Array();
 let flags: Uint32Array = new Uint32Array();
+let behaviors: Uint8Array = new Uint8Array();
+let progress: Float32Array = new Float32Array();
+// behaviour code → the renderer's pose name (must match crates/worldsim Behavior::code order)
+const BEHAVIORS = ['wander', 'pause', 'lookAround', 'groom', 'sit', 'pounce'] as const;
 
 // latest obstacle set, kept so it survives the async wasm load (Scene may push obstacles before the Sim exists)
 let pendingObstacles: Float64Array | null = null;
@@ -124,6 +130,8 @@ function refreshViews(): void {
 	headings = new Float32Array(viewBuf, sim.headings_ptr(), c);
 	healths = new Float32Array(viewBuf, sim.healths_ptr(), c);
 	flags = new Uint32Array(viewBuf, sim.flags_ptr(), c);
+	behaviors = new Uint8Array(viewBuf, sim.behaviors_ptr(), c);
+	progress = new Float32Array(viewBuf, sim.progress_ptr(), c);
 }
 
 /** Spawn any newly-registered agents into the Rust world (at their current pose → continuity on hot-swap). */
@@ -177,6 +185,8 @@ export function tickRust(dt: number): void {
 		a.x = nx;
 		a.z = nz;
 		a.heading = nh;
+		a.behavior = BEHAVIORS[behaviors[i]] ?? 'wander'; // idle pose (sit/groom/pounce/…) for the near renderers
+		a.progress = progress[i]; // 0..1 through that behaviour → groom cycle / pounce arc / lookAround sweep
 		m.health = healths[i];
 		const f = flags[i];
 		m.dead = (f & 1) !== 0;

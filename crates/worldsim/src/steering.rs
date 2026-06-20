@@ -53,6 +53,17 @@ impl Behavior {
     fn moving(self) -> bool {
         matches!(self, Behavior::Wander | Behavior::Pounce)
     }
+    /// Stable u8 code for the JS render bridge (the renderers map it back to a pose). Order = enum order.
+    pub fn code(self) -> u8 {
+        match self {
+            Behavior::Wander => 0,
+            Behavior::Pause => 1,
+            Behavior::LookAround => 2,
+            Behavior::Groom => 3,
+            Behavior::Sit => 4,
+            Behavior::Pounce => 5,
+        }
+    }
 }
 
 pub struct AgentOpts {
