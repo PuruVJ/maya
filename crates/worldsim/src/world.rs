@@ -174,6 +174,7 @@ fn preys_on(a: &ManagedAgent, b: &ManagedAgent) -> bool {
 pub struct World {
     pub agents: Vec<ManagedAgent>,
     pub clock: SimClock,
+    pub danger: f64,               // 0..1 — how imminent a player-hunting predator is (eased → the UI vignette)
     pub transient: Vec<Transient>, // per-tick targeting (parallel to agents), read by the behaviour chunks
     grid: SpatialHashGrid,         // flocking grid (cell = NEIGHBOR_RADIUS)
     seek_grid: SpatialHashGrid,    // coarse food-chain grid (cell = SEEK)
@@ -198,6 +199,7 @@ impl World {
         World {
             agents: Vec::new(),
             clock: SimClock::new(),
+            danger: 0.0,
             transient: Vec::new(),
             grid: SpatialHashGrid::new(NEIGHBOR_RADIUS),
             seek_grid: SpatialHashGrid::new(SEEK),
@@ -337,6 +339,7 @@ impl World {
         self.behave.resize(n, (1.0, false));
         self.kills.clear();
         let hunt2 = HUNT2 * (1.0 + 0.4 * self.night); // keener at night
+        let mut danger_now = 0.0_f64; // peak imminence of any player-hunting predator this tick
         for i in 0..n {
             if self.agents[i].dead || self.slept[i] {
                 continue;
@@ -345,9 +348,33 @@ impl World {
             let az = self.agents[i].agent.z;
             let a_max = self.agents[i].agent.max_speed;
             let radius = self.agents[i].radius;
+            let rank = self.agents[i].rank;
+            let a_hunts = matches!(eco(self.agents[i].kind).hunts, Hunts::Lower);
             let can_sprint = self.agents[i].stamina > CAN_SPRINT;
             let threat_pos = self.transient[i].threat.map(|t| (self.agents[t].agent.x, self.agents[t].agent.z));
             let prey_info = self.transient[i].prey.map(|p| (p, self.agents[p].agent.x, self.agents[p].agent.z, self.agents[p].radius));
+
+            // HUNT-PLAYER — a LONE (crowd<3) apex (rank≥4) predator, hungry + not otherwise busy, stalks the
+            // player when you're within reach AND closer than its animal prey. Non-lethal (you're uncatchable);
+            // it pressures you + raises the danger level. Keener + farther-reaching at night.
+            let mut hunt_player = false;
+            if rank >= 4
+                && self.forces[i].2 < 3 // crowd (flock neighbours) — a lone hunter stalks; a pack just wanders
+                && a_hunts
+                && self.agents[i].hungry
+                && can_sprint
+                && self.agents[i].spooked <= 0.0
+                && threat_pos.is_none()
+            {
+                let dp2 = (px - ax).powi(2) + (pz - az).powi(2);
+                let reach = 15.0 * (1.0 + 0.6 * self.night);
+                let prey_d2 = prey_info.map_or(f64::INFINITY, |(_, prx, prz, _)| (prx - ax).powi(2) + (prz - az).powi(2));
+                if dp2 < reach * reach && dp2 < prey_d2 * 0.81 {
+                    hunt_player = true;
+                    danger_now = danger_now.max(1.0 - dp2.sqrt() / reach); // closer hunter → louder alarm
+                }
+            }
+
             if let Some((tx, tz)) = threat_pos {
                 // flee the nearest hunter
                 let dx = ax - tx;
@@ -356,6 +383,15 @@ impl World {
                 self.forces[i].0 += (dx / d) * a_max * FLEE_W;
                 self.forces[i].1 += (dz / d) * a_max * FLEE_W;
                 self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
+            } else if hunt_player {
+                // charge the player; sprint when close. Never catches — just bumps + pressures you.
+                let dx = px - ax;
+                let dz = pz - az;
+                let d = dx.hypot(dz).max(0.1);
+                let close = d * d < hunt2;
+                self.forces[i].0 += (dx / d) * a_max * CHASE_W;
+                self.forces[i].1 += (dz / d) * a_max * CHASE_W;
+                self.behave[i] = (if close && can_sprint { CHASE_BOOST } else { 1.0 }, true);
             } else if let Some((p, prx, prz, pr)) = prey_info {
                 // stalk toward prey; sprint once close; CATCH on contact
                 let dx = prx - ax;
@@ -380,36 +416,40 @@ impl World {
                 }
             }
 
-            // PLAYER REACTION — animals scatter from the player (skittishness falls with rank: rabbits bolt, an
-            // apex dino ignores you), scaring from FARTHER when you RUN; and every animal gives the player's
-            // body a berth (personal space). (huntPlayer / companion-pet exemptions land with those bits.)
-            let rank = self.agents[i].rank;
-            let skittish = ((5.0 - rank as f64) / 4.0).max(0.0); // rabbit 1 → 1.0 … dinosaur 5 → 0
-            if skittish > 0.0 {
-                let dx = ax - px;
-                let dz = az - pz;
-                let d = dx.hypot(dz);
-                let scare_r = (2.5 + (pspeed - 3.0).max(0.0) * 0.5) * (0.6 + 0.7 * skittish) * (1.0 + 0.4 * self.night);
-                if d < scare_r && d > 0.01 {
-                    let w = skittish * (1.0 - d / scare_r); // stronger the closer / more skittish
-                    self.forces[i].0 += (dx / d) * a_max * FLEE_W * w;
-                    self.forces[i].1 += (dz / d) * a_max * FLEE_W * w;
-                    self.behave[i].1 = true; // pursuing (keep moving)
-                    if can_sprint && w > 0.25 {
-                        self.behave[i].0 = self.behave[i].0.max(FLEE_BOOST); // a real bolt when truly spooked
+            // PLAYER REACTION (skipped for a predator deliberately coming for you) — animals scatter from the
+            // player (skittishness falls with rank: rabbits bolt, an apex dino ignores you), scaring from
+            // FARTHER when you RUN; and every animal gives the player's body a berth (personal space).
+            if !hunt_player {
+                let skittish = ((5.0 - rank as f64) / 4.0).max(0.0); // rabbit 1 → 1.0 … dinosaur 5 → 0
+                if skittish > 0.0 {
+                    let dx = ax - px;
+                    let dz = az - pz;
+                    let d = dx.hypot(dz);
+                    let scare_r = (2.5 + (pspeed - 3.0).max(0.0) * 0.5) * (0.6 + 0.7 * skittish) * (1.0 + 0.4 * self.night);
+                    if d < scare_r && d > 0.01 {
+                        let w = skittish * (1.0 - d / scare_r); // stronger the closer / more skittish
+                        self.forces[i].0 += (dx / d) * a_max * FLEE_W * w;
+                        self.forces[i].1 += (dz / d) * a_max * FLEE_W * w;
+                        self.behave[i].1 = true; // pursuing (keep moving)
+                        if can_sprint && w > 0.25 {
+                            self.behave[i].0 = self.behave[i].0.max(FLEE_BOOST); // a real bolt when truly spooked
+                        }
                     }
                 }
-            }
-            let adx = ax - px;
-            let adz = az - pz;
-            let ad = adx.hypot(adz);
-            let avoid_r = radius + 1.5; // player body (~0.5) + a margin to round the corner early
-            if ad < avoid_r && ad > 0.01 {
-                let w = 1.0 - ad / avoid_r;
-                self.forces[i].0 += (adx / ad) * a_max * AVOID_W * w;
-                self.forces[i].1 += (adz / ad) * a_max * AVOID_W * w;
+                let adx = ax - px;
+                let adz = az - pz;
+                let ad = adx.hypot(adz);
+                let avoid_r = radius + 1.5; // player body (~0.5) + a margin to round the corner early
+                if ad < avoid_r && ad > 0.01 {
+                    let w = 1.0 - ad / avoid_r;
+                    self.forces[i].0 += (adx / ad) * a_max * AVOID_W * w;
+                    self.forces[i].1 += (adz / ad) * a_max * AVOID_W * w;
+                }
             }
         }
+
+        // ease the danger level toward this tick's peak → the UI vignette swells/fades smoothly
+        self.danger += (danger_now - self.danger) * (6.0 * DT).min(1.0);
 
         // 6. apply kills → corpses (deferred so the behaviour pass reads only previous, live positions)
         for k in 0..self.kills.len() {
@@ -940,5 +980,29 @@ mod tests {
         w.tick_once(1);
         assert!(!w.agents[near].asleep, "the player tiptoeing within WAKE_BASE still wakes a close sleeper");
         assert!(w.agents[far].asleep, "a sleeper beyond WAKE_BASE (player not moving) stays down");
+    }
+
+    #[test]
+    fn lone_apex_hunts_the_player_and_raises_danger() {
+        let mut w = World::new(); // player at (0,0)
+        let dino = w.spawn(animal(10.0, 0.0, 1), Kind::Dinosaur, 0.5, 1); // lone, hungry, within reach (15)
+        let x0 = w.agents[dino].agent.x;
+        for t in 1..=8 {
+            w.tick_once(t); // (drains stamina fast; check while it's still charging)
+        }
+        assert!(w.agents[dino].agent.x < x0 - 0.5, "the apex charges toward the player (got {})", w.agents[dino].agent.x);
+        assert!(w.danger > 0.05, "the danger level rises while you're hunted (got {})", w.danger);
+    }
+
+    #[test]
+    fn sated_apex_does_not_hunt_the_player() {
+        let mut w = World::new();
+        let dino = w.spawn(animal(10.0, 0.0, 1), Kind::Dinosaur, 0.5, 1);
+        w.agents[dino].stamina = 0.9; // above HUNGRY_HI → the latch keeps it sated, so it won't hunt you
+        w.agents[dino].hungry = false;
+        for t in 1..=10 {
+            w.tick_once(t);
+        }
+        assert!(w.danger < 0.05, "a sated apex ignores you → no danger (got {})", w.danger);
     }
 }
