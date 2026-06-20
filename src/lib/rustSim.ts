@@ -63,9 +63,9 @@ let headings: Float32Array = new Float32Array();
 let healths: Float32Array = new Float32Array();
 let flags: Uint32Array = new Uint32Array();
 
-/** Is the Rust engine requested via `?engine=rust`? (Browser-only; false during SSR.) */
+/** Is the Rust engine requested via `?engine=rust`? (The app is client-only three.js — no SSR to guard.) */
 export function engineIsRust(): boolean {
-	return typeof location !== 'undefined' && new URLSearchParams(location.search).get('engine') === 'rust';
+	return new URLSearchParams(location.search).get('engine') === 'rust';
 }
 
 /** Lifecycle status — `AgentSystem` falls back to the JS sim unless this is `'ready'`. */
