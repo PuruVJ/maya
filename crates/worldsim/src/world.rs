@@ -34,6 +34,7 @@ const GIVEUP_ENERGY: f64 = 0.06; // ...or it abandons the chase early when this 
 const HUNT2: f64 = 34.0 * 34.0; // a predator breaks into a sprint for the kill once this close
 const FLEE_W: f64 = 2.6; // strong — overrides wander when running for your life
 const CHASE_W: f64 = 2.0;
+const AVOID_W: f64 = 1.8; // gentle personal space — every animal steers AROUND the player's body
 const FLEE_BOOST: f64 = 1.7; // panic-run speed multiplier
 const CHASE_BOOST: f64 = 1.45;
 const CONTACT_PAD: f64 = 0.4; // extra reach that counts as a catch
@@ -54,7 +55,8 @@ const HUNGRY_HI: f64 = 0.72;
 // sleep (chunk d2)
 const SLEEP_MULT: f64 = 2.4; // recover this much faster while asleep
 const WAKE_REST: f64 = 3.0; // after waking, stay up at least this long before dozing again (anti sleep/wake flip)
-const WAKE_R: f64 = 2.0; // the player within this wakes a sleeper (TODO: scale with player speed → sneak mechanic)
+const WAKE_BASE: f64 = 1.5; // a tiptoeing player can get this close to a sleeper; sprinting startles it from
+const WAKE_MAX: f64 = 7.0; // …farther (scaled by player speed) — the sneak mechanic
 
 const ANIMAL_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround, Behavior::Sit, Behavior::Groom];
 const PERSON_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround];
@@ -177,6 +179,7 @@ pub struct World {
     seek_grid: SpatialHashGrid,    // coarse food-chain grid (cell = SEEK)
     seek_neighbors: Vec<u32>,      // reused scratch for a seek query (mem::take'd in → no per-agent alloc)
     player: (f64, f64),
+    last_player: (f64, f64),       // previous tick's player pos → its speed (a running player scares wildlife)
     night: f64,                    // 0 day … 1 night → prey jumpier (wider danger radius)
     forces: Vec<(f64, f64, u32)>,  // reused per-tick (fx, fz, crowd) flock buffer → no per-frame alloc
     behave: Vec<(f64, bool)>,      // reused per-tick (boost, pursuing) from the behaviour pass
@@ -200,6 +203,7 @@ impl World {
             seek_grid: SpatialHashGrid::new(SEEK),
             seek_neighbors: Vec::new(),
             player: (0.0, 0.0),
+            last_player: (f64::NAN, f64::NAN),
             night: 0.0,
             forces: Vec::new(),
             behave: Vec::new(),
@@ -235,6 +239,12 @@ impl World {
     /// One fixed-DT sim step at the given integer tick (for the addressed rng). grid → flock → step.
     pub fn tick_once(&mut self, tick: i32) {
         let (px, pz) = self.player;
+        let pspeed = if self.last_player.0.is_nan() {
+            0.0
+        } else {
+            (px - self.last_player.0).hypot(pz - self.last_player.1) / DT
+        };
+        self.last_player = (px, pz);
         let n = self.agents.len();
         let danger2 = DANGER2 * (1.0 + 0.5 * self.night); // after dark prey flee from farther
 
@@ -294,8 +304,10 @@ impl World {
             self.agents[i].agent.x += vx * DT;
             self.agents[i].agent.z += vz * DT;
             self.agents[i].agent.speed = vx.hypot(vz);
-            // wake check
-            let player_woke = (self.agents[i].agent.x - px).hypot(self.agents[i].agent.z - pz) < WAKE_R;
+            // wake check — you can tiptoe within WAKE_BASE of a sleeper, but SPRINT at it and it startles from
+            // farther (sneaking past finally matters)
+            let wake_r = (WAKE_BASE + (pspeed - 3.0).max(0.0) * 0.45).min(WAKE_MAX);
+            let player_woke = (self.agents[i].agent.x - px).hypot(self.agents[i].agent.z - pz) < wake_r;
             let disturbed = self.transient[i].near_predator || self.transient[i].threat.is_some() || self.agents[i].spooked > 0.0 || player_woke;
             if self.agents[i].sleep_timer <= 0.0 || disturbed {
                 self.agents[i].asleep = false;
@@ -366,6 +378,36 @@ impl World {
                         self.agents[i].stamina = (self.agents[i].stamina + EAT_GAIN).min(1.0);
                     }
                 }
+            }
+
+            // PLAYER REACTION — animals scatter from the player (skittishness falls with rank: rabbits bolt, an
+            // apex dino ignores you), scaring from FARTHER when you RUN; and every animal gives the player's
+            // body a berth (personal space). (huntPlayer / companion-pet exemptions land with those bits.)
+            let rank = self.agents[i].rank;
+            let skittish = ((5.0 - rank as f64) / 4.0).max(0.0); // rabbit 1 → 1.0 … dinosaur 5 → 0
+            if skittish > 0.0 {
+                let dx = ax - px;
+                let dz = az - pz;
+                let d = dx.hypot(dz);
+                let scare_r = (2.5 + (pspeed - 3.0).max(0.0) * 0.5) * (0.6 + 0.7 * skittish) * (1.0 + 0.4 * self.night);
+                if d < scare_r && d > 0.01 {
+                    let w = skittish * (1.0 - d / scare_r); // stronger the closer / more skittish
+                    self.forces[i].0 += (dx / d) * a_max * FLEE_W * w;
+                    self.forces[i].1 += (dz / d) * a_max * FLEE_W * w;
+                    self.behave[i].1 = true; // pursuing (keep moving)
+                    if can_sprint && w > 0.25 {
+                        self.behave[i].0 = self.behave[i].0.max(FLEE_BOOST); // a real bolt when truly spooked
+                    }
+                }
+            }
+            let adx = ax - px;
+            let adz = az - pz;
+            let ad = adx.hypot(adz);
+            let avoid_r = radius + 1.5; // player body (~0.5) + a margin to round the corner early
+            if ad < avoid_r && ad > 0.01 {
+                let w = 1.0 - ad / avoid_r;
+                self.forces[i].0 += (adx / ad) * a_max * AVOID_W * w;
+                self.forces[i].1 += (adz / ad) * a_max * AVOID_W * w;
             }
         }
 
@@ -695,6 +737,7 @@ mod tests {
     fn overlapping_bodies_push_apart() {
         // two agents almost on top of each other → the anti-overlap force must separate them
         let mut w = World::new();
+        w.set_player(1e4, 1e4); // park the player far away so the rabbits don't also flee IT
         w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         w.spawn(animal(0.05, 0.0, 2), Kind::Rabbit, 0.35, 2);
         let d0 = {
@@ -817,6 +860,7 @@ mod tests {
     #[test]
     fn prey_rest_recovers_carnivore_does_not() {
         let mut w = World::new();
+        w.set_player(1e4, 1e4); // park the player far so the rabbit rests instead of fleeing it
         let rabbit = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         let cat = w.spawn(animal(60.0, 0.0, 2), Kind::Cat, 0.35, 2); // far apart → idle, no chase
         w.agents[rabbit].stamina = 0.5;
@@ -871,5 +915,30 @@ mod tests {
         let _cat = w.spawn(animal(55.0, 50.0, 2), Kind::Cat, 0.35, 2); // 5 m away, hunting → marks the threat
         w.tick_once(1);
         assert!(!w.agents[rabbit].asleep, "a hunter within danger range startles the rabbit awake");
+    }
+
+    #[test]
+    fn skittish_rabbit_flees_the_player() {
+        let mut w = World::new(); // player at (0,0)
+        let rabbit = w.spawn(animal(1.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        for t in 1..=40 {
+            w.tick_once(t);
+        }
+        let d = w.agents[rabbit].agent.x.hypot(w.agents[rabbit].agent.z);
+        assert!(d > 2.6, "a skittish rabbit bolts from the player (got {d})");
+    }
+
+    #[test]
+    fn player_wakes_a_nearby_sleeper() {
+        let mut w = World::new();
+        let near = w.spawn(animal(1.0, 0.0, 1), Kind::Cat, 0.35, 1); // 1 m < WAKE_BASE 1.5
+        let far = w.spawn(animal(12.0, 0.0, 2), Kind::Cat, 0.35, 2); // far from player AND the first cat
+        for &c in &[near, far] {
+            w.agents[c].asleep = true;
+            w.agents[c].sleep_timer = 10.0;
+        }
+        w.tick_once(1);
+        assert!(!w.agents[near].asleep, "the player tiptoeing within WAKE_BASE still wakes a close sleeper");
+        assert!(w.agents[far].asleep, "a sleeper beyond WAKE_BASE (player not moving) stays down");
     }
 }
