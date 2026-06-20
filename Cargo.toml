@@ -1,0 +1,5 @@
+# Cargo workspace root — the Rust/WASM engine core lives under crates/ (docs/self-sustaining-world.md §6.6).
+# This lets `cargo test` / rust-analyzer resolve from the repo root; the SvelteKit app ignores this file.
+[workspace]
+members = ["crates/worldsim"]
+resolver = "2"

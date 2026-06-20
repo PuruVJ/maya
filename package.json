@@ -12,7 +12,7 @@
 		"test": "vitest run",
 		"test:watch": "vitest",
 		"test:llm": "node scripts/fetch-test-model.mjs && vitest run --config vitest.llm.config.ts",
-		"test:rust": "cargo test --manifest-path crates/worldsim/Cargo.toml",
+		"test:rust": "cargo test",
 		"build:wasm": "wasm-pack build crates/worldsim --target web --out-dir pkg",
 		"gen:dataset": "tsx training/gen-dataset.ts",
 		"prepare": "svelte-kit sync || echo ''",
