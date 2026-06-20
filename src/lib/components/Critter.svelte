@@ -131,7 +131,7 @@
 	// 1000 bodies up front (the mount-storm hang). Corpses + the companion always keep their mesh.
 	const MESH_GRACE = 1.2; // seconds an agent stays meshed after going far → no thrash at the LOD2 boundary
 	const spawnDist = untrack(() => Math.hypot((obj?.pos[0] ?? 5) - playerState.pos[0], (obj?.pos[2] ?? 5) - playerState.pos[2]));
-	let showMesh = $state(untrack(() => companion || !!obj?.dead || spawnDist < LOD2_DIST));
+	let showMesh = $state(untrack(() => companion || spawnDist < LOD2_DIST));
 	let farTime = 0;
 
 	useTask((dt) => {
@@ -141,9 +141,10 @@
 		// before any early-out so it keeps following even if it briefly falls behind)
 		if (companion) agent.setHome(playerState.pos[0], playerState.pos[2]);
 
-		// far & ALIVE → the impostor draws it: hide the body and, after a short grace, SHED the mesh entirely.
-		// Corpses are NOT impostored, so the dead branch below still runs (keeps its mesh) at any distance.
-		if (managed.lod === 2 && !managed.dead) {
+		// FAR → the impostor draws it (alive OR a corpse, tipped on its side): hide the body and, after a short
+		// grace, SHED the articulated mesh entirely. Impostoring far corpses too bounds the scene graph when a
+		// 1000-agent food chain piles up corpses (each used to keep a full mesh forever → unbounded growth).
+		if (managed.lod === 2) {
 			if (group) group.visible = false;
 			if (showMesh) {
 				farTime += dt;
@@ -152,7 +153,7 @@
 			return;
 		}
 		farTime = 0;
-		if (!showMesh) showMesh = true; // came near (or died) → remount the body (refs bind next frame)
+		if (!showMesh) showMesh = true; // came near → remount the body (refs bind next frame)
 		if (!group || !core) return; // mesh still mounting this frame
 		group.visible = true;
 

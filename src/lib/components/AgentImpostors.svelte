@@ -61,11 +61,11 @@
 		let na = 0;
 		let np = 0;
 		agentManager.forEach((m) => {
-			if (m.lod !== 2 || m.dead) return; // only far, living agents → impostors (corpses draw in full)
+			if (m.lod !== 2) return; // far agents (living OR corpses) → impostors; near ones draw in full
 			const a = m.agent;
 			a.interpolate(clock.alpha); // smooth the fixed-rate sim across render frames
 			dummy.position.set(a.rx, heightAt(a.rx, a.rz, world.terrain), a.rz);
-			dummy.rotation.set(0, a.rh, 0);
+			dummy.rotation.set(0, a.rh, m.dead ? Math.PI / 2 : 0); // a far corpse lies tipped on its side
 			if (m.kind === 'person') {
 				if (np < MAX) {
 					dummy.scale.setScalar(m.radius / 0.4); // recover the person's size (radius = 0.4·scale) → scaled people match near

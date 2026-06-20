@@ -87,16 +87,16 @@
 	// articulated body to keep the scene graph small at crowd scale. Spawned-far people start mesh-LESS.
 	const MESH_GRACE = 1.2; // seconds meshed after going far → no thrash at the LOD2 boundary
 	const spawnDist = untrack(() => Math.hypot(obj.pos[0] - playerState.pos[0], obj.pos[2] - playerState.pos[2]));
-	let showMesh = $state(untrack(() => !!obj.dead || spawnDist < LOD2_DIST));
+	let showMesh = $state(untrack(() => spawnDist < LOD2_DIST));
 	let farTime = 0;
 
 	useTask((dt) => {
 		t += dt;
 		// the manager already stepped `agent` this frame — we only read & render it
 
-		// far & ALIVE → the impostor draws it: hide and, after a short grace, SHED the mesh. Corpses are NOT
-		// impostored, so the dead branch below still runs (keeps its mesh) at any distance.
-		if (managed.lod === 2 && !managed.dead) {
+		// FAR → the impostor draws it (alive OR a tipped corpse): hide and, after a short grace, SHED the mesh.
+		// Impostoring far corpses too keeps the scene graph bounded when bodies pile up at crowd scale.
+		if (managed.lod === 2) {
 			if (group) group.visible = false;
 			if (showMesh) {
 				farTime += dt;
@@ -105,7 +105,7 @@
 			return;
 		}
 		farTime = 0;
-		if (!showMesh) showMesh = true; // came near (or died) → remount (refs bind next frame)
+		if (!showMesh) showMesh = true; // came near → remount (refs bind next frame)
 		if (!group || !core) return; // mesh still mounting this frame
 		group.visible = true;
 
