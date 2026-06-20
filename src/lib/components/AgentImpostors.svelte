@@ -10,6 +10,7 @@
 	import { heightAt } from '$lib/terrain';
 	import { agentManager } from '$lib/agents.svelte';
 	import { wind } from '$lib/wind';
+	import { creatureNight } from '$lib/sharedAssets';
 	import { clock } from '$lib/clock';
 	import type { World } from '$lib/world';
 
@@ -35,6 +36,7 @@
 	const animalMat = new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: true });
 	animalMat.onBeforeCompile = (shader) => {
 		shader.uniforms.uTime = wind.uTime;
+		shader.uniforms.uNight = creatureNight; // shared night level → the moonlit rim (matches near creatures)
 		shader.vertexShader = shader.vertexShader
 			.replace('#include <common>', '#include <common>\nuniform float uTime;\nattribute vec3 aEye;\nvarying vec3 vEye;\nvarying vec3 vLocal;')
 			.replace(
@@ -50,19 +52,35 @@
 		// from the dark/fog. Per-instance colour×intensity (aEye, baked night×predator below) → 0 in daytime, so
 		// the day crowd is byte-identical. Additive emissive only (can't break the geometry).
 		shader.fragmentShader = shader.fragmentShader
-			.replace('#include <common>', '#include <common>\nvarying vec3 vEye;\nvarying vec3 vLocal;')
+			.replace('#include <common>', '#include <common>\nuniform float uNight;\nvarying vec3 vEye;\nvarying vec3 vLocal;')
 			.replace(
 				'#include <emissivemap_fragment>',
 				/* glsl */ `#include <emissivemap_fragment>
 				float eyeFront = step(0.40, vLocal.z); // the +Z (forward) face only
 				float dEye = min(distance(vLocal.xy, vec2(0.09, 0.44)), distance(vLocal.xy, vec2(-0.09, 0.44)));
 				float eyeGlow = 1.0 - smoothstep(0.0, 0.055, dEye); // bright at the eye centre, falls to 0 (edge0<edge1 → defined)
-				totalEmissiveRadiance += vEye * (eyeFront * eyeGlow);`
+				totalEmissiveRadiance += vEye * (eyeFront * eyeGlow);
+				// moonlit RIM (matches the near creatures' creatureMat) → the far crowd reads as moonlit forms, not
+				// dark boxes, and there's no pop at the LOD2 boundary. Additive + night-gated → day byte-identical.
+				float aRim = pow(1.0 - clamp(dot(normalize(normal), normalize(vViewPosition)), 0.0, 1.0), 2.5);
+				totalEmissiveRadiance += vec3(0.40, 0.50, 0.72) * (aRim * uNight * 0.5);`
 			);
 	};
 	// people: white base + per-instance colour so a far crowd keeps each person's shirt tint (matching the near
-	// NPCs) instead of a uniform-blue blob. No bob — a lurching capsule reads worse than a steady one.
+	// NPCs) instead of a uniform-blue blob. No bob — a lurching capsule reads worse than a steady one. Same
+	// moonlit rim as the animals + near creatures.
 	const personMat = new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: true });
+	personMat.onBeforeCompile = (shader) => {
+		shader.uniforms.uNight = creatureNight;
+		shader.fragmentShader = shader.fragmentShader
+			.replace('#include <common>', '#include <common>\nuniform float uNight;')
+			.replace(
+				'#include <emissivemap_fragment>',
+				/* glsl */ `#include <emissivemap_fragment>
+				float pRim = pow(1.0 - clamp(dot(normalize(normal), normalize(vViewPosition)), 0.0, 1.0), 2.5);
+				totalEmissiveRadiance += vec3(0.40, 0.50, 0.72) * (pRim * uNight * 0.5);`
+			);
+	};
 	const animals = new THREE.InstancedMesh(catGeo, animalMat, MAX);
 	const people = new THREE.InstancedMesh(personGeo, personMat, MAX);
 	animals.castShadow = people.castShadow = false;
