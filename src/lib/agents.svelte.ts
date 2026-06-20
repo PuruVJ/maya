@@ -269,6 +269,17 @@ class AgentManager {
 		return this.#night;
 	}
 
+	/** Recompute per-agent LOD tier + the nearest-N shadow budget from the current positions. The JS tick does
+	 *  this inline; the Rust backend produces transforms but not these view flags, so it calls this after each
+	 *  read-back (cheap, no alloc — reuses #shadowScratch) to keep impostor/shadow perf identical. */
+	assignPerfFlags(px: number, pz: number): void {
+		for (const m of this.#agents) {
+			m.dist = Math.hypot(m.agent.x - px, m.agent.z - pz);
+			m.lod = m.dist > LOD2_DIST ? 2 : m.dist > LOD1_DIST ? 1 : 0;
+		}
+		this.#assignShadows();
+	}
+
 	/** The world's paths (roads/rivers) — ambient trees are culled on them, so animals skip those ghost trunks. */
 	setPaths(paths: Path[]): void {
 		this.#paths = paths;

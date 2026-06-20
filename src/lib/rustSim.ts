@@ -30,6 +30,7 @@ interface RustSim {
 	spawn(x: number, z: number, kindCode: number, radius: number, seedId: number): number;
 	set_player(x: number, z: number): void;
 	set_night(n: number): void;
+	set_obstacles(flat: Float64Array): void;
 	step(dt: number): void;
 	count(): number;
 	danger(): number;
@@ -63,9 +64,32 @@ let headings: Float32Array = new Float32Array();
 let healths: Float32Array = new Float32Array();
 let flags: Uint32Array = new Uint32Array();
 
-/** Is the Rust engine requested via `?engine=rust`? (The app is client-only three.js — no SSR to guard.) */
+/** Which sim engine drives the agents. Rust is the DEFAULT now; `?engine=js` forces the legacy JS sim (for
+ *  A/B). (The app is client-only three.js — no SSR to guard.) */
 export function engineIsRust(): boolean {
-	return new URLSearchParams(location.search).get('engine') === 'rust';
+	return new URLSearchParams(location.search).get('engine') !== 'js';
+}
+
+// latest obstacle set, kept so it survives the async wasm load (Scene may push obstacles before the Sim exists)
+let pendingObstacles: Float64Array | null = null;
+
+/** Feed the solid obstacles (props/buildings/ponds) to the Rust world. Accepts the same shape Scene builds for
+ *  agentManager.setObstacles; flattened to the packed [x,z,r,hx,hz,cos,sin] layout (circle → hx = NaN). */
+export function setRustObstacles(obs: { x: number; z: number; r: number; hx?: number; hz?: number; cos?: number; sin?: number }[]): void {
+	const flat = new Float64Array(obs.length * 7);
+	for (let i = 0; i < obs.length; i++) {
+		const o = obs[i];
+		const b = i * 7;
+		flat[b] = o.x;
+		flat[b + 1] = o.z;
+		flat[b + 2] = o.r;
+		flat[b + 3] = o.hx ?? NaN; // NaN → circle
+		flat[b + 4] = o.hz ?? 0;
+		flat[b + 5] = o.cos ?? 0;
+		flat[b + 6] = o.sin ?? 0;
+	}
+	pendingObstacles = flat;
+	if (sim) sim.set_obstacles(flat);
 }
 
 /** Lifecycle status — `AgentSystem` falls back to the JS sim unless this is `'ready'`. */
@@ -84,6 +108,7 @@ export async function initRustSim(): Promise<boolean> {
 		const mod = (await import(/* @vite-ignore */ `${base}/worldsim/worldsim.js`)) as unknown as WasmModule;
 		wasm = await mod.default();
 		sim = new mod.Sim();
+		if (pendingObstacles) sim.set_obstacles(pendingObstacles); // apply anything Scene pushed before we loaded
 		status = 'ready';
 		console.info('[rustSim] engine=rust ready');
 		return true;
@@ -150,4 +175,7 @@ export function tickRust(dt: number): void {
 		m.dead = (f & 1) !== 0;
 		m.asleep = (f & 2) !== 0;
 	}
+	// the Rust read-back has positions but not the per-agent perf flags — recompute LOD + shadow budget so the
+	// impostor/shadow culling (and thus FPS) is identical to the JS path.
+	agentManager.assignPerfFlags(playerState.pos[0], playerState.pos[2]);
 }

@@ -51,6 +51,21 @@ const CHASE_BOOST: f64 = 1.45;
 const CONTACT_PAD: f64 = 0.4; // extra reach that counts as a catch
 const CAN_SPRINT: f64 = 0.03; // stamina above this can still sprint
 const LURE_R: f64 = 11.0; // an idle cat within this range of a lake fish pads to the bank after it (never catches)
+const OBSTACLE_CELL: f64 = 12.0; // obstacle grid cell — must exceed the biggest footprint+body radius (port of the JS)
+
+/// A solid the agents can't walk through — a CIRCLE (props/ponds) or an ORIENTED BOX (buildings, so animals hug
+/// walls / use streets like the player). Port of the JS `Obstacle`; `is_box` picks the resolve path.
+#[derive(Clone, Copy)]
+struct Obstacle {
+    x: f64,
+    z: f64,
+    r: f64,         // bounding radius (circle radius, or the box's corner radius so the grid still finds it)
+    hx: f64,        // box half-extent along local X (used when is_box)
+    hz: f64,        // box half-extent along local Z
+    cos: f64,       // cos/sin of the box's Y-rotation
+    sin: f64,
+    is_box: bool,
+}
 
 // stamina / energy / metabolism (chunk d)
 const EXERT_DRAIN: f64 = 0.22; // /s while sprinting, divided by endurance
@@ -270,6 +285,10 @@ pub struct World {
     kills: Vec<usize>,             // prey caught this tick → turned to corpses after the behaviour pass
     slept: Vec<bool>,              // was asleep AT TICK START → handled by the sleep pass, skipped elsewhere
     fish: Vec<(f64, f64)>,         // lake-fish lure points (fed from the JS view; cats pad to the bank after them)
+    obstacles: Vec<Obstacle>,      // solid props/buildings/ponds → agents are pushed out (no tunnelling)
+    ob_grid: SpatialHashGrid,      // obstacle lookup grid (cell = OBSTACLE_CELL), rebuilt on set_obstacles
+    has_obstacles: bool,
+    ob_scratch: Vec<u32>,          // reused obstacle-query scratch (mem::take'd in → no per-agent alloc)
 }
 
 impl Default for World {
@@ -296,6 +315,10 @@ impl World {
             kills: Vec::new(),
             slept: Vec::new(),
             fish: Vec::new(),
+            obstacles: Vec::new(),
+            ob_grid: SpatialHashGrid::new(OBSTACLE_CELL),
+            has_obstacles: false,
+            ob_scratch: Vec::new(),
         }
     }
 
@@ -319,6 +342,87 @@ impl World {
     pub fn set_fish(&mut self, xz: &[f64]) {
         self.fish.clear();
         self.fish.extend(xz.chunks_exact(2).map(|c| (c[0], c[1])));
+    }
+
+    /// Replace the solid obstacles agents route around. `flat` is a packed [x,z,r,hx,hz,cos,sin] per obstacle
+    /// (7 f64s each); a CIRCLE is signalled by `hx = NaN` (then only x/z/r matter), else it's an oriented box.
+    /// Rebuilds the obstacle grid (called only when the world's objects change, not per tick).
+    pub fn set_obstacles(&mut self, flat: &[f64]) {
+        self.obstacles.clear();
+        self.ob_grid.clear();
+        for c in flat.chunks_exact(7) {
+            let o = Obstacle { x: c[0], z: c[1], r: c[2], hx: c[3], hz: c[4], cos: c[5], sin: c[6], is_box: !c[3].is_nan() };
+            self.ob_grid.insert(o.x, o.z, self.obstacles.len() as u32);
+            self.obstacles.push(o);
+        }
+        self.has_obstacles = !self.obstacles.is_empty();
+    }
+
+    /// Hard push-out: keep agent `i` out of every nearby solid (circle or oriented box), cancelling only the
+    /// velocity component driving INTO it so it SLIDES along the surface. Port of the JS `#resolveObstacles`.
+    fn resolve_obstacles(&mut self, i: usize) {
+        if !self.has_obstacles {
+            return;
+        }
+        let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
+        let mut scratch = std::mem::take(&mut self.ob_scratch);
+        scratch.clear();
+        self.ob_grid.for_each_neighbor(ax, az, |oi| scratch.push(oi));
+        let radius = self.agents[i].radius;
+        for &oi in &scratch {
+            let o = self.obstacles[oi as usize];
+            let a = &mut self.agents[i].agent;
+            let dx = a.x - o.x;
+            let dz = a.z - o.z;
+            let nx;
+            let nz;
+            if o.is_box {
+                // ORIENTED BOX — rotate into local frame, clamp, eject along the least-penetration axis
+                let (cs, sn) = (o.cos, o.sin);
+                let lx = dx * cs - dz * sn;
+                let lz = dx * sn + dz * cs;
+                let hx = o.hx + radius;
+                let hz = o.hz + radius;
+                if lx.abs() >= hx || lz.abs() >= hz {
+                    continue; // outside the inflated box
+                }
+                let mut nlx = lx;
+                let mut nlz = lz;
+                let lnx;
+                let lnz;
+                if hx - lx.abs() < hz - lz.abs() {
+                    nlx = if lx >= 0.0 { hx } else { -hx };
+                    lnx = if lx >= 0.0 { 1.0 } else { -1.0 };
+                    lnz = 0.0;
+                } else {
+                    nlz = if lz >= 0.0 { hz } else { -hz };
+                    lnx = 0.0;
+                    lnz = if lz >= 0.0 { 1.0 } else { -1.0 };
+                }
+                a.x = o.x + (nlx * cs + nlz * sn); // local → world
+                a.z = o.z + (-nlx * sn + nlz * cs);
+                nx = lnx * cs + lnz * sn; // push normal → world
+                nz = -lnx * sn + lnz * cs;
+            } else {
+                let min = o.r + radius;
+                let d2 = dx * dx + dz * dz;
+                if d2 >= min * min || d2 == 0.0 {
+                    continue;
+                }
+                let d = d2.sqrt();
+                nx = dx / d;
+                nz = dz / d;
+                a.x = o.x + nx * min; // shove out to the footprint edge
+                a.z = o.z + nz * min;
+            }
+            let vn = a.vx * nx + a.vz * nz; // cancel only the inward component → SLIDE, don't stick
+            if vn < 0.0 {
+                a.vx -= vn * nx;
+                a.vz -= vn * nz;
+                a.speed = a.vx.hypot(a.vz);
+            }
+        }
+        self.ob_scratch = scratch;
     }
 
     /// Nearest fish to (x,z) within `r` — linear scan (fish are few); returns its position.
@@ -777,6 +881,16 @@ impl World {
             self.agents[i].crowd = crowd;
             let menu = menu_for(self.agents[i].kind);
             self.agents[i].agent.update(tick, DT, menu, Some((fx, fz)), boost, pursuing);
+        }
+
+        // 9. resolve obstacles — keep every live agent out of solid props/buildings/ponds (slides, no tunnelling)
+        if self.has_obstacles {
+            for i in 0..n {
+                if self.agents[i].dead {
+                    continue;
+                }
+                self.resolve_obstacles(i);
+            }
         }
     }
 
@@ -1399,6 +1513,33 @@ mod tests {
         assert_eq!(opts_for(Kind::Rabbit, 1).wanderlust, 0.3);
         // max_speed is the per-individual eco roll
         assert_eq!(opts_for(Kind::Cat, 100).max_speed, eco::speed_for(Kind::Cat, 100));
+    }
+
+    #[test]
+    fn a_circle_obstacle_pushes_agents_out() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let r = w.spawn(animal(2.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // spawned INSIDE the pond
+        w.set_obstacles(&[0.0, 0.0, 5.0, f64::NAN, 0.0, 0.0, 0.0]); // circle: pond radius 5 at origin
+        for t in 1..=30 {
+            w.tick_once(t);
+        }
+        let d = w.agents[r].agent.x.hypot(w.agents[r].agent.z);
+        assert!(d >= 5.0 + 0.35 - 1e-6, "the rabbit is shoved to the pond's edge, never inside (dist {d})");
+    }
+
+    #[test]
+    fn an_oriented_box_ejects_agents() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let a = w.spawn(animal(1.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // inside a 3×3 (half-extent) building
+        // box: bounding r=hypot(3,3), half-extents 3×3, no rotation (cos=1,sin=0)
+        w.set_obstacles(&[0.0, 0.0, 4.2426, 3.0, 3.0, 1.0, 0.0]);
+        for t in 1..=30 {
+            w.tick_once(t);
+        }
+        let (ax, az) = (w.agents[a].agent.x.abs(), w.agents[a].agent.z.abs());
+        assert!(ax >= 3.0 - 1e-6 || az >= 3.0 - 1e-6, "the rabbit is ejected from the building interior (at {ax},{az})");
     }
 
     #[test]

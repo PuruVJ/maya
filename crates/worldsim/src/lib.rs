@@ -99,6 +99,12 @@ mod wasm_api {
             self.world.set_fish(xz);
         }
 
+        /// Replace the solid obstacles from a packed [x,z,r,hx,hz,cos,sin] per obstacle (7 f64s each); a CIRCLE
+        /// is signalled by `hx = NaN`, else it's an oriented box. Agents are pushed out + slide along surfaces.
+        pub fn set_obstacles(&mut self, flat: &[f64]) {
+            self.world.set_obstacles(flat);
+        }
+
         /// Advance by real elapsed seconds (the clock emits N fixed-DT ticks), then refresh the read-back.
         pub fn step(&mut self, real_dt: f64) {
             self.world.step(real_dt);

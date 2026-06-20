@@ -36,6 +36,7 @@
 	import SkyDome from './SkyDome.svelte';
 	import { SKY_FOG, kindDef } from '$lib/kinds';
 	import { agentManager } from '$lib/agents.svelte';
+	import { engineIsRust, setRustObstacles } from '$lib/rustSim';
 	import { playerState } from '$lib/playerState.svelte';
 	import { wind } from '$lib/wind';
 	import { weather } from '$lib/weather';
@@ -99,7 +100,9 @@
 		const ponds = (world.zones ?? [])
 			.filter((z) => z.material === 'water')
 			.map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
-		agentManager.setObstacles([...props, ...ponds]);
+		const obstacles = [...props, ...ponds];
+		agentManager.setObstacles(obstacles);
+		if (engineIsRust()) setRustObstacles(obstacles); // the Rust sim resolves the same solids (no tunnelling)
 		agentManager.setPaths(world.paths ?? []); // so animals skip ambient trees culled on roads
 	});
 
