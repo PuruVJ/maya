@@ -36,7 +36,7 @@
 	import SkyDome from './SkyDome.svelte';
 	import { SKY_FOG, kindDef } from '$lib/kinds';
 	import { agentManager } from '$lib/agents.svelte';
-	import { engineIsRust, setRustObstacles } from '$lib/rustSim';
+	import { setRustObstacles } from '$lib/rustSim';
 	import { playerState } from '$lib/playerState.svelte';
 	import { wind } from '$lib/wind';
 	import { weather } from '$lib/weather';
@@ -101,9 +101,8 @@
 			.filter((z) => z.material === 'water')
 			.map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
 		const obstacles = [...props, ...ponds];
-		agentManager.setObstacles(obstacles);
-		if (engineIsRust()) setRustObstacles(obstacles); // the Rust sim resolves the same solids (no tunnelling)
-		agentManager.setPaths(world.paths ?? []); // so animals skip ambient trees culled on roads
+		setRustObstacles(obstacles); // the Rust sim resolves these solids (push-out, no tunnelling)
+		agentManager.setPaths(world.paths ?? []); // (legacy) tree-cull paths — used by the not-yet-ported tree push-out
 	});
 
 	// Reveal objects a few per frame so a big batch ("add 120 cats") mounts gradually instead of all at once

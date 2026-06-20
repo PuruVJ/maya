@@ -1,32 +1,25 @@
 <script lang="ts">
-	// Headless: the single per-frame loop that steps every ambient agent (cats + people) through the
-	// shared manager — one grid rebuild + one flock pass for all of them, instead of N separate loops.
+	// Headless: the single fixed-tick loop that drives the whole agent world. The simulation IS the Rust/WASM
+	// core (crates/worldsim) — JS owns no agent sim anymore (see the rust-owns-all-compute memory). This just
+	// pumps it.
 	//
-	// CLOCK-DRIVEN (docs/self-sustaining-world.md §1.6): instead of stepping by the raw render dt, we feed
-	// real time into the SimClock, which accumulates it into whole FIXED-SIZE (30 Hz) ticks. The sim then
-	// advances in deterministic integer steps — frame-rate-independent (identical behaviour at 30/60/144 fps)
-	// and the basis for pause / time-lapse / seek. A long frame stall emits a few catch-up ticks (capped
-	// inside advance()). Renderers interpolate between steps by clock.alpha, so motion stays smooth at the
-	// display rate despite the 30 Hz sim.
+	// CLOCK-DRIVEN (docs/self-sustaining-world.md §1.6): instead of stepping by the raw render dt, we feed real
+	// time into the SimClock, which accumulates it into whole FIXED-SIZE (30 Hz) ticks → frame-rate-independent
+	// (identical at 30/60/144 fps), the basis for pause / time-lapse / seek. A long frame stall emits a few
+	// catch-up ticks (capped inside advance()). Renderers interpolate between steps by clock.alpha, so motion
+	// stays smooth at the display rate despite the 30 Hz sim.
 	//
-	// OPTIONAL RUST BACKEND (?engine=rust): the same fixed-tick loop can instead be driven by the headless
-	// Rust/WASM core (crates/worldsim) via the rustSim adapter — to A/B-test the engine port in-browser. Default
-	// is the JS sim; until the wasm loads (and if it fails) we fall back to it seamlessly. See rustSim.ts for
-	// the known gaps in this first cut (no world obstacles / LOD yet).
+	// The wasm loads eagerly + mandatorily; until it's ready the agents simply don't tick (no JS fallback — if
+	// the load fails they stay put and rustSim logs an error). Run `pnpm build:wasm` to produce the bundle.
 	import { useTask } from '@threlte/core';
-	import { agentManager } from '$lib/agents.svelte';
 	import { clock, DT } from '$lib/clock';
-	import { engineIsRust, initRustSim, rustStatus, tickRust } from '$lib/rustSim';
+	import { initRustSim, rustStatus, tickRust } from '$lib/rustSim';
 
-	const useRust = engineIsRust();
-	if (useRust) initRustSim(); // async; the JS sim drives until it resolves (and if it fails)
+	initRustSim(); // eager + mandatory; agents idle until it resolves
 
 	useTask((dt) => {
+		if (rustStatus() !== 'ready') return; // wasm still loading (or failed) → don't advance the sim
 		const n = clock.advance(dt);
-		if (useRust && rustStatus() === 'ready') {
-			for (let i = 0; i < n; i++) tickRust(DT);
-		} else {
-			for (let i = 0; i < n; i++) agentManager.tick(DT);
-		}
+		for (let i = 0; i < n; i++) tickRust(DT);
 	});
 </script>

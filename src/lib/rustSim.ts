@@ -1,21 +1,16 @@
 /**
- * OPTIONAL Rust/WASM sim backend, behind `?engine=rust` (default OFF → the JS `agentManager` drives).
+ * THE agent engine — the headless Rust/WASM core (`crates/worldsim`) IS the simulation; JS + three.js is a thin
+ * render layer (see the `rust-owns-all-compute` memory + the migration roadmap in the work-queue). There is no
+ * JS sim and no toggle: the legacy `agents.svelte.ts` tick is being deleted. The `Sim` keeps its state in WASM
+ * linear memory; we read transforms back as zero-copy typed-array VIEWS (never a per-agent JS↔WASM call) and
+ * mirror them onto the `ManagedAgent`s, which are now just lightweight render mirrors the renderers read
+ * (`m.agent.rx/rz/rh` + `m.dead/m.asleep`).
  *
- * This is step 2 of the engine port (docs/self-sustaining-world.md §6.6 / §7, and the work-queue): a thin JS
- * adapter that lets the headless Rust core (`crates/worldsim`) drive the ambient agents IN-BROWSER so the user
- * can A/B it against the live JS sim. The Rust `Sim` keeps its state in WASM linear memory; we read transforms
- * back as zero-copy typed-array VIEWS (never a per-agent JS↔WASM call) and mirror them onto the existing
- * `ManagedAgent`s, so every renderer (Critter / Npc / AgentImpostors) works UNCHANGED — they still read
- * `m.agent.rx/rz/rh` + `m.dead/m.asleep` exactly as before.
+ * Build the bundle first: `pnpm build:wasm` (emits to `static/worldsim/`, served at `/worldsim/`). If the wasm
+ * fails to load, agents stay put and a console error fires — there is NO JS fallback, by design.
  *
- * Build the bundle first: `pnpm build:wasm` (emits to `static/worldsim/`, served at `/worldsim/`). Then open
- * the app with `?engine=rust`. Until the wasm finishes loading — and if it fails — the JS sim drives, seamless.
- *
- * KNOWN GAPS in this first cut (it's a SIM-BEHAVIOUR A/B toggle, not a full swap yet — all tracked for the
- * shakeout iteration): the Rust core has no world obstacles, so rust-mode agents ignore walls/water (no
- * pond/house collision, so the fish-lure has no bank to stop at); per-agent LOD/`dist`/`lod` flags aren't fed
- * yet (the impostor tier is a later Rust chunk); the player-pet `companion` isn't modelled. Behaviour is NOT
- * byte-identical to the JS sim by design (the Rust core double-buffers + is seeded by the addressed RNG).
+ * STILL ON THE RUST TODO (tracked in the work-queue, being ported): ambient-forest tree push-out (`#resolveTrees`),
+ * the player-pet `companion` follow, and the placement search (`findFreeSpot`). Until then those behave as noted.
  */
 import { base } from '$app/paths';
 import { agentManager, type ManagedAgent } from './agents.svelte';
@@ -66,12 +61,6 @@ let headings: Float32Array = new Float32Array();
 let healths: Float32Array = new Float32Array();
 let flags: Uint32Array = new Uint32Array();
 
-/** Which sim engine drives the agents. Rust is the DEFAULT now; `?engine=js` forces the legacy JS sim (for
- *  A/B). (The app is client-only three.js — no SSR to guard.) */
-export function engineIsRust(): boolean {
-	return new URLSearchParams(location.search).get('engine') !== 'js';
-}
-
 // latest obstacle set, kept so it survives the async wasm load (Scene may push obstacles before the Sim exists)
 let pendingObstacles: Float64Array | null = null;
 
@@ -94,7 +83,8 @@ export function setRustObstacles(obs: { x: number; z: number; r: number; hx?: nu
 	if (sim) sim.set_obstacles(flat);
 }
 
-/** Lifecycle status — `AgentSystem` falls back to the JS sim unless this is `'ready'`. */
+/** Lifecycle status — `AgentSystem` only ticks the world once this is `'ready'` (agents idle while loading;
+ *  `'failed'` means the wasm didn't load → agents stay put, no JS fallback). */
 export function rustStatus(): typeof status {
 	return status;
 }
@@ -116,7 +106,7 @@ export async function initRustSim(): Promise<boolean> {
 		return true;
 	} catch (e) {
 		status = 'failed';
-		console.error('[rustSim] init failed — staying on the JS sim', e);
+		console.error('[rustSim] init failed — agents will not move (no JS fallback). Did you run `pnpm build:wasm`?', e);
 		return false;
 	}
 }
