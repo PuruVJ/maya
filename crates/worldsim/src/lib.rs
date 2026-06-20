@@ -19,8 +19,10 @@
 //! makes order-independent parallelism bit-identical. Pure `u32` wrapping arithmetic → BIT-EXACT with the
 //! JS implementation (pinned in `tests` against values produced by rng.ts).
 
+mod clock;
 mod rng;
 
+pub use clock::{SimClock, DT};
 pub use rng::{hash, hash_keys, rand, seed_from};
 
 // Thin wasm-bindgen surface — only compiled for the wasm target. JS calls in for the parity check now,
