@@ -200,6 +200,7 @@ export function tickRust(dt: number): void {
 		const f = flags[i];
 		m.dead = (f & 1) !== 0;
 		m.asleep = (f & 2) !== 0;
+		m.hunting = (f & 8) !== 0; // bit3 → this apex is charging the player → the view glares its eyes
 	}
 	// the Rust read-back has positions but not the per-agent perf flags — recompute LOD + shadow budget so the
 	// impostor/shadow culling (and thus FPS) is identical to the JS path.

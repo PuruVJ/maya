@@ -394,14 +394,19 @@ export const EYE_MAT = new THREE.MeshStandardMaterial({ color: '#16131c', roughn
 // Driven by `setEyeshine(night)` (Scene calls it from the sky) — emissiveIntensity ramps 0→glow after dark.
 export const EYE_PREY_MAT = new THREE.MeshStandardMaterial({ color: '#16131c', roughness: 0.22, emissive: '#b9d8c0' });
 export const EYE_PRED_MAT = new THREE.MeshStandardMaterial({ color: '#1a1410', roughness: 0.22, emissive: '#ffb347' });
+// a predator actively CHARGING you (m.hunting) swaps to this — a hot red glare so the beast bearing down on you
+// burns its eyes at you (pairs with the danger vignette). Critter swaps to it per-agent in its hot loop.
+export const EYE_HUNT_MAT = new THREE.MeshStandardMaterial({ color: '#1a0c0c', roughness: 0.22, emissive: '#ff1e10' });
 EYE_PREY_MAT.emissiveIntensity = 0;
 EYE_PRED_MAT.emissiveIntensity = 0;
+EYE_HUNT_MAT.emissiveIntensity = 0;
 /** Ramp the animal eyeshine with how nocturnal it is (0 day … 1 night). Shared mats → one call lights every
- *  animal's eyes (predators brighter). Day → 0 (eyes just dark with a catch-light, like the human EYE_MAT). */
+ *  animal's eyes (predators brighter, a charging hunter blazes red). Day → 0 (dark eyes with a catch-light). */
 export function setEyeshine(night: number): void {
 	const n = Math.max(0, Math.min(1, night));
 	EYE_PREY_MAT.emissiveIntensity = 0.7 * n;
 	EYE_PRED_MAT.emissiveIntensity = 1.15 * n;
+	EYE_HUNT_MAT.emissiveIntensity = 1.7 * n;
 }
 
 // Unit primitives — scale per body part via <T.Mesh scale={[w,h,d]}>. One geometry each, shared by

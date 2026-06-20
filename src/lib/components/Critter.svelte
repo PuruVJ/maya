@@ -14,7 +14,7 @@
 	import { agentManager, makeManaged, speedFor, LOD2_DIST, type ManagedAgent } from '$lib/agents.svelte';
 	import { seedFrom } from '$lib/rng';
 	import { clock } from '$lib/clock';
-	import { PRIM, litMat, creatureMat, EYE_PREY_MAT, EYE_PRED_MAT, type CoatPattern } from '$lib/sharedAssets';
+	import { PRIM, litMat, creatureMat, EYE_PREY_MAT, EYE_PRED_MAT, EYE_HUNT_MAT, type CoatPattern } from '$lib/sharedAssets';
 	import type { World, WorldObject } from '$lib/world';
 
 	type Gait = 'quad' | 'hop' | 'bipedHop' | 'bipedWalk';
@@ -35,8 +35,11 @@
 	let { world, obj, species = 'cat', companion = false }: { world: World; obj?: WorldObject; species?: string; companion?: boolean } = $props();
 	const S = untrack(() => SPECIES[species] ?? SPECIES.cat);
 	const isHerb = untrack(() => species === 'rabbit' || species === 'kangaroo'); // grazers: nibble grass when idle
-	// predators get the warm/bright eyeshine (a threat watching from the dark); prey the cool pale glint
-	const eyeMat = untrack(() => (species === 'cat' || species === 'lion' || species === 'dinosaur' ? EYE_PRED_MAT : EYE_PREY_MAT));
+	// predators get the warm/bright eyeshine (a threat watching from the dark); prey the cool pale glint. A
+	// predator CHARGING you swaps to a hot-red glare — set per-agent in the hot loop (the shared eyeshine mats
+	// can't vary per-instance, so we switch WHICH material the eyes use). $state so the swap re-renders the eyes.
+	const isPredator = untrack(() => species === 'cat' || species === 'lion' || species === 'dinosaur');
+	let eyeMat = $state(untrack(() => (isPredator ? EYE_PRED_MAT : EYE_PREY_MAT)));
 	// EFFECTIVE size = species scale × the requested obj.scale (averaged → uniform), so "a giant dinosaur" /
 	// "tiny cats" actually render (and collide + impostor) at that size. Was fixed to the species default,
 	// silently ignoring obj.scale on animals while buildings/props honour it.
@@ -158,6 +161,10 @@
 		if (!showMesh) showMesh = true; // came near → remount the body (refs bind next frame)
 		if (!group || !core) return; // mesh still mounting this frame
 		group.visible = true;
+
+		// a predator locked onto YOU glares red (only writes the $state on the rare flip → no churn)
+		const wantEye = managed.hunting ? EYE_HUNT_MAT : isPredator ? EYE_PRED_MAT : EYE_PREY_MAT;
+		if (eyeMat !== wantEye) eyeMat = wantEye;
 
 		agent.interpolate(clock.alpha); // smooth the fixed-rate (30 Hz) sim across render frames
 		const gy = heightAt(agent.rx, agent.rz, world.terrain);

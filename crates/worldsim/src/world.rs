@@ -131,6 +131,7 @@ pub struct ManagedAgent {
     pub rival_time: f64,      // seconds crowded by a rival → ≥RIVAL_PATIENCE boils into a territorial fight
     pub bully: Option<usize>, // who last wounded it in a rival fight → it flees this one while spooked
     pub companion: bool,      // the player's pet → its leash tracks the player (follows) and it doesn't fear you
+    pub hunting: bool,        // this apex is actively charging the PLAYER this tick → the view glares its eyes
     pub crowd: u32,           // flock neighbours this tick
 }
 
@@ -155,7 +156,7 @@ pub struct Snapshot {
     pub zs: Vec<f32>,       // world Z per agent
     pub headings: Vec<f32>, // facing (radians)
     pub healths: Vec<f32>,    // 0..1 (drives injury/blood/limp on the view side)
-    pub flags: Vec<u32>,      // bit0 = dead, bit1 = asleep, bit2 = moving (speed past a walk)
+    pub flags: Vec<u32>,      // bit0 = dead, bit1 = asleep, bit2 = moving (speed past a walk), bit3 = hunting-player
     pub behaviors: Vec<u8>,   // current idle-FSM behaviour code (0 wander·1 pause·2 lookAround·3 groom·4 sit·5 pounce)
     pub progress: Vec<f32>,   // 0..1 through the current behaviour → drives groom cycles / pounce arcs on the view
 }
@@ -185,6 +186,9 @@ impl Snapshot {
             }
             if m.agent.speed > 1.0 {
                 f |= 4;
+            }
+            if m.hunting {
+                f |= 8;
             }
             self.flags[i] = f;
             self.behaviors[i] = m.agent.behavior.code();
@@ -223,6 +227,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         rival_time: 0.0,
         bully: None,
         companion: false,
+        hunting: false,
         crowd: 0,
     }
 }
@@ -659,6 +664,7 @@ impl World {
                     danger_now = danger_now.max(1.0 - dp2.sqrt() / reach); // closer hunter → louder alarm
                 }
             }
+            self.agents[i].hunting = hunt_player; // transient: surfaced to the view so the stalker's eyes glare
 
             // TERRITORIAL TIMER — apex predators don't pack: accumulate time crowded by a same-rank rival (the
             // targeting sets `rival`), cooling off quickly once apart; ≥RIVAL_PATIENCE → they pick a fight.
@@ -1423,6 +1429,10 @@ mod tests {
         }
         assert!(w.agents[dino].agent.x < x0 - 0.5, "the apex charges toward the player (got {})", w.agents[dino].agent.x);
         assert!(w.danger > 0.05, "the danger level rises while you're hunted (got {})", w.danger);
+        assert!(w.agents[dino].hunting, "the charging apex is flagged as hunting the player");
+        let mut snap = Snapshot::default();
+        snap.fill(&w);
+        assert!(snap.flags[dino] & 8 != 0, "the hunting flag (bit3) surfaces in the read-back for the view");
     }
 
     #[test]

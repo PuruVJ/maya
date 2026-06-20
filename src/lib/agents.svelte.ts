@@ -85,6 +85,7 @@ export interface ManagedAgent {
 	mobbed: boolean; // being swarmed
 	dead: boolean; // caught → corpse (mirrored from Rust)
 	asleep: boolean; // resting (mirrored from Rust)
+	hunting: boolean; // this apex is charging YOU right now (mirrored from Rust) → its eyeshine glares red
 	sleepTimer: number; // seconds left in the current sleep
 	chaseOX: number; // where the current prey-chase began (NaN = none)
 	chaseOZ: number;
@@ -121,6 +122,7 @@ export function makeManaged(agent: Agent, kind: string, radius: number, menu: Be
 		mobbed: false,
 		dead: false,
 		asleep: false,
+		hunting: false,
 		sleepTimer: 0,
 		chaseOX: NaN,
 		chaseOZ: NaN,

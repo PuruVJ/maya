@@ -102,7 +102,8 @@
 				dummy.updateMatrix();
 				animals.setMatrixAt(na, dummy.matrix);
 				animals.setColorAt(na, col.set(m.tint ?? KIND_COLOR[m.kind] ?? KIND_COLOR.cat));
-				// eyeshine: a far PREDATOR glints amber at you from the dark; prey a cool pale; corpses/day → none
+				// eyeshine: a far PREDATOR glints amber at you from the dark; prey a cool pale; corpses/day → none.
+				// (A hunting predator is always within ~24m → a near Critter, not an impostor, so it glares there.)
 				const glow = m.dead ? 0 : night * (PREDATORS.has(m.kind) ? 1.2 : 0.65);
 				const ec = PREDATORS.has(m.kind) ? EYE_PRED : EYE_PREY;
 				aEye[na * 3] = ec[0] * glow;
