@@ -87,7 +87,7 @@ pub struct Agent {
     pub seed_id: i32,
     pub explorer: bool,
     pub personality: f64,
-    max_speed: f64,
+    pub max_speed: f64, // public so the flock manager can scale forces to it
     home_radius: f64,
     wander_rate: f64,
     accel: f64,
