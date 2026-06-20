@@ -30,6 +30,11 @@ const MAX_CHASE2: f64 = 45.0 * 45.0; // give up a chase once this far from where
 const GIVEUP_CD: f64 = 5.0; // seconds it won't re-acquire prey after abandoning a chase
 const GIVEUP_ENERGY: f64 = 0.06; // ...or it abandons the chase early when this spent (stamina)
 
+// mobbing (chunk e) — when prey heavily outnumber one hunter, the herd turns and swarms it
+const MOB_MIN: u32 = 4; // this many prey fleeing ONE hunter flips them flee → swarm
+const MOB_RELEASE: u32 = 3; // hysteresis: a mobbed hunter stays mobbed until the swarm thins BELOW this
+const MOB_W: f64 = 2.2; // converge force as the mob charges the predator
+
 // predation/combat behaviour (chunk c)
 const HUNT2: f64 = 34.0 * 34.0; // a predator breaks into a sprint for the kill once this close
 const FLEE_W: f64 = 2.6; // strong — overrides wander when running for your life
@@ -151,11 +156,26 @@ pub struct Transient {
     pub rival: Option<usize>,   // nearest same-rank apex predator crowding it
     rival_d2: f64,
     pub near_predator: bool,    // another hunter is close → stay alert (don't doze)
+    pub mob_count: u32,         // prey currently fleeing THIS agent → ≥MOB_MIN swarms it
+    mob_x: f64,                 // running sum of those mobbers' positions → their centroid (for break-away)
+    mob_z: f64,
 }
 
 impl Transient {
     fn fresh(danger2: f64) -> Self {
-        Transient { prey: None, threat: None, prey_score: 0.0, threat_d: danger2, hunted_by: 0, rival: None, rival_d2: f64::INFINITY, near_predator: false }
+        Transient {
+            prey: None,
+            threat: None,
+            prey_score: 0.0,
+            threat_d: danger2,
+            hunted_by: 0,
+            rival: None,
+            rival_d2: f64::INFINITY,
+            near_predator: false,
+            mob_count: 0,
+            mob_x: 0.0,
+            mob_z: 0.0,
+        }
     }
 }
 
@@ -272,6 +292,31 @@ impl World {
             self.target(i, danger2);
         }
 
+        // 2b. MOBBING TALLY — how many prey flee each hunter + the sum of their positions (centroid), so a
+        // hunter knows when it's outnumbered and the herd can converge on it.
+        for i in 0..n {
+            if self.agents[i].dead {
+                continue;
+            }
+            if let Some(t) = self.transient[i].threat {
+                let (mx, mz) = (self.agents[i].agent.x, self.agents[i].agent.z);
+                self.transient[t].mob_count += 1;
+                self.transient[t].mob_x += mx;
+                self.transient[t].mob_z += mz;
+            }
+        }
+
+        // 2c. latch the mobbed state with HYSTERESIS — set at MOB_MIN, released only below MOB_RELEASE — so a
+        // count hovering at the boundary can't flip the hunter flee↔chase every tick (which froze it).
+        for i in 0..n {
+            let c = self.transient[i].mob_count;
+            if c >= MOB_MIN {
+                self.agents[i].mobbed = true;
+            } else if c < MOB_RELEASE {
+                self.agents[i].mobbed = false;
+            }
+        }
+
         // 3. SLEEP — agents asleep AT TICK START (snapshot) recover faster, drift to a stop, and WAKE if
         // disturbed (a hunter near, a fresh scare, or the player too close). They stay grid neighbours but do
         // NOT act this tick (skipped in the flock/behaviour/metabolism/step passes via `slept`).
@@ -353,6 +398,7 @@ impl World {
             let can_sprint = self.agents[i].stamina > CAN_SPRINT;
             let threat_pos = self.transient[i].threat.map(|t| (self.agents[t].agent.x, self.agents[t].agent.z));
             let prey_info = self.transient[i].prey.map(|p| (p, self.agents[p].agent.x, self.agents[p].agent.z, self.agents[p].radius));
+            let mobbed = self.agents[i].mobbed; // a hunter swarmed by ≥MOB_MIN prey (latched, §2c)
 
             // HUNT-PLAYER — a LONE (crowd<3) apex (rank≥4) predator, hungry + not otherwise busy, stalks the
             // player when you're within reach AND closer than its animal prey. Non-lethal (you're uncatchable);
@@ -363,6 +409,7 @@ impl World {
                 && a_hunts
                 && self.agents[i].hungry
                 && can_sprint
+                && !mobbed
                 && self.agents[i].spooked <= 0.0
                 && threat_pos.is_none()
             {
@@ -375,13 +422,28 @@ impl World {
                 }
             }
 
-            if let Some((tx, tz)) = threat_pos {
-                // flee the nearest hunter
-                let dx = ax - tx;
-                let dz = az - tz;
+            if mobbed {
+                // outnumbered → BREAK AWAY from the swarm's centre (a fast hunter shakes them off)
+                let mc = self.transient[i].mob_count.max(1) as f64;
+                let cx = self.transient[i].mob_x / mc;
+                let cz = self.transient[i].mob_z / mc;
+                let dx = ax - cx;
+                let dz = az - cz;
                 let d = dx.hypot(dz).max(0.1);
                 self.forces[i].0 += (dx / d) * a_max * FLEE_W;
                 self.forces[i].1 += (dz / d) * a_max * FLEE_W;
+                self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
+            } else if let Some((tx, tz)) = threat_pos {
+                // if the hunter is MOBBED the herd has the numbers → CHARGE it (drive it off); else FLEE it
+                let threat_mobbed = self.transient[i].threat.map_or(false, |t| self.agents[t].mobbed);
+                let (dx, dz, w) = if threat_mobbed {
+                    (tx - ax, tz - az, MOB_W) // converge on the hunter
+                } else {
+                    (ax - tx, az - tz, FLEE_W) // flee the hunter
+                };
+                let d = dx.hypot(dz).max(0.1);
+                self.forces[i].0 += (dx / d) * a_max * w;
+                self.forces[i].1 += (dz / d) * a_max * w;
                 self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
             } else if hunt_player {
                 // charge the player; sprint when close. Never catches — just bumps + pressures you.
@@ -503,6 +565,7 @@ impl World {
                 && self.agents[i].stamina <= 0.0
                 && self.agents[i].wake_cd <= 0.0
                 && self.agents[i].spooked <= 0.0
+                && !self.agents[i].mobbed
                 && self.transient[i].threat.is_none()
                 && !self.transient[i].near_predator
             {
@@ -1004,5 +1067,33 @@ mod tests {
             w.tick_once(t);
         }
         assert!(w.danger < 0.05, "a sated apex ignores you → no danger (got {})", w.danger);
+    }
+
+    #[test]
+    fn outnumbered_hunter_is_mobbed_and_breaks_away() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4); // keep the player out of it
+        let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
+        for k in 0..5 {
+            // 5 rabbits clustered to +x of the lion (well inside its danger radius)
+            w.spawn(animal(3.0 + k as f64 * 0.5, (k % 3) as f64 - 1.0, 100 + k), Kind::Rabbit, 0.35, 100 + k);
+        }
+        w.tick_once(1);
+        assert!(w.agents[lion].mobbed, "5 prey fleeing one lion (≥MOB_MIN) → it is mobbed");
+        for t in 2..=25 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[lion].agent.x < -0.5, "the mobbed lion breaks away from the swarm (got {})", w.agents[lion].agent.x);
+    }
+
+    #[test]
+    fn too_few_prey_do_not_mob() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
+        w.spawn(animal(3.0, 0.0, 100), Kind::Rabbit, 0.35, 100);
+        w.spawn(animal(3.5, 0.0, 101), Kind::Rabbit, 0.35, 101);
+        w.tick_once(1);
+        assert!(!w.agents[lion].mobbed, "only 2 prey is below MOB_MIN=4 → no mob");
     }
 }
