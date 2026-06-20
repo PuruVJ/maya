@@ -38,6 +38,8 @@ const MOB_KILL_DPS: f64 = 0.03; // health/s a hunter loses PER attacker pressed 
 const SLASH_CD: f64 = 1.2; // seconds between a cornered hunter's retaliatory slashes (each kills one attacker)
 const HURT_AT: f64 = 0.45; // below this health an animal is injured → limps (HURT_SPEED) and flees
 const HURT_SPEED: f64 = 0.6; // injured locomotion multiplier (so a healthy hunter can run it down)
+const RIVAL_PATIENCE: f64 = 5.0; // seconds two apex predators tolerate crowding before they turn and fight
+const RIVAL_DPS: f64 = 0.35; // health/s each loses in a territorial scrap → one breaks off wounded (or down)
 
 // predation/combat behaviour (chunk c)
 const HUNT2: f64 = 34.0 * 34.0; // a predator breaks into a sprint for the kill once this close
@@ -110,8 +112,9 @@ pub struct ManagedAgent {
     pub slash_max: u32,
     pub slash_budget: u32,
     pub slash_cd: f64,
-    pub rival_time: f64,
-    pub crowd: u32, // flock neighbours this tick
+    pub rival_time: f64,      // seconds crowded by a rival → ≥RIVAL_PATIENCE boils into a territorial fight
+    pub bully: Option<usize>, // who last wounded it in a rival fight → it flees this one while spooked
+    pub crowd: u32,           // flock neighbours this tick
 }
 
 /// Build a fully-seeded managed agent from its kind (so callers don't repeat the eco wiring).
@@ -143,6 +146,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         slash_budget: sm,
         slash_cd: 0.0,
         rival_time: 0.0,
+        bully: None,
         crowd: 0,
     }
 }
@@ -440,6 +444,27 @@ impl World {
                 }
             }
 
+            // TERRITORIAL TIMER — apex predators don't pack: accumulate time crowded by a same-rank rival (the
+            // targeting sets `rival`), cooling off quickly once apart; ≥RIVAL_PATIENCE → they pick a fight.
+            let rival = self.transient[i].rival;
+            let rival_alive = rival.map_or(false, |r| !self.agents[r].dead);
+            if rival_alive {
+                self.agents[i].rival_time = (self.agents[i].rival_time + DT).min(RIVAL_PATIENCE + 0.5);
+            } else {
+                self.agents[i].rival_time = (self.agents[i].rival_time - DT * 1.5).max(0.0);
+            }
+            let fighting_rival = rival_alive && self.agents[i].rival_time >= RIVAL_PATIENCE && !mobbed && threat_pos.is_none();
+            let rival_pos = if fighting_rival {
+                rival.map(|r| (r, self.agents[r].agent.x, self.agents[r].agent.z, self.agents[r].radius))
+            } else {
+                None
+            };
+            let bully_pos = if self.agents[i].spooked > 0.0 {
+                self.agents[i].bully.filter(|&b| !self.agents[b].dead).map(|b| (self.agents[b].agent.x, self.agents[b].agent.z))
+            } else {
+                None
+            };
+
             if mobbed {
                 // outnumbered → BREAK AWAY from the swarm's centre (a fast hunter shakes them off)
                 let mc = self.transient[i].mob_count.max(1) as f64;
@@ -466,6 +491,14 @@ impl World {
                         }
                     }
                 }
+            } else if let Some((bx, bz)) = bully_pos {
+                // freshly bullied (lost a rival fight) → keep fleeing that bully while spooked
+                let dx = ax - bx;
+                let dz = az - bz;
+                let d = dx.hypot(dz).max(0.1);
+                self.forces[i].0 += (dx / d) * a_max * FLEE_W;
+                self.forces[i].1 += (dz / d) * a_max * FLEE_W;
+                self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
             } else if let Some((tx, tz)) = threat_pos {
                 // if the hunter is MOBBED the herd has the numbers → CHARGE it (drive it off); else FLEE it
                 let threat_mobbed = self.transient[i].threat.map_or(false, |t| self.agents[t].mobbed);
@@ -478,6 +511,22 @@ impl World {
                 self.forces[i].0 += (dx / d) * a_max * w;
                 self.forces[i].1 += (dz / d) * a_max * w;
                 self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
+            } else if let Some((r, rx, rz, rr)) = rival_pos {
+                // TERRITORIAL FIGHT — charge the rival; on contact both bleed, so one breaks off wounded (then
+                // flees its bully via the spooked branch) or is dragged down. Apex hunters spread out, not pack.
+                let dx = rx - ax;
+                let dz = rz - az;
+                let d = dx.hypot(dz).max(0.1);
+                self.forces[i].0 += (dx / d) * a_max * CHASE_W;
+                self.forces[i].1 += (dz / d) * a_max * CHASE_W;
+                self.behave[i] = (if can_sprint { CHASE_BOOST } else { 1.0 }, true);
+                if d < radius + rr + CONTACT_PAD {
+                    self.agents[i].health = (self.agents[i].health - RIVAL_DPS * DT).max(0.0);
+                    if self.agents[i].health < HURT_AT {
+                        self.agents[i].spooked = self.agents[i].spooked.max(2.5);
+                        self.agents[i].bully = Some(r); // wounded → break off + flee
+                    }
+                }
             } else if hunt_player {
                 // charge the player; sprint when close. Never catches — just bumps + pressures you.
                 let dx = px - ax;
@@ -1202,5 +1251,35 @@ mod tests {
         w.agents[lion].health = 0.004; // one mob-tick (0.03·5·DT ≈ 0.005) from empty
         w.tick_once(1);
         assert!(w.agents[lion].dead, "the mob drags down a hunter whose health it empties");
+    }
+
+    #[test]
+    fn crowded_rivals_fight_and_bleed() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let l1 = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
+        let l2 = w.spawn(animal(1.0, 0.0, 2), Kind::Lion, 0.5, 2); // same rank → rivals, within FIGHT_R2
+        w.agents[l1].rival_time = 5.5; // fast-forward the patience so they fight now
+        w.agents[l2].rival_time = 5.5;
+        let h0 = w.agents[l1].health;
+        for t in 1..=30 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[l1].health < h0, "two crowded apex rivals bleed in a scrap (got {})", w.agents[l1].health);
+        assert!(w.agents[l2].health < h0, "...and both of them take blows");
+    }
+
+    #[test]
+    fn a_wounded_rival_breaks_off() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let l1 = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
+        let l2 = w.spawn(animal(0.8, 0.0, 2), Kind::Lion, 0.5, 2); // in contact
+        w.agents[l1].rival_time = 5.5;
+        w.agents[l2].rival_time = 5.5;
+        w.agents[l1].health = 0.4; // already hurt → one scrap-tick tips it below HURT_AT
+        w.tick_once(1);
+        assert!(w.agents[l1].spooked > 0.0, "a wounded rival breaks off (spooked)");
+        assert_eq!(w.agents[l1].bully, Some(l2), "...fleeing the rival that bullied it");
     }
 }
