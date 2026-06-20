@@ -39,6 +39,18 @@ const CHASE_BOOST: f64 = 1.45;
 const CONTACT_PAD: f64 = 0.4; // extra reach that counts as a catch
 const CAN_SPRINT: f64 = 0.03; // stamina above this can still sprint
 
+// stamina / energy / metabolism (chunk d)
+const EXERT_DRAIN: f64 = 0.22; // /s while sprinting, divided by endurance
+const RECOVER: f64 = 0.16; // /s at rest (prey/people only), × endurance
+const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
+const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
+const HEAL: f64 = 0.04; // health/s regained while unharmed
+// HYSTERESIS hunger latch (the user's flip-flop fix): a carnivore commits to hunting below LO and won't stop
+// (rest) until eating lifts it past HI — without the gap, energy at one threshold flipped hunting on/off every
+// tick, so its prey flip-flopped flee↔doze. Latched in `hungry`.
+const HUNGRY_LO: f64 = 0.5;
+const HUNGRY_HI: f64 = 0.72;
+
 const ANIMAL_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround, Behavior::Sit, Behavior::Groom];
 const PERSON_MENU: &[Behavior] = &[Behavior::Wander, Behavior::Pause, Behavior::LookAround];
 
@@ -289,7 +301,11 @@ impl World {
                 self.behave[i] = (if close && can_sprint { CHASE_BOOST } else { 1.0 }, true);
                 if close && d < radius + pr + CONTACT_PAD {
                     self.kills.push(p); // caught — turned to a corpse below
+                    self.agents[i].meals += 1;
                     self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
+                    // EAT — a kill refuels energy. (The food-coma after `full_after` kills needs the sleep
+                    // state, so it lands with chunk d2; here a meal always refuels.)
+                    self.agents[i].stamina = (self.agents[i].stamina + EAT_GAIN).min(1.0);
                 }
             }
         }
@@ -303,7 +319,47 @@ impl World {
             self.agents[p].agent.vz = 0.0;
         }
 
-        // 6. step each agent (write the next positions)
+        // 6. metabolism — sprinting + a carnivore's basal drain ebb stamina (the energy unit); prey/people
+        // rest-recover. The LATCHED hunger (hysteresis LO/HI) is the flip-flop fix: a carnivore commits to
+        // hunting below LO and won't resume until eating lifts it past HI. Plus slow healing + the cooldown
+        // timers. (Sleep / food-coma / wake → chunk d2; this pass currently runs for all live agents.)
+        for i in 0..n {
+            if self.agents[i].dead {
+                continue;
+            }
+            let boost = self.behave[i].0;
+            let endurance = self.agents[i].endurance;
+            let is_carnivore = matches!(eco(self.agents[i].kind).hunts, Hunts::Lower);
+            let mut s = self.agents[i].stamina;
+            if boost > 1.0 {
+                s = (s - (EXERT_DRAIN / endurance) * DT).max(0.0);
+            }
+            if is_carnivore {
+                s = (s - BASAL_DRAIN * DT).max(0.0); // always ebbs; refuels only by eating
+            } else if boost <= 1.0 {
+                s = (s + RECOVER * endurance * DT).min(1.0); // prey/people rest-recover
+            }
+            self.agents[i].stamina = s;
+            if is_carnivore {
+                if s < HUNGRY_LO {
+                    self.agents[i].hungry = true;
+                } else if s > HUNGRY_HI {
+                    self.agents[i].hungry = false;
+                }
+            }
+            self.agents[i].health = (self.agents[i].health + HEAL * DT).min(1.0);
+            if self.agents[i].spooked > 0.0 {
+                self.agents[i].spooked -= DT;
+            }
+            if self.agents[i].give_up_cd > 0.0 {
+                self.agents[i].give_up_cd -= DT;
+            }
+            if self.agents[i].wake_cd > 0.0 {
+                self.agents[i].wake_cd -= DT;
+            }
+        }
+
+        // 7. step each agent (write the next positions)
         for i in 0..n {
             if self.agents[i].dead {
                 continue;
@@ -649,5 +705,56 @@ mod tests {
         assert!(w.agents[rabbit].agent.x > 1.0, "rabbit fled +x, got {}", w.agents[rabbit].agent.x);
         let gap1 = (w.agents[rabbit].agent.x - w.agents[cat].agent.x).abs();
         assert!(gap1 > gap0 - 1.0, "the rabbit kept its distance");
+    }
+
+    #[test]
+    fn eating_refuels() {
+        let mut w = World::new();
+        let cat = w.spawn(animal(0.0, 0.0, 10), Kind::Cat, 0.35, 10);
+        let rabbit = w.spawn(animal(0.5, 0.0, 11), Kind::Rabbit, 0.35, 11); // in contact
+        let s0 = w.agents[cat].stamina; // 0.45 (carnivores start hungry)
+        w.tick_once(1);
+        assert!(w.agents[rabbit].dead);
+        assert_eq!(w.agents[cat].meals, 1);
+        assert!(w.agents[cat].stamina > s0 + 0.4, "a kill refuels energy (got {})", w.agents[cat].stamina);
+    }
+
+    #[test]
+    fn hunger_latch_has_hysteresis() {
+        // a carnivore's `hungry` only flips at the LO/HI thresholds, holding in the gap (no per-tick flip-flop)
+        let mut w = World::new();
+        let cat = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.35, 1); // alone → no prey, no sprint
+        // above HI → drops the hunger latch
+        w.agents[cat].stamina = 0.8;
+        w.agents[cat].hungry = true;
+        w.tick_once(1);
+        assert!(!w.agents[cat].hungry, "energy above HI clears hunger");
+        // in the gap (LO..HI) → the latch HOLDS (both directions)
+        w.agents[cat].stamina = 0.6;
+        w.tick_once(2);
+        assert!(!w.agents[cat].hungry, "in the gap, stays not-hungry");
+        w.agents[cat].hungry = true;
+        w.agents[cat].stamina = 0.6;
+        w.tick_once(3);
+        assert!(w.agents[cat].hungry, "in the gap, stays hungry");
+        // below LO → latches hungry
+        w.agents[cat].hungry = false;
+        w.agents[cat].stamina = 0.4;
+        w.tick_once(4);
+        assert!(w.agents[cat].hungry, "energy below LO sets hunger");
+    }
+
+    #[test]
+    fn prey_rest_recovers_carnivore_does_not() {
+        let mut w = World::new();
+        let rabbit = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        let cat = w.spawn(animal(60.0, 0.0, 2), Kind::Cat, 0.35, 2); // far apart → idle, no chase
+        w.agents[rabbit].stamina = 0.5;
+        w.agents[cat].stamina = 0.5;
+        for t in 1..=30 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[rabbit].stamina > 0.5, "a resting rabbit recovers");
+        assert!(w.agents[cat].stamina < 0.5, "an idle carnivore's energy still ebbs");
     }
 }
