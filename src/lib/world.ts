@@ -89,7 +89,7 @@ export function emptyWorld(name = 'Untitled'): World {
 		v: 1,
 		name,
 		ground: 'grass',
-		sky: 'day',
+		sky: 'night', // night-only game (user decision 2026-06-21) — perpetual night for atmosphere/simplicity
 		spawn: [0, 0, 0],
 		objects: [],
 		zones: [],

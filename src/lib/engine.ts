@@ -378,7 +378,9 @@ export function applyOps(
 				world.ground = op.value;
 				break;
 			case 'setSky':
-				world.sky = op.value;
+				// night-only game (user decision 2026-06-21): any sky request resolves to night. `op.value` is
+				// kept in the grammar (the tuned model still emits it) but coerced here so there's no path to day.
+				world.sky = 'night';
 				break;
 			case 'addZone': {
 				const size = op.size ?? 10;

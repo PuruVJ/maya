@@ -107,5 +107,7 @@ export async function encodeWorld(w: World, live?: Live, player?: PlayerPos): Pr
 
 /** `#w=` token → World (Y re-grounded from terrain; ids regenerated + de-duplicated). */
 export async function decodeWorld(token: string): Promise<World> {
-	return repairIds(unpack(JSON.parse(await gunzip(fromB64url(token)))));
+	const w = repairIds(unpack(JSON.parse(await gunzip(fromB64url(token)))));
+	w.sky = 'night'; // night-only game — any older shared world reopens as night
+	return w;
 }
