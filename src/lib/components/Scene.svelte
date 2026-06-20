@@ -39,7 +39,7 @@
 	import { wind } from '$lib/wind';
 	import { weather } from '$lib/weather';
 	import * as THREE from 'three';
-	import type { World } from '$lib/world';
+	import type { World, WorldObject } from '$lib/world';
 
 	let { world }: { world: World } = $props();
 	const fog = $derived(SKY_FOG[world.sky] ?? SKY_FOG.day);
@@ -108,6 +108,24 @@
 	const REVEAL_CAP = 6; // max mounts/frame — each is real work (meshes + an agent), so cap to avoid a hitch
 	const REVEAL_FRAMES = 12; // ...but catch a big backlog up within ~this many frames (≈0.2 s) so it's not a slow drip
 	let revealed = $state(0);
+
+	// LAZY / DISTANCE-CAPPED REVEAL — only realize STATIC builds (houses/trees/props/lamps) NEAR the player; far
+	// ones stay unmounted until you approach (they pop in front of you, emerging from the fog/curve). So reloading
+	// next to a HUGE city never has to mount + draw the whole thing — the cost is bounded by the radius, not the
+	// city size — and the steady draw cost is bounded too. Creatures always mount (few, and they wander off their
+	// spawn — their own LOD/impostor system handles their distance). Hysteresis (KEEP > SHOW) so an object at the
+	// boundary doesn't flicker mount/unmount as you jitter. The set is recomputed only after moving RECHECK_MOVE,
+	// not every frame. (A far-building SILHOUETTE layer — big-world.md §4 — is the next step so the horizon isn't
+	// bare; this first kills the jank.)
+	const SHOW_R2 = 125 * 125;
+	const KEEP_R2 = 150 * 150;
+	const RECHECK_MOVE2 = 6 * 6;
+	const CREATURE_KINDS = new Set(['person', 'cat', 'lion', 'rabbit', 'kangaroo', 'dinosaur']);
+	let visible = $state<WorldObject[]>([]);
+	const shownIds = new Set<string>();
+	let lastRevealX = NaN;
+	let lastRevealZ = NaN;
+	let lastObjLen = -1;
 	// LIGHTNING — the rainy 'fog' sky flickers with distant sheet lightning: a bright transient added to the
 	// ambient so the whole overcast scene lifts for a beat, then decays fast. No bolt geometry / no sound; the
 	// sudden brighten alone reads as a far storm. Gated to fog → other skies are untouched (flash stays 0).
@@ -150,12 +168,36 @@
 			sun.target.position.set(cx, 0, cz);
 			sun.target.updateMatrixWorld();
 		}
-		const n = world.objects.length;
+		// recompute the NEAR set only after moving far enough or the world changed (not every frame)
+		const px = playerState.pos[0];
+		const pz = playerState.pos[2];
+		const objLen = world.objects.length;
+		if (objLen !== lastObjLen || Number.isNaN(lastRevealX) || (px - lastRevealX) ** 2 + (pz - lastRevealZ) ** 2 > RECHECK_MOVE2) {
+			lastRevealX = px;
+			lastRevealZ = pz;
+			lastObjLen = objLen;
+			const next: WorldObject[] = [];
+			for (const o of world.objects) {
+				if (CREATURE_KINDS.has(o.kind)) {
+					next.push(o); // creatures always render (few; they wander; LOD/impostors handle their distance)
+					continue;
+				}
+				const d2 = (o.pos[0] - px) ** 2 + (o.pos[2] - pz) ** 2;
+				const keep = shownIds.has(o.id) ? d2 < KEEP_R2 : d2 < SHOW_R2; // hysteresis: hold a shown one until past KEEP
+				if (keep) {
+					next.push(o);
+					shownIds.add(o.id);
+				} else {
+					shownIds.delete(o.id);
+				}
+			}
+			visible = next;
+		}
+		// time-slice the MOUNT of the near set (a few/frame) so striding into a dense block doesn't hitch
+		const n = visible.length;
 		const backlog = n - revealed;
-		// adaptive catch-up: 1/frame for a trickle, up to REVEAL_CAP/frame for a big batch → 120 cats fill in
-		// over ~20 frames (smooth, no 2 s one-by-one stepping) without ever mounting enough at once to jank
 		if (backlog > 0) revealed = Math.min(n, revealed + Math.min(REVEAL_CAP, Math.max(1, Math.ceil(backlog / REVEAL_FRAMES))));
-		else if (revealed > n) revealed = n; // clamp after removals
+		else if (revealed > n) revealed = n; // clamp after removals / objects leaving range
 	});
 </script>
 
@@ -218,7 +260,7 @@
 	<Path path={p} {world} />
 {/each}
 
-{#each world.objects.slice(0, revealed) as obj (obj.id)}
+{#each visible.slice(0, revealed) as obj (obj.id)}
 	{#if obj.kind === 'person'}
 		<Npc {obj} {world} />
 	{:else if obj.kind === 'cat' || obj.kind === 'lion' || obj.kind === 'rabbit' || obj.kind === 'kangaroo' || obj.kind === 'dinosaur'}
