@@ -169,6 +169,9 @@ export function tickRust(dt: number): void {
 	sim.step(dt);
 	refreshViews();
 	const TAU = Math.PI * 2;
+	let huntX = 0;
+	let huntZ = 0;
+	let huntD2 = Infinity; // nearest active player-hunter → for the "it's behind you" dread cue
 	for (let i = 0; i < tracked.length; i++) {
 		const m = tracked[i];
 		if (!m) continue;
@@ -201,7 +204,28 @@ export function tickRust(dt: number): void {
 		m.dead = (f & 1) !== 0;
 		m.asleep = (f & 2) !== 0;
 		m.hunting = (f & 8) !== 0; // bit3 → this apex is charging the player → the view glares its eyes
+		if (m.hunting) {
+			const dx = nx - playerState.pos[0];
+			const dz = nz - playerState.pos[2];
+			const d2 = dx * dx + dz * dz;
+			if (d2 < huntD2) ((huntD2 = d2), (huntX = nx), (huntZ = nz));
+		}
 	}
+	// IS THE HUNTER BEHIND YOU? The dread of an unseen pursuer. Player forward = (-sin yaw, -cos yaw) (matches
+	// Player.svelte movement); dot with the direction to the nearest hunter < 0 → it's in your back hemisphere.
+	let behindTarget = 0;
+	if (huntD2 < Infinity) {
+		const yaw = playerState.yaw;
+		const fx = -Math.sin(yaw);
+		const fz = -Math.cos(yaw);
+		let tx = huntX - playerState.pos[0];
+		let tz = huntZ - playerState.pos[2];
+		const tl = Math.hypot(tx, tz) || 1;
+		tx /= tl;
+		tz /= tl;
+		if (fx * tx + fz * tz < -0.15) behindTarget = 1; // small deadzone so a side-on hunter doesn't flicker it
+	}
+	playerState.dangerBehind += (behindTarget - playerState.dangerBehind) * Math.min(1, 4 * dt); // eased
 	// the Rust read-back has positions but not the per-agent perf flags — recompute LOD + shadow budget so the
 	// impostor/shadow culling (and thus FPS) is identical to the JS path.
 	agentManager.assignPerfFlags(playerState.pos[0], playerState.pos[2]);

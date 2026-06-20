@@ -12,6 +12,7 @@ export class PlayerState {
 	grounded = $state(true);
 	state = $state('idle' as MoveState);
 	danger = $state(0); // 0..1 — how imminent a player-hunting predator is (drives the danger vignette)
+	dangerBehind = $state(0); // 0..1 — the hunter is BEHIND you (out of view) → the vignette darkens with dread
 	// wading in water → the water shader rings ripples around the player; hot-path field (read 60×/s),
 	// deliberately NOT $state so writing it every frame doesn't churn the reactive graph
 	inWater = false;

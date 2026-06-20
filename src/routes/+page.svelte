@@ -144,6 +144,13 @@
 	style:opacity={Math.min(1, playerState.danger * 1.15)}
 	style:box-shadow="inset 0 0 16vw 3vw rgba(150,0,0,0.6)"
 ></div>
+<!-- ...and a HEAVIER, darker closing-in when the hunter is BEHIND you (out of view) → the dread of the unseen
+     pursuer: turn around to face it (and meet its red-glaring eyes). Fades as you turn toward it. -->
+<div
+	class="pointer-events-none fixed inset-0 z-20 transition-opacity duration-300"
+	style:opacity={Math.min(1, playerState.danger * playerState.dangerBehind * 1.3)}
+	style:box-shadow="inset 0 0 26vw 7vw rgba(85,0,0,0.85)"
+></div>
 
 <!-- live FPS / frame-time meter, top-centre -->
 <FpsPanel />
