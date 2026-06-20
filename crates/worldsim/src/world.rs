@@ -130,6 +130,7 @@ pub struct ManagedAgent {
     pub slash_cd: f64,
     pub rival_time: f64,      // seconds crowded by a rival → ≥RIVAL_PATIENCE boils into a territorial fight
     pub bully: Option<usize>, // who last wounded it in a rival fight → it flees this one while spooked
+    pub companion: bool,      // the player's pet → its leash tracks the player (follows) and it doesn't fear you
     pub crowd: u32,           // flock neighbours this tick
 }
 
@@ -215,6 +216,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         slash_cd: 0.0,
         rival_time: 0.0,
         bully: None,
+        companion: false,
         crowd: 0,
     }
 }
@@ -335,6 +337,14 @@ impl World {
 
     pub fn set_player(&mut self, x: f64, z: f64) {
         self.player = (x, z);
+    }
+
+    /// Mark agent `i` as the player's pet — its wander leash will track the player (so it follows you around)
+    /// and it won't flee/berth you. (Idempotent; pass a valid spawned index.)
+    pub fn set_companion(&mut self, i: usize) {
+        if let Some(m) = self.agents.get_mut(i) {
+            m.companion = true;
+        }
     }
 
     /// Replace the lake-fish lure points (the JS fish view owns the fish; the sim only needs their positions
@@ -460,6 +470,13 @@ impl World {
         self.last_player = (px, pz);
         let n = self.agents.len();
         let danger2 = DANGER2 * (1.0 + 0.5 * self.night); // after dark prey flee from farther
+
+        // a pet's wander leash tracks the player → it wanders near you, i.e. trails along wherever you go
+        for m in self.agents.iter_mut() {
+            if m.companion {
+                m.agent.set_home(px, pz);
+            }
+        }
 
         // 1. rebuild both grids from the PREVIOUS positions (flocking + coarse food-chain)
         self.grid.clear();
@@ -762,10 +779,10 @@ impl World {
                 self.behave[i] = (1.0, true);
             }
 
-            // PLAYER REACTION (skipped for a predator deliberately coming for you) — animals scatter from the
-            // player (skittishness falls with rank: rabbits bolt, an apex dino ignores you), scaring from
-            // FARTHER when you RUN; and every animal gives the player's body a berth (personal space).
-            if !hunt_player {
+            // PLAYER REACTION (skipped for a predator deliberately coming for you, and for the player's own pet,
+            // which trusts you) — animals scatter from the player (skittishness falls with rank: rabbits bolt, an
+            // apex dino ignores you), scaring from FARTHER when you RUN; and every animal gives the player a berth.
+            if !hunt_player && !self.agents[i].companion {
                 let skittish = ((5.0 - rank as f64) / 4.0).max(0.0); // rabbit 1 → 1.0 … dinosaur 5 → 0
                 if skittish > 0.0 {
                     let dx = ax - px;
@@ -1554,6 +1571,35 @@ mod tests {
         }
         let d1 = (6.0 - w.agents[cat].agent.x).hypot(-w.agents[cat].agent.z);
         assert!(d1 < d0 - 1.0, "an idle cat is drawn to the lake fish (dist {d0} → {d1})");
+    }
+
+    #[test]
+    fn a_companion_pads_toward_the_player() {
+        let mut w = World::new();
+        w.set_player(0.0, 0.0);
+        let pet = w.spawn(animal(50.0, 0.0, 1), Kind::Cat, 0.4, 1); // well outside the leash
+        w.set_companion(pet);
+        let d0 = w.agents[pet].agent.x.hypot(w.agents[pet].agent.z);
+        for t in 1..=200 {
+            w.tick_once(t);
+        }
+        let d1 = w.agents[pet].agent.x.hypot(w.agents[pet].agent.z);
+        assert!(d1 < d0 - 5.0, "the pet's leash tracks the player so it trails toward you ({d0} → {d1})");
+    }
+
+    #[test]
+    fn a_companion_does_not_flee_the_player() {
+        let mut w = World::new();
+        w.set_player(0.0, 0.0);
+        let pet = w.spawn(animal(2.0, 0.0, 1), Kind::Cat, 0.4, 1); // within the scare radius
+        w.set_companion(pet);
+        let wild = w.spawn(animal(0.0, 2.0, 2), Kind::Cat, 0.4, 2); // same distance, but a wild cat → flees
+        for t in 1..=60 {
+            w.tick_once(t);
+        }
+        let pet_d = w.agents[pet].agent.x.hypot(w.agents[pet].agent.z);
+        let wild_d = w.agents[wild].agent.x.hypot(w.agents[wild].agent.z);
+        assert!(pet_d < wild_d, "the pet trusts you and stays close while a wild cat bolts (pet {pet_d}, wild {wild_d})");
     }
 
     #[test]

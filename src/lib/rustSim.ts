@@ -25,6 +25,7 @@ const KIND_CODE: Record<string, number> = { rabbit: 0, cat: 1, kangaroo: 2, pers
 interface RustSim {
 	spawn(x: number, z: number, kindCode: number, radius: number, seedId: number): number;
 	set_player(x: number, z: number): void;
+	set_companion(i: number): void;
 	set_night(n: number): void;
 	set_fish(xz: Float64Array): void;
 	set_obstacles(flat: Float64Array): void;
@@ -132,6 +133,7 @@ function syncRoster(): void {
 		if (slotOf.has(m)) return;
 		const code = KIND_CODE[m.kind] ?? 0;
 		const i = sim!.spawn(m.agent.x, m.agent.z, code, m.radius, m.seedId);
+		if (m.companion) sim!.set_companion(i); // the player's pet → follows you, won't flee you
 		slotOf.set(m, i);
 		tracked[i] = m;
 	});

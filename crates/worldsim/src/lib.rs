@@ -90,6 +90,11 @@ mod wasm_api {
             self.world.set_player(x, z);
         }
 
+        /// Mark a spawned agent (by index) as the player's pet → it follows you and won't flee you.
+        pub fn set_companion(&mut self, i: usize) {
+            self.world.set_companion(i);
+        }
+
         pub fn set_night(&mut self, n: f64) {
             self.world.set_night(n);
         }
