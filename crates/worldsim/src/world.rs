@@ -50,6 +50,7 @@ const FLEE_BOOST: f64 = 1.7; // panic-run speed multiplier
 const CHASE_BOOST: f64 = 1.45;
 const CONTACT_PAD: f64 = 0.4; // extra reach that counts as a catch
 const CAN_SPRINT: f64 = 0.03; // stamina above this can still sprint
+const LURE_R: f64 = 11.0; // an idle cat within this range of a lake fish pads to the bank after it (never catches)
 
 // stamina / energy / metabolism (chunk d)
 const EXERT_DRAIN: f64 = 0.22; // /s while sprinting, divided by endurance
@@ -216,6 +217,7 @@ pub struct World {
     behave: Vec<(f64, bool)>,      // reused per-tick (boost, pursuing) from the behaviour pass
     kills: Vec<usize>,             // prey caught this tick → turned to corpses after the behaviour pass
     slept: Vec<bool>,              // was asleep AT TICK START → handled by the sleep pass, skipped elsewhere
+    fish: Vec<(f64, f64)>,         // lake-fish lure points (fed from the JS view; cats pad to the bank after them)
 }
 
 impl Default for World {
@@ -241,6 +243,7 @@ impl World {
             behave: Vec::new(),
             kills: Vec::new(),
             slept: Vec::new(),
+            fish: Vec::new(),
         }
     }
 
@@ -257,6 +260,28 @@ impl World {
 
     pub fn set_player(&mut self, x: f64, z: f64) {
         self.player = (x, z);
+    }
+
+    /// Replace the lake-fish lure points (the JS fish view owns the fish; the sim only needs their positions
+    /// so an idle cat can pad to the water's edge after one). `xz` is a flat [x0,z0,x1,z1,…] buffer.
+    pub fn set_fish(&mut self, xz: &[f64]) {
+        self.fish.clear();
+        self.fish.extend(xz.chunks_exact(2).map(|c| (c[0], c[1])));
+    }
+
+    /// Nearest fish to (x,z) within `r` — linear scan (fish are few); returns its position.
+    fn nearest_fish(&self, x: f64, z: f64, r: f64) -> Option<(f64, f64)> {
+        let r2 = r * r;
+        let mut best: Option<(f64, f64)> = None;
+        let mut best_d2 = r2;
+        for &(fx, fz) in &self.fish {
+            let d2 = (fx - x).powi(2) + (fz - z).powi(2);
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = Some((fx, fz));
+            }
+        }
+        best
     }
 
     /// Drive the sim from real elapsed seconds (advances the clock; runs each emitted fixed-DT tick).
@@ -464,6 +489,19 @@ impl World {
             } else {
                 None
             };
+            // FISH-LURE — an idle cat (nothing better on) is drawn to a lake fish; it pads to the water's edge
+            // and stalks the shallows. It never catches one: the pond is an obstacle the JS resolve-step halts
+            // it at, so this is just the pull. Lowest priority (last in the chain, so any real business wins).
+            let fish_pos = if self.agents[i].kind == Kind::Cat
+                && !mobbed
+                && threat_pos.is_none()
+                && !fighting_rival
+                && self.agents[i].spooked <= 0.0
+            {
+                self.nearest_fish(ax, az, LURE_R)
+            } else {
+                None
+            };
 
             if mobbed {
                 // outnumbered → BREAK AWAY from the swarm's centre (a fast hunter shakes them off)
@@ -558,6 +596,14 @@ impl World {
                         self.agents[i].stamina = (self.agents[i].stamina + EAT_GAIN).min(1.0);
                     }
                 }
+            } else if let Some((fx, fz)) = fish_pos {
+                // pad toward the fish at a curious WALK (no sprint) — the pond obstacle halts the cat at the bank
+                let dx = fx - ax;
+                let dz = fz - az;
+                let d = dx.hypot(dz).max(0.1);
+                self.forces[i].0 += (dx / d) * a_max * CHASE_W * 0.6;
+                self.forces[i].1 += (dz / d) * a_max * CHASE_W * 0.6;
+                self.behave[i] = (1.0, true);
             }
 
             // PLAYER REACTION (skipped for a predator deliberately coming for you) — animals scatter from the
@@ -1267,6 +1313,32 @@ mod tests {
         }
         assert!(w.agents[l1].health < h0, "two crowded apex rivals bleed in a scrap (got {})", w.agents[l1].health);
         assert!(w.agents[l2].health < h0, "...and both of them take blows");
+    }
+
+    #[test]
+    fn an_idle_cat_pads_toward_a_lake_fish() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4); // park the player far → no scatter
+        let cat = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.4, 1);
+        w.set_fish(&[6.0, 0.0]); // a fish 6 m away, within LURE_R
+        let d0 = (6.0 - w.agents[cat].agent.x).hypot(-w.agents[cat].agent.z);
+        for t in 1..=60 {
+            w.tick_once(t);
+        }
+        let d1 = (6.0 - w.agents[cat].agent.x).hypot(-w.agents[cat].agent.z);
+        assert!(d1 < d0 - 1.0, "an idle cat is drawn to the lake fish (dist {d0} → {d1})");
+    }
+
+    #[test]
+    fn a_distant_fish_does_not_lure() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let cat = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.4, 1);
+        w.set_fish(&[40.0, 0.0]); // well beyond LURE_R → no pull
+        for t in 1..=60 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[cat].agent.x < 12.0, "a fish beyond LURE_R exerts no pull (x {})", w.agents[cat].agent.x);
     }
 
     #[test]
