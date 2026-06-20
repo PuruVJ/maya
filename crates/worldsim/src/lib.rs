@@ -95,6 +95,11 @@ mod wasm_api {
             self.world.set_companion(i);
         }
 
+        /// Remove agent `i` (its world-object was deleted / world cleared) → it goes inert, no longer a ghost.
+        pub fn despawn(&mut self, i: usize) {
+            self.world.despawn(i);
+        }
+
         pub fn set_night(&mut self, n: f64) {
             self.world.set_night(n);
         }

@@ -166,6 +166,12 @@ class AgentManager {
 		this.#agents.delete(m);
 	}
 
+	/** Is this agent still registered? rustSim reconciles its WASM roster against this — an agent that
+	 *  unregistered (its object was removed / the world cleared) is despawned from the Rust sim, not left a ghost. */
+	has(m: ManagedAgent): boolean {
+		return this.#agents.has(m);
+	}
+
 	/** Iterate all managed agents (used by the renderers + the Rust sim adapter). */
 	forEach(cb: (m: ManagedAgent) => void): void {
 		for (const m of this.#agents) cb(m);

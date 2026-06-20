@@ -353,6 +353,18 @@ impl World {
         }
     }
 
+    /// Remove agent `i` from the simulation (its world-object was deleted / the world cleared). Marks it dead,
+    /// which every pass already skips (grid insert, targeting, flock, behaviour, step) → it goes fully inert and
+    /// stops affecting the food chain, instead of lingering as an invisible ghost. The slot is not reused (the
+    /// read-back is index-stable); the JS adapter stops tracking it so it's never rendered.
+    pub fn despawn(&mut self, i: usize) {
+        if let Some(m) = self.agents.get_mut(i) {
+            m.dead = true;
+            m.asleep = false;
+            m.companion = false;
+        }
+    }
+
     /// Replace the lake-fish lure points (the JS fish view owns the fish; the sim only needs their positions
     /// so an idle cat can pad to the water's edge after one). `xz` is a flat [x0,z0,x1,z1,…] buffer.
     pub fn set_fish(&mut self, xz: &[f64]) {
@@ -1595,6 +1607,26 @@ mod tests {
         }
         let d1 = (6.0 - w.agents[cat].agent.x).hypot(-w.agents[cat].agent.z);
         assert!(d1 < d0 - 1.0, "an idle cat is drawn to the lake fish (dist {d0} → {d1})");
+    }
+
+    #[test]
+    fn a_despawned_agent_goes_inert() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let cat = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.4, 1);
+        let rabbit = w.spawn(animal(3.0, 0.0, 2), Kind::Rabbit, 0.35, 2);
+        w.despawn(cat); // its object was removed → drop it from the sim
+        let (cx, cz) = (w.agents[cat].agent.x, w.agents[cat].agent.z);
+        for t in 1..=30 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[cat].dead, "a despawned agent is marked dead → inert");
+        assert_eq!(w.agents[cat].agent.x, cx, "a despawned agent is never stepped (frozen)");
+        assert_eq!(w.agents[cat].agent.z, cz);
+        assert!(
+            w.transient[rabbit].threat != Some(cat),
+            "the rabbit no longer fears the despawned cat (it stopped being a threat)"
+        );
     }
 
     #[test]

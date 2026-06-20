@@ -26,6 +26,7 @@ interface RustSim {
 	spawn(x: number, z: number, kindCode: number, radius: number, seedId: number): number;
 	set_player(x: number, z: number): void;
 	set_companion(i: number): void;
+	despawn(i: number): void;
 	set_night(n: number): void;
 	set_fish(xz: Float64Array): void;
 	set_obstacles(flat: Float64Array): void;
@@ -171,6 +172,14 @@ export function tickRust(dt: number): void {
 	for (let i = 0; i < tracked.length; i++) {
 		const m = tracked[i];
 		if (!m) continue;
+		if (!agentManager.has(m)) {
+			// its component unmounted (object removed / world cleared) → drop it from the Rust sim so it doesn't
+			// linger as an invisible ghost that still steers the food chain. Slot is retired (read-back is by index).
+			sim.despawn(i);
+			slotOf.delete(m);
+			tracked[i] = undefined as unknown as ManagedAgent;
+			continue;
+		}
 		const a = m.agent;
 		const nx = xs[i];
 		const nz = zs[i];
