@@ -162,7 +162,12 @@
 	const REVEAL_CAP = 6; // max mounts/frame — each is real work (meshes + an agent), so cap to avoid a hitch
 	const REVEAL_FRAMES = 12; // ...but catch a big backlog up within ~this many frames (≈0.2 s) so it's not a slow drip
 	let revealed = $state(0);
-	let babyN = 0; // unique-id counter for Rust-bred newborns (id 'b<n>' → distinct from the engine's 'o<n>')
+	// Rust-bred newborns need GLOBALLY-unique ids. A bare 'b<n>' counter resets to 0 each load/HMR, but babies
+	// PERSIST in the saved world — so a new 'b0' collided with a loaded 'b0' → duplicate {#each} keys → Svelte
+	// aliased two agents onto one mesh (the "man+trex" hybrid) + threw. A per-load random prefix makes every
+	// session's babies disjoint from any persisted ones.
+	const babyPrefix = 'b' + Math.random().toString(36).slice(2, 8) + '-';
+	let babyN = 0;
 	const corpseReap = new Set<string>(); // reused each frame → ids of fully-decayed corpses to remove (no per-frame alloc)
 
 	// LAZY / DISTANCE-CAPPED REVEAL — only realize STATIC builds (houses/trees/props/lamps) NEAR the player; far
@@ -194,7 +199,7 @@
 		// its renderer + spawns into the sim (as a maturing juvenile). The per-kind cap keeps this bounded.
 		const babies = drainBirths();
 		for (const b of babies) {
-			world.objects.push({ id: 'b' + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene });
+			world.objects.push({ id: babyPrefix + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene });
 		}
 
 		// CORPSE REAPER: a body that's fully decayed (sunk into the earth, see Critter/Npc) is removed from the

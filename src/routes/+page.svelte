@@ -40,13 +40,25 @@
 	// trading resolution under load — the "120fps no matter what" knob. Threlte applies dpr reactively.
 	const dpr = $derived(llm.busy ? 0.6 : perf.dpr);
 
+	// Drop world-objects that share an id — a past baby-id collision corrupted some saves, and duplicate keys
+	// crash Svelte's keyed {#each}. Keeps the first occurrence of each id; cleans the save on next persist.
+	const dedupeObjects = <T extends { objects: { id: string }[] }>(w: T): T => {
+		const seen = new Set<string>();
+		w.objects = w.objects.filter((o) => {
+			if (seen.has(o.id)) return false;
+			seen.add(o.id);
+			return true;
+		});
+		return w;
+	};
+
 	onMount(async () => {
 		const m = location.hash.match(/[#&]w=([^&]+)/);
 		if (m) {
 			// opened a SHARED link → load that world, persist it (store + local cache), then SCRUB the hash from
 			// the address bar so it's not stuck there forever.
 			try {
-				world = await decodeWorld(m[1]);
+				world = dedupeObjects(await decodeWorld(m[1]));
 				replaceState(location.pathname + location.search, {});
 				saveWorld($state.snapshot(world));
 			} catch {
@@ -56,7 +68,7 @@
 		} else {
 			// normal open → restore from the world store (shared backend → local IndexedDB cache → else the demo)
 			const saved = await loadWorld();
-			if (saved && Array.isArray(saved.objects)) world = saved;
+			if (saved && Array.isArray(saved.objects)) world = dedupeObjects(saved);
 		}
 		liveUrl = true; // from here on, edits persist to the world store (see effect below)
 	});
