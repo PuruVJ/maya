@@ -22,6 +22,7 @@ const ALI_WEIGHT: f64 = 0.05; // was 0.4 → agents matched velocities + moved a
 // young, must go away while the rest stay"). It heads a fixed seeded direction so it actually travels off and
 // seeds a new herd elsewhere, instead of the whole population packing one clearing. Fades as it reaches open ground.
 const DISPERSE_CROWD: u32 = 6; // this many flock neighbours = "crowded" → young start to peel off
+const PERSON_DISPERSE_CROWD: u32 = 9; // people tolerate a denser band (a hamlet) before the young strike out to found a new one
 const DISPERSE_AGE: f64 = 0.32; // only the young (age < this × lifespan) disperse; settled adults hold the range
 const DISPERSE_W: f64 = 0.9; // outward drive (strong — must beat cohesion/comfort so it actually leaves)
 const CH_DISPERSE: i32 = 24; // RNG channel for the per-animal dispersal heading
@@ -1547,12 +1548,16 @@ impl World {
         // DISPERSAL — a young herbivore in a crowded patch heads off to colonise new ground (see consts). Direction
         // is seeded (steady per animal) so it commits to a heading and travels, rather than jittering in place; the
         // drive ramps with crowding and vanishes once it reaches open range, so it settles where there's room.
-        if matches!(m.kind, Kind::Rabbit | Kind::Kangaroo)
-            && n_near >= DISPERSE_CROWD
+        // people disperse too, but only out of a true BLOB (higher threshold) — so a big clump (the user's "100
+        // humans all in one place") splits into bands that strike out + found new settlements ("like missionaries"),
+        // while a normal small family band (below the threshold) stays put.
+        let disperse_at = if matches!(m.kind, Kind::Person) { PERSON_DISPERSE_CROWD } else { DISPERSE_CROWD };
+        if matches!(m.kind, Kind::Rabbit | Kind::Kangaroo | Kind::Person)
+            && n_near >= disperse_at
             && m.age < m.lifespan * DISPERSE_AGE
         {
             let ang = crate::simrng::rand(&[m.seed_id, CH_DISPERSE]) * std::f64::consts::TAU;
-            let gain = smoothstep(DISPERSE_CROWD as f64, DISPERSE_CROWD as f64 + 5.0, n_near as f64);
+            let gain = smoothstep(disperse_at as f64, disperse_at as f64 + 5.0, n_near as f64);
             let w = a_max * DISPERSE_W * gain;
             fx += ang.cos() * w;
             fz += ang.sin() * w;
