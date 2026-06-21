@@ -773,7 +773,10 @@ impl World {
                 }
                 let mx = self.agents[i].agent.x;
                 let mz = self.agents[i].agent.z;
-                self.transient[t].mob_count += 1;
+                // PEOPLE are bolder against predators (tool-users defending their own) → each counts double toward
+                // the swarm, so just 2–3 villagers gang up and drive off a lion instead of all scattering. Cats/lions
+                // still need the full MOB_MIN of their own to turn on a bigger hunter.
+                self.transient[t].mob_count += if matches!(self.agents[i].kind, Kind::Person) { 2 } else { 1 };
                 self.transient[t].mob_x += mx;
                 self.transient[t].mob_z += mz;
                 // a mobber pressed into contact is actively attacking → it wounds the hunter + can be slashed
