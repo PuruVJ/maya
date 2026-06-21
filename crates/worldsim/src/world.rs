@@ -119,6 +119,24 @@ const CH_GENE: i32 = 20; // RNG channel for the mutation roll (distinct from eco
 const SENESCENCE_FRAC: f64 = 0.75; // past this fraction of lifespan → too old to breed
 const CH_AGE: i32 = 21; // RNG channel for the lifespan-variation roll
 
+// ── EMERGENT CITIES — people build houses ───────────────────────────────────────────────────────────────────
+// A well-fed adult PERSON in a COMMUNITY (others gathered nearby) occasionally spends surplus energy to raise a
+// house at their spot. Clusters of families therefore grow a town, then a multi-block city, bit by bit. The sim
+// only emits build REQUESTS (where); JS places the house (grid-snapped, non-overlapping, globally capped).
+const BUILD_ENERGY: f64 = 0.82; // a settler must be WELL-fed to afford building
+const BUILD_COST: f64 = 0.55; // energy a build spends (so they must re-feed before the next)
+const BUILD_COOLDOWN: f64 = 90.0; // seconds between one settler's builds → a town rises gradually
+const BUILD_COMMUNITY: u32 = 3; // nearby neighbours (≈ people) that make a settlement worth building in
+const CH_BUILD: i32 = 23; // RNG channel for the staggered initial build cooldown
+
+// TELEMETRY event codes — the sim records [code, kind, x, z] so the agent can later READ what actually happened
+// (causes of death, predation, births, building) rather than infer it. See `events`, /api/telemetry.
+const EV_KILL: f32 = 1.0; // a predator caught prey
+const EV_STARVE: f32 = 2.0; // died of starvation (empty belly)
+const EV_OLDAGE: f32 = 3.0; // died of old age
+const EV_BIRTH: f32 = 4.0; // a baby was delivered
+const EV_BUILD: f32 = 5.0; // a settler raised a house
+
 // ── GESTATION + LITTERS ─────────────────────────────────────────────────────────────────────────────────────
 // Mating doesn't clone instantly: the FEMALE conceives and GESTATES for a period, then delivers a species-sized
 // LITTER (small prey drop several young; big animals one). Game-scaled seconds (small fraction of a lifespan).
@@ -232,6 +250,7 @@ pub struct ManagedAgent {
     pub companion: bool,      // the player's pet → its leash tracks the player (follows) and it doesn't fear you
     pub hunting: bool,        // this apex is actively charging the PLAYER this tick → the view glares its eyes
     pub breed_cd: f64,        // seconds until it can breed again (>0 = on cooldown / a maturing juvenile)
+    pub build_cd: f64,        // people only — seconds until this settler can raise another house (emergent cities)
     pub crowd: u32,           // flock neighbours this tick
 }
 
@@ -338,6 +357,8 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         companion: false,
         hunting: false,
         breed_cd: 0.0,
+        // start partway through a build cooldown (seeded) so a fresh town doesn't raise every house on one tick
+        build_cd: BUILD_COOLDOWN * crate::simrng::rand(&[seed_id, CH_BUILD]),
         crowd: 0,
     }
 }
@@ -419,7 +440,9 @@ pub struct World {
     ob_grid: SpatialHashGrid,      // obstacle lookup grid (cell = OBSTACLE_CELL), rebuilt on set_obstacles
     has_obstacles: bool,
     ob_scratch: Vec<u32>,          // reused obstacle-query scratch (mem::take'd in → no per-agent alloc)
-    births: Vec<f32>,              // this tick's births, flat [kindCode, x, z, …] → JS spawns the babies
+    births: Vec<f32>,              // this tick's births, flat [kindCode, x, z, gene, …] → JS spawns the babies
+    builds: Vec<f32>,              // this step's house-build requests, flat [x, z, …] → JS places the houses
+    events: Vec<f32>,              // TELEMETRY: this step's events, flat [code, kind, x, z, …] → JS posts to /api/telemetry
 }
 
 impl Default for World {
@@ -451,6 +474,8 @@ impl World {
             has_obstacles: false,
             ob_scratch: Vec::new(),
             births: Vec::new(),
+            builds: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -609,6 +634,8 @@ impl World {
     /// Drive the sim from real elapsed seconds (advances the clock; runs each emitted fixed-DT tick).
     pub fn step(&mut self, real_dt: f64) {
         self.births.clear(); // births accumulate across this step's ticks; JS drains them after step()
+        self.builds.clear(); // …same for house-build requests
+        self.events.clear(); // …same for telemetry events
         let n = self.clock.advance(real_dt);
         for k in 0..n {
             let tick = self.clock.tick - (n - 1 - k) as i64;
@@ -619,6 +646,16 @@ impl World {
     /// This step's newborns, flat [kindCode, x, z, …] — JS reads this after step() and spawns the babies.
     pub fn births(&self) -> &[f32] {
         &self.births
+    }
+
+    /// This step's house-build requests, flat [x, z, …] — JS places the houses.
+    pub fn builds(&self) -> &[f32] {
+        &self.builds
+    }
+
+    /// This step's telemetry events, flat [code, kind, x, z, …] — JS posts them to /api/telemetry.
+    pub fn events(&self) -> &[f32] {
+        &self.events
     }
 
     /// The maturation cooldown JS should stamp on a newborn (single source of truth for both sides).
@@ -931,6 +968,7 @@ impl World {
                 self.behave[i] = (if close || can_sprint { CHASE_BOOST } else { 1.0 }, true); // close → final lunge even if spent
                 if close && d < radius + pr + CONTACT_PAD {
                     self.kills.push(p); // caught — turned to a corpse below
+                    self.events.extend_from_slice(&[EV_KILL, self.agents[p].kind as usize as f32, self.agents[p].agent.x as f32, self.agents[p].agent.z as f32]);
                     self.agents[i].meals += 1;
                     self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
                     self.agents[i].energy = (self.agents[i].energy + EAT_ENERGY).min(1.0); // the meal fills its belly
@@ -1025,6 +1063,8 @@ impl World {
                 self.agents[i].asleep = false;
                 self.agents[i].agent.vx = 0.0;
                 self.agents[i].agent.vz = 0.0;
+                let (k, ax, az) = (self.agents[i].kind as usize as f32, self.agents[i].agent.x as f32, self.agents[i].agent.z as f32);
+                self.events.extend_from_slice(&[EV_OLDAGE, k, ax, az]);
                 continue;
             }
             let boost = self.behave[i].0;
@@ -1071,6 +1111,10 @@ impl World {
                 self.agents[i].health = (self.agents[i].health + HEAL * DT).min(1.0);
             } else {
                 self.agents[i].health = (self.agents[i].health - STARVE_DAMAGE * DT).max(0.0);
+                if self.agents[i].health <= 0.0 {
+                    let (k, ax, az) = (self.agents[i].kind as usize as f32, self.agents[i].agent.x as f32, self.agents[i].agent.z as f32);
+                    self.events.extend_from_slice(&[EV_STARVE, k, ax, az]); // famine claimed it (dies next tick)
+                }
             }
             if self.agents[i].spooked > 0.0 {
                 self.agents[i].spooked -= DT;
@@ -1083,6 +1127,9 @@ impl World {
             }
             if self.agents[i].breed_cd > 0.0 {
                 self.agents[i].breed_cd -= DT; // post-birth / juvenile maturation cooldown ebbs
+            }
+            if self.agents[i].build_cd > 0.0 {
+                self.agents[i].build_cd -= DT; // settler's between-builds cooldown ebbs
             }
             // an exhausted carnivore lies down to sleep it off — but never with a threat / nearby peer / fresh
             // scare keeping it on edge, and not right after waking (wake_cd → anti sleep/wake flip).
@@ -1132,6 +1179,7 @@ impl World {
                 self.births.push(mx as f32);
                 self.births.push(mz as f32);
                 self.births.push(baby_gene as f32);
+                self.events.extend_from_slice(&[EV_BIRTH, kc as f32, mx as f32, mz as f32]);
                 pop[kc] += 1;
             }
         }
@@ -1155,6 +1203,29 @@ impl World {
                 self.agents[i].energy = (self.agents[i].energy - BREED_COST).max(0.0);
                 self.agents[j].energy = (self.agents[j].energy - BREED_COST).max(0.0);
             }
+        }
+
+        // 7.6 EMERGENT CITIES — a well-fed adult PERSON in a community raises a house (JS places it). Clusters of
+        // settled families therefore grow a town, then a city, bit by bit. The sim just emits where to build.
+        for i in 0..n {
+            let m = &self.agents[i];
+            if m.dead
+                || m.asleep
+                || !matches!(m.kind, Kind::Person)
+                || m.build_cd > 0.0
+                || m.energy < BUILD_ENERGY
+                || m.crowd < BUILD_COMMUNITY // needs neighbours → a settlement, not a lone wanderer
+                || m.age < m.lifespan * 0.15 // an adult, not a child
+                || self.transient[i].threat.is_some()
+            {
+                continue;
+            }
+            let (bx, bz) = (m.agent.x as f32, m.agent.z as f32);
+            self.builds.push(bx);
+            self.builds.push(bz);
+            self.events.extend_from_slice(&[EV_BUILD, Kind::Person as usize as f32, bx, bz]);
+            self.agents[i].energy -= BUILD_COST;
+            self.agents[i].build_cd = BUILD_COOLDOWN;
         }
 
         // 8. step each AWAKE agent (write the next positions)

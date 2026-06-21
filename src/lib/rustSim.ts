@@ -41,6 +41,8 @@ type Snap = {
 	behaviors: Uint8Array;
 	progress: Float32Array;
 	births: Float32Array;
+	builds: Float32Array; // [x,z]×n — house-build requests (Scene places them)
+	events: Float32Array; // [code,kind,x,z]×n — telemetry (posted to /api/telemetry)
 	danger: number;
 };
 type OutMsg =
@@ -58,6 +60,34 @@ export function drainBirths(): Birth[] {
 	const out = pendingBirths;
 	pendingBirths = [];
 	return out;
+}
+
+// house-build requests from settlers (x,z) → Scene places houses
+export type Build = { x: number; z: number };
+let pendingBuilds: Build[] = [];
+/** Pull (and clear) the house-build requests since the last call — Scene places each as a house world-object. */
+export function drainBuilds(): Build[] {
+	if (pendingBuilds.length === 0) return pendingBuilds;
+	const out = pendingBuilds;
+	pendingBuilds = [];
+	return out;
+}
+
+// ── TELEMETRY: batch sim events and POST them to /api/telemetry so the agent can read what happened ──────────
+const EV_NAME = ['', 'kill', 'starve', 'oldage', 'birth', 'build'] as const; // event code → name (see world.rs)
+let evBatch: { t: string; kind: string; x: number; z: number }[] = [];
+let lastFlush = 0;
+function flushTelemetry(now: number): void {
+	if (evBatch.length === 0) return;
+	// throttle: at most ~1 POST / 4 s, or when the batch gets large, so we never spam the endpoint
+	if (now - lastFlush < 4000 && evBatch.length < 200) return;
+	lastFlush = now;
+	const batch = evBatch;
+	evBatch = [];
+	// fire-and-forget; the endpoint appends to D1. tick `now` is passed so events carry sim-time.
+	fetch('/api/telemetry', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tick: now, events: batch }) }).catch(() => {
+		/* offline / no DB → telemetry is best-effort, never blocks the sim */
+	});
 }
 
 let worker: Worker | null = null;
@@ -177,6 +207,16 @@ export function tickRust(dt: number): void {
 		const nb = s!.births.length / 4; // [kindCode, x, z, gene] per birth
 		for (let k = 0; k < nb; k++)
 			pendingBirths.push({ kind: KIND_NAME[s!.births[k * 4]] ?? 'rabbit', x: s!.births[k * 4 + 1], z: s!.births[k * 4 + 2], gene: s!.births[k * 4 + 3] });
+		// drain HOUSE-BUILD requests (settlers) → Scene places each as a house world-object. Flat [x,z,…].
+		const nbd = s!.builds.length / 2;
+		for (let k = 0; k < nbd; k++) pendingBuilds.push({ x: s!.builds[k * 2], z: s!.builds[k * 2 + 1] });
+		// drain TELEMETRY events → batch + (throttled) POST to /api/telemetry. Flat [code,kind,x,z,…].
+		const ne = s!.events.length / 4;
+		for (let k = 0; k < ne; k++) {
+			const code = s!.events[k * 4];
+			evBatch.push({ t: EV_NAME[code] ?? 'ev' + code, kind: KIND_NAME[s!.events[k * 4 + 1]] ?? '?', x: Math.round(s!.events[k * 4 + 2]), z: Math.round(s!.events[k * 4 + 3]) });
+		}
+		flushTelemetry(appliedSeq); // appliedSeq == sim tick seq → a monotonic clock for the events
 	}
 
 	const px = playerState.pos[0];

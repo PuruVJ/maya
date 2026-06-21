@@ -37,7 +37,7 @@
 	import { SKY_FOG, kindDef } from '$lib/kinds';
 	import { treeAt, treeRadius, onPath, SCATTER_STEP } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
-	import { drainBirths } from '$lib/rustSim';
+	import { drainBirths, drainBuilds } from '$lib/rustSim';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { setRustObstacles } from '$lib/rustSim';
 	import { playerState } from '$lib/playerState.svelte';
@@ -168,6 +168,12 @@
 	// session's babies disjoint from any persisted ones.
 	const babyPrefix = 'b' + Math.random().toString(36).slice(2, 8) + '-';
 	let babyN = 0;
+	// EMERGENT CITIES: settlers raise houses. Per-load unique id prefix (same lesson as babies); grid-snapped so
+	// houses align into blocks; one per plot; a global cap so a town doesn't sprawl unbounded.
+	const housePrefix = 'h' + Math.random().toString(36).slice(2, 8) + '-';
+	let houseN = 0;
+	const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
+	const HOUSE_CAP = 140;
 	const corpseReap = new Set<string>(); // reused each frame → ids of fully-decayed corpses to remove (no per-frame alloc)
 
 	// LAZY / DISTANCE-CAPPED REVEAL — only realize STATIC builds (houses/trees/props/lamps) NEAR the player; far
@@ -200,6 +206,22 @@
 		const babies = drainBirths();
 		for (const b of babies) {
 			world.objects.push({ id: babyPrefix + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene });
+		}
+
+		// EMERGENT CITIES: place the houses settlers raised this frame. Snap to an 8 m grid (→ aligned blocks),
+		// skip an already-occupied plot, and stop at HOUSE_CAP so a town grows but never sprawls without bound.
+		const builds = drainBuilds();
+		if (builds.length) {
+			let houses = 0;
+			for (const o of world.objects) if (BUILDING_KINDS.has(o.kind)) houses++;
+			for (const bd of builds) {
+				if (houses >= HOUSE_CAP) break;
+				const gx = Math.round(bd.x / 8) * 8;
+				const gz = Math.round(bd.z / 8) * 8;
+				if (world.objects.some((o) => BUILDING_KINDS.has(o.kind) && Math.abs(o.pos[0] - gx) < 6 && Math.abs(o.pos[2] - gz) < 6)) continue; // plot taken
+				world.objects.push({ id: housePrefix + houseN++, kind: 'house', pos: [gx, 0, gz] });
+				houses++;
+			}
 		}
 
 		// CORPSE REAPER: a body that's fully decayed (sunk into the earth, see Critter/Npc) is removed from the

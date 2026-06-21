@@ -127,6 +127,22 @@ mod wasm_api {
         pub fn births_ptr(&self) -> *const f32 {
             self.world.births().as_ptr()
         }
+        /// House-build requests from the last step(): count (each is [x, z]).
+        pub fn build_count(&self) -> usize {
+            self.world.builds().len() / 2
+        }
+        /// Pointer to the flat builds buffer [x, z, …] (length = build_count()*2) for a zero-copy read.
+        pub fn builds_ptr(&self) -> *const f32 {
+            self.world.builds().as_ptr()
+        }
+        /// Telemetry events from the last step(): count (each is [code, kind, x, z]).
+        pub fn event_count(&self) -> usize {
+            self.world.events().len() / 4
+        }
+        /// Pointer to the flat events buffer [code, kind, x, z, …] (length = event_count()*4) for a zero-copy read.
+        pub fn events_ptr(&self) -> *const f32 {
+            self.world.events().as_ptr()
+        }
 
         pub fn set_night(&mut self, n: f64) {
             self.world.set_night(n);

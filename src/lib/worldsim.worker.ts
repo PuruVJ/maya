@@ -27,6 +27,10 @@ interface RustSim {
 	juvenile_cd(): number;
 	birth_count(): number;
 	births_ptr(): number;
+	build_count(): number;
+	builds_ptr(): number;
+	event_count(): number;
+	events_ptr(): number;
 	set_night(n: number): void;
 	set_fish(xz: Float64Array): void;
 	set_obstacles(flat: Float64Array): void;
@@ -139,9 +143,13 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 	const sp = progress.slice();
 	const nb = sim.birth_count();
 	const births = nb > 0 ? new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 4).slice() : new Float32Array(0); // [kc,x,z,gene]×nb
+	const nbd = sim.build_count();
+	const builds = nbd > 0 ? new Float32Array(wasm.memory.buffer, sim.builds_ptr(), nbd * 2).slice() : new Float32Array(0); // [x,z]×nbd
+	const ne = sim.event_count();
+	const events = ne > 0 ? new Float32Array(wasm.memory.buffer, sim.events_ptr(), ne * 4).slice() : new Float32Array(0); // [code,kind,x,z]×ne
 
 	ctx.postMessage(
-		{ type: 'snap', seq: d.seq, count: viewCount, xs: sx, zs: sz, headings: sh, healths: shp, flags: sf, behaviors: sb, progress: sp, births, danger: sim.danger() },
-		[sx.buffer, sz.buffer, sh.buffer, shp.buffer, sf.buffer, sb.buffer, sp.buffer, births.buffer]
+		{ type: 'snap', seq: d.seq, count: viewCount, xs: sx, zs: sz, headings: sh, healths: shp, flags: sf, behaviors: sb, progress: sp, births, builds, events, danger: sim.danger() },
+		[sx.buffer, sz.buffer, sh.buffer, shp.buffer, sf.buffer, sb.buffer, sp.buffer, births.buffer, builds.buffer, events.buffer]
 	);
 };
