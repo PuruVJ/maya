@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { T, useTask } from '@threlte/core';
+	import { T, useTask, useThrelte } from '@threlte/core';
 	import Prop from './Prop.svelte';
 	import Npc from './Npc.svelte';
 	import Zone from './Zone.svelte';
@@ -57,6 +57,20 @@
 	// never a frame with the light at the origin pointing nowhere
 	$effect(() => {
 		if (sun) sun.position.set(playerState.pos[0] + 30, 45, playerState.pos[2] + 20);
+	});
+
+	// SHADOW THROTTLE: the 2048² shadow map is re-rendered EVERY frame — re-rasterising all casters (mostly
+	// STATIC trees/props/buildings) into depth — and that cost is fixed regardless of dpr, so as DRS lowers
+	// resolution the shadow pass becomes a bigger share. Drive it on a throttle instead: update every Nth frame
+	// (≥60 Hz at 120 fps) — imperceptible shadow lag, ~N× cheaper shadow pass, so DRS can hold the target at a
+	// crisper colour resolution. autoUpdate off → we flag needsUpdate ourselves in the task.
+	const { renderer } = useThrelte();
+	const SHADOW_EVERY = 2; // re-render shadows every other frame
+	let shadowTick = 0;
+	$effect(() => {
+		renderer.shadowMap.autoUpdate = false;
+		renderer.shadowMap.needsUpdate = true; // one render so we don't start a frame with an empty shadow map
+		return () => (renderer.shadowMap.autoUpdate = true); // restore if the scene unmounts
 	});
 
 	// Scene lighting follows the sky so NIGHT is actually dark (was constant → night looked like day with a
@@ -230,6 +244,9 @@
 			sun.target.position.set(cx, 0, cz);
 			sun.target.updateMatrixWorld();
 		}
+		// throttled shadow re-render — flag needsUpdate BEFORE three renders this frame (autoUpdate is off above)
+		shadowTick = (shadowTick + 1) % SHADOW_EVERY;
+		if (shadowTick === 0) renderer.shadowMap.needsUpdate = true;
 		// recompute the NEAR set only after moving far enough or the world changed (not every frame)
 		const px = playerState.pos[0];
 		const pz = playerState.pos[2];
