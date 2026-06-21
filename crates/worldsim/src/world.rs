@@ -18,6 +18,13 @@ const NEIGHBOR_RADIUS: f64 = 4.0; // also the grid cell size (flocking only)
 const DENSITY_THRESHOLD: f64 = 0.85; // gentle spread (0.4 was too aggressive → predators jitter-sprint to exhaustion)
 const SEP_WEIGHT: f64 = 1.5; // gentle (1.8 jittered co-spawned predators into exhaustion)
 const ALI_WEIGHT: f64 = 0.05; // was 0.4 → agents matched velocities + moved as ONE direction; near-off so they FAN OUT (KEEP)
+// DISPERSAL — a YOUNG prey animal in a CROWDED patch strikes out to find new range (user: "the excess, esp the
+// young, must go away while the rest stay"). It heads a fixed seeded direction so it actually travels off and
+// seeds a new herd elsewhere, instead of the whole population packing one clearing. Fades as it reaches open ground.
+const DISPERSE_CROWD: u32 = 6; // this many flock neighbours = "crowded" → young start to peel off
+const DISPERSE_AGE: f64 = 0.32; // only the young (age < this × lifespan) disperse; settled adults hold the range
+const DISPERSE_W: f64 = 0.9; // outward drive (strong — must beat cohesion/comfort so it actually leaves)
+const CH_DISPERSE: i32 = 24; // RNG channel for the per-animal dispersal heading
 
 // food-chain targeting (chunk b)
 const SEEK: f64 = 100.0; // a predator notices + stalks prey within this radius; also the seek-grid cell size
@@ -1509,6 +1516,20 @@ impl World {
             fz += cdz * c;
             fx += (ali_x / nn - avx) * ALI_WEIGHT;
             fz += (ali_z / nn - avz) * ALI_WEIGHT;
+        }
+
+        // DISPERSAL — a young herbivore in a crowded patch heads off to colonise new ground (see consts). Direction
+        // is seeded (steady per animal) so it commits to a heading and travels, rather than jittering in place; the
+        // drive ramps with crowding and vanishes once it reaches open range, so it settles where there's room.
+        if matches!(m.kind, Kind::Rabbit | Kind::Kangaroo)
+            && n_near >= DISPERSE_CROWD
+            && m.age < m.lifespan * DISPERSE_AGE
+        {
+            let ang = crate::simrng::rand(&[m.seed_id, CH_DISPERSE]) * std::f64::consts::TAU;
+            let gain = smoothstep(DISPERSE_CROWD as f64, DISPERSE_CROWD as f64 + 5.0, n_near as f64);
+            let w = a_max * DISPERSE_W * gain;
+            fx += ang.cos() * w;
+            fz += ang.sin() * w;
         }
 
         (fx, fz, n_near)
