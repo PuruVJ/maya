@@ -257,19 +257,32 @@
 		if (restockT >= RESTOCK_EVERY) {
 			restockT = 0;
 			const live: Record<string, number> = {};
+			const geneSum: Record<string, number> = {};
+			let allGene = 0;
+			let allN = 0;
 			agentManager.forEach((m) => {
-				if (!m.dead) live[m.kind] = (live[m.kind] ?? 0) + 1;
+				if (m.dead) return;
+				live[m.kind] = (live[m.kind] ?? 0) + 1;
+				geneSum[m.kind] = (geneSum[m.kind] ?? 0) + (m.gene ?? 1); // accumulate VIGOR so immigrants match the evolved stock
+				allGene += m.gene ?? 1;
+				allN++;
 			});
+			const globalAvg = allN > 0 ? allGene / allN : 1; // fallback vigor for a species that's gone fully extinct
 			for (const kind in IMMIGRATION) {
 				const deficit = IMMIGRATION[kind] - (live[kind] ?? 0);
 				if (deficit <= 0) continue;
+				// immigrants arrive carrying the LOCAL evolved vigor (the species average), not a pristine 1.0 —
+				// otherwise the floor's steady trickle of founders kept resetting evolution (vigor was pinned ~1.0).
+				// They're "robust dispersers", so a hair above average, with a little spread for selection to bite.
+				const avg = live[kind] ? geneSum[kind] / live[kind] : globalAvg;
 				const bring = Math.min(2, deficit); // a pair at a time → both sexes arrive over successive waves
 				for (let k = 0; k < bring; k++) {
 					const a = Math.random() * Math.PI * 2;
 					const r = 55 + Math.random() * 30; // beyond the immediate clearing, within the wander range
 					const x = playerState.pos[0] + Math.cos(a) * r;
 					const z = playerState.pos[2] + Math.sin(a) * r;
-					world.objects.push({ id: migrantPrefix + migrantN++, kind, pos: [x, 0, z] });
+					const gene = Math.max(0.6, Math.min(1.6, avg + 0.01 + (Math.random() - 0.5) * 0.06));
+					world.objects.push({ id: migrantPrefix + migrantN++, kind, pos: [x, 0, z], gene });
 				}
 			}
 		}
