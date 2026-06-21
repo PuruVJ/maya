@@ -74,7 +74,7 @@ export function drainBuilds(): Build[] {
 }
 
 // ── TELEMETRY: batch sim events and POST them to /api/telemetry so the agent can read what happened ──────────
-const EV_NAME = ['', 'kill', 'starve', 'oldage', 'birth', 'build'] as const; // event code → name (see world.rs)
+const EV_NAME = ['', 'kill', 'starve', 'oldage', 'birth', 'build', 'conceive'] as const; // event code → name (see world.rs)
 let evBatch: { t: string; kind: string; x: number; z: number }[] = [];
 let lastFlush = 0;
 function flushTelemetry(now: number): void {

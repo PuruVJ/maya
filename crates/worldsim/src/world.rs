@@ -79,8 +79,8 @@ const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settl
 // REPRODUCTION (the world replenishes itself): two same-kind ADULTS, calm + well-fed, adjacent + off cooldown,
 // under the per-kind cap + not over-crowded → a baby is born between them; both parents pay energy + a cooldown.
 const BREED_ENERGY: f64 = 0.6; // fullness a parent needs to spare (lowered: 0.72 starved out reproduction → decline)
-const BREED_COOLDOWN: f64 = 16.0; // seconds before a parent can breed again (was 24 → too slow to outpace deaths)
-const BREED_R2: f64 = 3.2 * 3.2; // a mate within this range
+const BREED_COOLDOWN: f64 = 10.0; // seconds before a parent can breed again (16 still gave ~0 births → faster)
+const BREED_R2: f64 = 5.0 * 5.0; // a mate within this range (3.2 was inside the flock comfort-spread → pairs never met)
 const BREED_COST: f64 = 0.42; // fullness (energy) each parent spends on the birth (no free lunch)
 // ISOLATION RULE (user principle): a pair breeds only when not in a CROWD — a clump can't chain-reproduce into a
 // swarm. `crowd` is the neighbour count within the ~4 m flock radius (the mate counts as 1). Originally 2 ("only
@@ -136,6 +136,7 @@ const EV_STARVE: f32 = 2.0; // died of starvation (empty belly)
 const EV_OLDAGE: f32 = 3.0; // died of old age
 const EV_BIRTH: f32 = 4.0; // a baby was delivered
 const EV_BUILD: f32 = 5.0; // a settler raised a house
+const EV_CONCEIVE: f32 = 6.0; // a pair mated (diagnostic: conceive≫birth ⇒ gestation/delivery is the bottleneck)
 
 // ── GESTATION + LITTERS ─────────────────────────────────────────────────────────────────────────────────────
 // Mating doesn't clone instantly: the FEMALE conceives and GESTATES for a period, then delivers a species-sized
@@ -1198,6 +1199,7 @@ impl World {
                 let mu = (crate::simrng::rand(&[self.agents[i].seed_id, self.agents[j].seed_id, self.clock.tick as i32, CH_GENE]) - 0.5) * 2.0 * GENE_MUT;
                 self.agents[mom].unborn_gene = (((self.agents[i].gene + self.agents[j].gene) * 0.5) + mu).clamp(GENE_MIN, GENE_MAX);
                 self.agents[mom].pregnant = gestation(self.agents[mom].kind);
+                self.events.extend_from_slice(&[EV_CONCEIVE, kc as f32, self.agents[mom].agent.x as f32, self.agents[mom].agent.z as f32]);
                 self.agents[i].breed_cd = BREED_COOLDOWN;
                 self.agents[j].breed_cd = BREED_COOLDOWN;
                 self.agents[i].energy = (self.agents[i].energy - BREED_COST).max(0.0);
