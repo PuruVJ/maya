@@ -174,6 +174,12 @@
 	// houses align into blocks; one per plot; a global cap so a town doesn't sprawl unbounded.
 	const housePrefix = 'h' + Math.random().toString(36).slice(2, 8) + '-';
 	let houseN = 0;
+	// GRAVES: a headstone rises where a PERSON died (atmosphere + a record of the settlement's history). Capped so a
+	// long-lived world doesn't become an endless graveyard — oldest headstones are reclaimed first (FIFO); they also
+	// weather away over a very long time once the world-clock fast-forward lands (see save timestamp work).
+	const gravePrefix = 'g' + Math.random().toString(36).slice(2, 8) + '-';
+	let graveN = 0;
+	const GRAVE_CAP = 70;
 	const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
 	const HOUSE_CAP = 140;
 	const corpseReap = new Set<string>(); // reused each frame → ids of fully-decayed corpses to remove (no per-frame alloc)
@@ -244,12 +250,37 @@
 		// world — unmounting its renderer + despawning it from the Rust sim, and dropping it from the save. Keeps
 		// the now-cyclic world (births ↔ deaths) bounded. Only allocates the id-set on the rare frame one expires.
 		corpseReap.clear();
+		const gravePts: [number, number][] = []; // PERSONS reaped this frame → a headstone rises at each spot
 		agentManager.forEach((m) => {
-			if (m.dead && m.objId && m.corpseAge > CORPSE_DECAY_SECS) corpseReap.add(m.objId);
+			if (m.dead && m.objId && m.corpseAge > CORPSE_DECAY_SECS) {
+				corpseReap.add(m.objId);
+				if (m.kind === 'person') gravePts.push([m.agent.x, m.agent.z]);
+			}
 		});
 		if (corpseReap.size > 0) {
 			for (let i = world.objects.length - 1; i >= 0; i--) {
 				if (corpseReap.has(world.objects[i].id)) world.objects.splice(i, 1);
+			}
+		}
+		for (const [gx, gz] of gravePts) {
+			world.objects.push({ id: gravePrefix + graveN++, kind: 'grave', pos: [gx, heightAt(gx, gz, world.terrain), gz], rot: Math.random() * Math.PI * 2 });
+		}
+		if (gravePts.length) {
+			// FIFO cap: once there are too many headstones, reclaim the oldest (lowest grave-counter id)
+			let graves = 0;
+			for (const o of world.objects) if (o.kind === 'grave') graves++;
+			while (graves > GRAVE_CAP) {
+				let oldestIdx = -1;
+				let oldestN = Infinity;
+				for (let i = 0; i < world.objects.length; i++) {
+					const o = world.objects[i];
+					if (o.kind !== 'grave') continue;
+					const num = parseInt(o.id.slice(o.id.indexOf('-') + 1), 10);
+					if (num < oldestN) ((oldestN = num), (oldestIdx = i));
+				}
+				if (oldestIdx < 0) break; // no more graves to reclaim (shouldn't happen) — guard the loop
+				world.objects.splice(oldestIdx, 1);
+				graves--;
 			}
 		}
 

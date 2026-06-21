@@ -69,6 +69,16 @@ export const KINDS: Record<string, KindDef> = {
 			{ geo: 'sphere', args: [0.5], pos: [0.5, 0.3, 0.2], color: '#7e7e86' }
 		]
 	},
+	// a GRAVE — raised at the spot a person died; a turned-earth mound, a weathered headstone, a small cross.
+	grave: {
+		r: 0.5, h: 1, col: 'box', color: '#9a9aa2',
+		parts: [
+			{ geo: 'box', args: [0.6, 0.12, 0.92], pos: [0, 0.06, 0], color: '#57483a' }, // turned-earth mound
+			{ geo: 'box', args: [0.46, 0.5, 0.12], pos: [0, 0.3, -0.32], color: '#9a9aa2' }, // headstone
+			{ geo: 'box', args: [0.1, 0.3, 0.09], pos: [0, 0.64, -0.33], color: '#a8a8b0' }, // cross — upright
+			{ geo: 'box', args: [0.3, 0.1, 0.09], pos: [0, 0.62, -0.33], color: '#a8a8b0' } // cross — arms
+		]
+	},
 	house: {
 		r: 3, h: 3, col: 'box', color: '#d2b48c',
 		parts: [
