@@ -152,6 +152,11 @@ mod wasm_api {
             self.world.set_pop_scale(s);
         }
 
+        /// Per-kind breeding vitality from the JS "Mother Nature" director (6 floats, by Kind index).
+        pub fn set_vitality(&mut self, v: &[f64]) {
+            self.world.set_vitality(v);
+        }
+
         /// Replace the lake-fish lure points from a flat [x0,z0,x1,z1,…] buffer.
         pub fn set_fish(&mut self, xz: &[f64]) {
             self.world.set_fish(xz);

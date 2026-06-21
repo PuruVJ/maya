@@ -465,6 +465,8 @@ pub struct World {
     last_player: (f64, f64),       // previous tick's player pos → its speed (a running player scares wildlife)
     night: f64,                    // 0 day … 1 night → prey jumpier (wider danger radius)
     pop_scale: f64,                // world-AREA multiplier for prey caps (fed from JS: bigger world → more life)
+    vitality: [f64; 6],            // per-kind BREEDING vigour, set by the JS "Mother Nature" director: >1 a struggling
+    // species breeds harder (lower fullness bar + shorter cooldown) to recover; <1 a booming one eases off. 1 = neutral.
     forces: Vec<(f64, f64, u32)>,  // reused per-tick (fx, fz, crowd) flock buffer → no per-frame alloc
     behave: Vec<(f64, bool)>,      // reused per-tick (boost, pursuing) from the behaviour pass
     kills: Vec<usize>,             // prey caught this tick → turned to corpses after the behaviour pass
@@ -499,6 +501,7 @@ impl World {
             last_player: (f64::NAN, f64::NAN),
             night: 0.0,
             pop_scale: 1.0,
+            vitality: [1.0; 6],
             forces: Vec::new(),
             behave: Vec::new(),
             kills: Vec::new(),
@@ -523,6 +526,14 @@ impl World {
     /// A bigger / more-built world supports proportionally more life; predators then follow the prey (see effective_cap).
     pub fn set_pop_scale(&mut self, s: f64) {
         self.pop_scale = s.clamp(1.0, 8.0);
+    }
+
+    /// Per-kind breeding vitality from the JS director (6 values, by Kind index). Clamped to a sane band so the
+    /// controller can nudge but never break the sim. >1 ⇒ breeds harder (recovery); <1 ⇒ eases off (stabilise).
+    pub fn set_vitality(&mut self, v: &[f64]) {
+        for i in 0..6.min(v.len()) {
+            self.vitality[i] = v[i].clamp(0.4, 2.5);
+        }
     }
 
     /// Live carrying capacity for `kind`, given this tick's per-kind headcount `pop`. PREY (+ omnivore people)
@@ -1273,8 +1284,9 @@ impl World {
                 self.agents[mom].unborn_gene = (((self.agents[i].gene + self.agents[j].gene) * 0.5) + mu).clamp(GENE_MIN, GENE_MAX);
                 self.agents[mom].pregnant = gestation(self.agents[mom].kind);
                 self.events.extend_from_slice(&[EV_CONCEIVE, kc as f32, self.agents[mom].agent.x as f32, self.agents[mom].agent.z as f32]);
-                self.agents[i].breed_cd = BREED_COOLDOWN;
-                self.agents[j].breed_cd = BREED_COOLDOWN;
+                let vit = self.vitality[kc]; // director boost → shorter recovery between litters
+                self.agents[i].breed_cd = BREED_COOLDOWN / vit;
+                self.agents[j].breed_cd = BREED_COOLDOWN / vit;
                 self.agents[i].energy = (self.agents[i].energy - BREED_COST).max(0.0);
                 self.agents[j].energy = (self.agents[j].energy - BREED_COST).max(0.0);
             }
@@ -1334,7 +1346,7 @@ impl World {
         !m.dead
             && !m.asleep
             && m.breed_cd <= 0.0
-            && m.energy > BREED_ENERGY // WELL-FED (nutrition), not merely rested → food limits breeding
+            && m.energy > BREED_ENERGY / self.vitality[m.kind as usize] // well-fed bar, EASED for a species the director is boosting
             && m.age < m.lifespan * SENESCENCE_FRAC // fertile window: matured, not yet an elder
             && m.pregnant <= 0.0 // not already carrying a litter
             && !m.mobbed
