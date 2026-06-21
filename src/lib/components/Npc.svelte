@@ -64,6 +64,11 @@
 	const SHIRT = $derived(obj.color ?? SHIRTS[H % SHIRTS.length]);
 	const PANTS = PANTSES[(H >>> 4) % PANTSES.length];
 	const SKIN = SKINS[(H >>> 9) % SKINS.length];
+	// SEX — same rule as the Rust sim's is_female(seed) (even seed = female), so the look matches who actually
+	// breeds. Females wear long/big HAIR so you can tell the sexes apart at a glance (males stay bare-headed).
+	const female = untrack(() => (seedId & 1) === 0);
+	const HAIRS = ['#1a1410', '#3a2817', '#5e3d22', '#9c7240', '#caa45e', '#7a7068']; // black→brown→blonde→grey
+	const HAIR = HAIRS[(H >>> 14) % HAIRS.length];
 	// share the shirt colour with the manager so the FAR impostor (AgentImpostors) tints this person the same
 	// → a distant crowd stays varied instead of popping to uniform blue at the LOD boundary. Tracks paint.
 	$effect(() => {
@@ -200,6 +205,12 @@
 			<!-- eyes (child of the head → turn with the gaze, so a villager visibly looks at you) -->
 			<T.Mesh geometry={PRIM.sphere} scale={[0.07, 0.07, 0.07]} position={[0.09, 0.05, 0.2]} material={EYE_MAT} />
 			<T.Mesh geometry={PRIM.sphere} scale={[0.07, 0.07, 0.07]} position={[-0.09, 0.05, 0.2]} material={EYE_MAT} />
+			{#if female}
+				<!-- FEMALE: big hair so the sexes read apart — a rounded crown + two shoulder-length side locks -->
+				<T.Mesh geometry={PRIM.sphere} scale={[0.46, 0.42, 0.46]} position={[0, 0.05, -0.04]} material={creatureMat(HAIR)} castShadow />
+				<T.Mesh geometry={PRIM.sphere} scale={[0.17, 0.4, 0.2]} position={[0.27, -0.22, -0.04]} material={creatureMat(HAIR)} castShadow />
+				<T.Mesh geometry={PRIM.sphere} scale={[0.17, 0.4, 0.2]} position={[-0.27, -0.22, -0.04]} material={creatureMat(HAIR)} castShadow />
+			{/if}
 		</T.Group>
 		<!-- arms (shoulder pivots) -->
 		<T.Group bind:ref={armL} position={[0.34, 1.4, 0]}>

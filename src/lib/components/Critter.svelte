@@ -82,6 +82,9 @@
 	// lets it actually ROAM and wander instead of circling in place.
 	// stable per-agent seed (from the saved id) → deterministic traits/RNG stream (docs/self-sustaining-world §1.6)
 	const seedId = untrack(() => seedFrom(obj?.id ?? ''));
+	// SEX — same rule as the Rust sim's is_female(seed) (even seed = female). Females render a touch smaller, and
+	// male LIONS get the mane (females don't) → you can read the sexes apart, especially on a breeding pair.
+	const female = untrack(() => (seedId & 1) === 0);
 	const ms = untrack(() => speedFor(species, seedId));
 	const agent = untrack(
 		() =>
@@ -151,7 +154,7 @@
 	useTask((dt) => {
 		t += dt;
 		if (growth < 1) growth = Math.min(1, growth + GROW_RATE * dt); // a juvenile matures toward adult size
-		const eSC = SC * growth; // effective render scale this frame (== SC for adults)
+		const eSC = SC * growth * (female ? 0.9 : 1); // effective render scale (females a touch smaller — a sex cue)
 		if (sleeping !== managed.asleep) sleeping = managed.asleep; // toggle the zzz billboard
 		// companion pet → its wander-leash centre tracks you, so it trails along and never strays far (set
 		// before any early-out so it keeps following even if it briefly falls behind)
@@ -427,7 +430,9 @@
 {#snippet lionBody()}
 	<T.Mesh geometry={PRIM.box} scale={[0.6, 0.5, 1.3]} position={[0, 0.52, 0]} material={mBody} castShadow />
 	<T.Group bind:ref={head} position={[0, 0.66, 0.82]}>
-		<T.Mesh geometry={PRIM.sphere} scale={[0.95, 0.9, 0.9]} position={[0, 0, -0.04]} material={mAccent} castShadow />
+		{#if !female}<!-- only MALE lions grow the mane → reads the sexes apart -->
+			<T.Mesh geometry={PRIM.sphere} scale={[0.95, 0.9, 0.9]} position={[0, 0, -0.04]} material={mAccent} castShadow />
+		{/if}
 		<T.Mesh geometry={PRIM.sphere} scale={[0.5, 0.5, 0.5]} material={mBody} castShadow />
 		{@render eyes(0.12, 0.06, 0.2, 0.085)}
 		<T.Mesh geometry={PRIM.cone} scale={[0.13, 0.16, 0.13]} position={[0.18, 0.34, 0]} material={mAccent} castShadow />
