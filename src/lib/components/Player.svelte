@@ -51,16 +51,22 @@
 	let lastPointerX = 0;
 	let lastPointerY = 0;
 	let sprinting = false; // Shift toggles; only matters while moving
-	let px = 0;
-	let py = 0.9;
-	let pz = 6;
-	let moved = false; // becomes true once you take control → stop honouring an incoming saved start pos
+	// HMR RESUME: if the player singleton is already live (a code change re-mounted only THIS component, not a
+	// real reload), start from the live position — not the default spawn — so a hot-reload doesn't teleport you
+	// home. On a genuine fresh load, `live` is false and we begin at spawn, then the `start` effect restores the
+	// saved pose below.
+	let px = playerState.live ? playerState.pos[0] : 0;
+	let py = playerState.live ? playerState.pos[1] : 0.9;
+	let pz = playerState.live ? playerState.pos[2] : 6;
+	let moved = playerState.live; // already-live → treat as "taken control" so the saved-start restore is skipped
+	if (playerState.live) yaw = playerState.yaw;
 
 	// Restore the saved player pose from a shared/reloaded link (world.start, decoded from the URL) the
-	// moment it arrives — as long as you haven't moved yet — so you reopen standing where you left off.
+	// moment it arrives — as long as you haven't moved yet (and aren't resuming a live HMR session) — so you
+	// reopen standing where you left off.
 	$effect(() => {
 		const s = world.start;
-		if (s && !moved) {
+		if (s && !moved && !playerState.live) {
 			px = s.x;
 			pz = s.z;
 			yaw = s.yaw;

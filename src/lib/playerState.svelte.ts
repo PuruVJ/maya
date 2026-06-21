@@ -19,10 +19,15 @@ export class PlayerState {
 	// one-shot teleport request (e.g. the "go home" command sets a target); Player consumes + clears it next
 	// frame. Plain field (polled each frame), not $state.
 	teleportTo: [number, number, number] | null = null;
+	// has the player ever taken control? This singleton survives an HMR re-mount (only the Player COMPONENT
+	// remounts on a code change), so it lets Player resume from the live pos instead of snapping back to the
+	// stale saved `start` — which is what made every code change teleport you home.
+	live = false;
 
 	place(pos: [number, number, number], yaw: number) {
 		this.pos = pos;
 		this.yaw = yaw;
+		this.live = true;
 	}
 
 	// FSM: derive the movement state from this frame's facts
