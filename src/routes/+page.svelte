@@ -15,6 +15,7 @@
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld } from '$lib/world';
 	import { encodeWorld, decodeWorld } from '$lib/share';
+	import { loadWorld, saveWorld } from '$lib/worldStore';
 	import { SKY_BG } from '$lib/kinds';
 	import { enableWorldCurvature } from '$lib/curveWorld';
 	import { llm } from '$lib/llm.svelte';
@@ -41,14 +42,22 @@
 	onMount(async () => {
 		const m = location.hash.match(/[#&]w=([^&]+)/);
 		if (m) {
+			// opened a SHARED link → load that world, persist it (store + local cache), then SCRUB the hash from
+			// the address bar so it's not stuck there forever.
 			try {
 				world = await decodeWorld(m[1]);
+				replaceState(location.pathname + location.search, {});
+				saveWorld($state.snapshot(world));
 			} catch {
 				shareMsg = "That share link couldn't be read.";
 				setTimeout(() => (shareMsg = ''), 3000);
 			}
+		} else {
+			// normal open → restore from the world store (shared backend → local IndexedDB cache → else the demo)
+			const saved = await loadWorld();
+			if (saved && Array.isArray(saved.objects)) world = saved;
 		}
-		liveUrl = true; // from here on, the address bar mirrors the world live (see effect below)
+		liveUrl = true; // from here on, edits persist to the world store (see effect below)
 	});
 
 	// Live shareable URL: the world IS the link. Encode the world MERGED with the live agent snapshot
@@ -56,27 +65,17 @@
 	// EDIT (debounced reactive effect — captures builds/moves/paint for ANY world), and (b) ~1 Hz ONLY while
 	// animals are present (to capture their wandering/deaths). A static built city therefore re-encodes only
 	// when you change it, not every second. replaceState (no history spam); skipped when the hash is the same.
-	let linkBytes = $state(0); // size of the current share hash → shown so the URL limit isn't a surprise
-	let lastHash = '';
-	// the player's live pose → packed into the link so reopening/reloading drops you back where you stood
+	// the player's live pose → packed into a SHARE link (the Share button) so a shared world reopens where you stood
 	const playerPose = () => ({ x: playerState.pos[0], z: playerState.pos[2], yaw: playerState.yaw });
-	const pushUrl = async () => {
-		try {
-			const hash = '#w=' + (await encodeWorld(world, agentManager.liveSnapshot(), playerPose()));
-			linkBytes = hash.length;
-			if (hash !== lastHash) ((lastHash = hash), replaceState(hash, {}));
-		} catch {
-			/* encode unsupported (old browser) → Share button still works */
-		}
-	};
-	// (a) edits → debounced. JSON.stringify gives deep dep-tracking; the world only mutates on edits (animal
-	// movement lives in the agent manager, not world.objects), so this fires on builds/moves/paint, not frames.
+	// EDITS → debounced save to the world store (local IndexedDB cache + best-effort sync to the shared backend).
+	// JSON.stringify gives deep dep-tracking; the world only mutates on edits (animal movement lives in the agent
+	// manager, not world.objects), so this fires on builds/moves/paint, NOT frames — and never touches the URL.
 	let editTimer: ReturnType<typeof setTimeout> | undefined;
 	$effect(() => {
 		JSON.stringify(world);
 		if (!liveUrl) return;
 		clearTimeout(editTimer);
-		editTimer = setTimeout(pushUrl, 500);
+		editTimer = setTimeout(() => saveWorld($state.snapshot(world)), 500);
 		return () => clearTimeout(editTimer);
 	});
 	// (b) REMOVED for perf (2026-06-21) — the 1 Hz live-snapshot re-encode (gzip the WHOLE world + every agent
@@ -94,14 +93,14 @@
 	}
 
 	async function share() {
+		// Build the share link on demand and copy it — WITHOUT writing it to the address bar (the whole point of
+		// moving state to the store was a clean URL; a share is an explicit, momentary action).
 		try {
-			const hash = '#w=' + (await encodeWorld(world, agentManager.liveSnapshot(), playerPose())); // capture the live moment
-			replaceState(hash, {}); // SvelteKit-router-friendly (raw history.replaceState warns)
-			const url = location.origin + location.pathname + hash;
+			const url = location.origin + location.pathname + '#w=' + (await encodeWorld(world, agentManager.liveSnapshot(), playerPose()));
 			await navigator.clipboard.writeText(url);
 			shareMsg = `Link copied — ${url.length} chars`;
 		} catch {
-			shareMsg = 'Saved to the address bar';
+			shareMsg = 'Could not create a share link';
 		}
 		setTimeout(() => (shareMsg = ''), 2800);
 	}
@@ -201,14 +200,13 @@
 			🔗 Share
 		</button>
 	</div>
-	<!-- link-size readout: the world IS the link, so show how big it's getting (turns amber/red near the
-	     practical URL limit) — no surprises about hitting a size wall -->
+	<!-- object-count readout (the world now persists to the store, not the URL — no size-wall to warn about) -->
 	{#if liveUrl && world.objects.length}
 		<div
-			class="pointer-events-none rounded-full bg-black/35 px-2.5 py-0.5 text-[11px] font-medium backdrop-blur {linkBytes > 80000 ? 'text-red-300' : linkBytes > 40000 ? 'text-amber-300' : 'text-white/55'}"
-			title="Your whole world is encoded in the share link. Browsers handle hundreds of KB; QR codes / easy pasting want it smaller."
+			class="pointer-events-none rounded-full bg-black/35 px-2.5 py-0.5 text-[11px] font-medium text-white/55 backdrop-blur"
+			title="Your world auto-saves locally (and to the shared backend when deployed)."
 		>
-			{world.objects.length} objects · {(linkBytes / 1024).toFixed(1)} KB link
+			{world.objects.length} objects
 		</div>
 	{/if}
 	{#if shareMsg}
