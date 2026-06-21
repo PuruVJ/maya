@@ -684,6 +684,13 @@ stay Three.js.** Reasoning:
   particles on GPU). **Three.js already has a WebGPU renderer (TSL)** → this is a path *inside* Three (keep
   Threlte + Svelte components + the shader work), not an engine switch. WebGPU is Chrome-gated anyway (§6.5) →
   fully available. Biggest bang, least disruption — pursue when render cost is *measured* to matter.
+- **Decision (2026-06-21): PARKED after a working spike.** A dedicated `webgpu` branch successfully booted
+  `WebGPURenderer` and proved TSL terrain/curvature, but visual parity across the project's many hand-tuned
+  GLSL patches was too fragile to develop reliably by LLM iteration (valid shaders repeatedly produced wrong
+  world-space lighting, fog, LOD grounding, and curvature). **WebGL2 remains the production renderer.** Keep
+  improving renderer-agnostic wins — instancing, budgets, culling, LOD, workers, SIMD — and revisit WebGPU only
+  when Three/TSL migration tooling is mature enough for systematic visual-regression testing. The spike remains
+  isolated in its worktree/branch as research; do not merge it piecemeal into `main`.
 - **Not locked in:** the §6.7 engine/view split means the renderer is **not load-bearing** — swap Three.js for
   a unified-Rust engine (**Bevy**: ECS + WebGPU, one language for sim+render, no JS↔WASM render boundary) or
   raw WebGPU **later** without touching the sim, IF render becomes the real bottleneck. But that's a near-total

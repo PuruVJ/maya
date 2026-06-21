@@ -37,7 +37,10 @@
 		return y;
 	};
 
-	const COUNT = Math.max(3, Math.min(8, Math.round(Z.size / 4)));
+	const COUNT = Math.max(3, Math.min(8, Math.round(Z.size / 4))); // the STARTING shoal
+	const CAP = COUNT * 2 + 2; // pond carrying capacity — the shoal breeds UP toward this, then holds
+	const REPRO_MIN = 22; // seconds between births (a calm pond fills slowly so the growth reads as "life")
+	const REPRO_MAX = 46;
 	const FLEE_R = 6; // a threat within this many metres of a fish sends it darting for open water
 	const rnd = (n: number) => {
 		const v = Math.sin(n * 12.9898 + 78.233) * 43758.5453;
@@ -55,9 +58,11 @@
 	};
 
 	type Fish = { x: number; z: number; h: number; tx: number; tz: number; ph: number; spd: number; sz: number; leap: number; leapCd: number };
+	// pre-allocate the FULL capacity (the array never grows → no reactivity in the hot path); only the first
+	// `active` fish are alive + rendered, and `active` climbs toward CAP as the shoal breeds (see useTask).
 	const fish: Fish[] = untrack(() => {
 		const out: Fish[] = [];
-		for (let i = 0; i < COUNT; i++) {
+		for (let i = 0; i < CAP; i++) {
 			const a = rnd(seed + i) * Math.PI * 2;
 			const r = Z.size * 0.6 * Math.sqrt(rnd(seed + i * 3.1));
 			const x = Z.x + Math.cos(a) * r;
@@ -66,8 +71,11 @@
 		}
 		return out;
 	});
-	// the live-position array cats query (mutated in place each frame)
-	const school: FishPos[] = untrack(() => fish.map((f) => ({ x: f.x, z: f.z })));
+	let active = COUNT; // how many of `fish` are currently alive (grows via breeding) — plain let, not reactive
+	let bornCd = untrack(() => REPRO_MIN + rnd(seed) * (REPRO_MAX - REPRO_MIN)); // countdown to the next birth
+	// the live-position array cats query (only the active fish — inactive ones are parked far off so they
+	// neither lure cats nor render). It's CAP-long and fixed (registered once); births just flip entries live.
+	const school: FishPos[] = untrack(() => fish.map((f, i) => (i < active ? { x: f.x, z: f.z } : { x: 1e9, z: 1e9 })));
 	$effect(() => fishRegistry.register(school));
 
 	const groups: THREE.Group[] = [];
@@ -89,6 +97,28 @@
 	let t = 0; // elapsed since mount — same clock as Water's uTime (both mount with the zone) → waves stay in phase
 	useTask((dt) => {
 		t += dt;
+		// BREEDING — the shoal grows toward CAP. Every so often a new fish "hatches" beside an existing one
+		// (we just activate the next pre-allocated slot + seed it near a random parent), so a pond that starts
+		// sparse fills out over a few minutes. Holds at CAP; no fish are removed (nothing eats them — cats only
+		// get lured to the bank), so this reads as a recovering/thriving shoal rather than runaway growth.
+		if (active < CAP) {
+			bornCd -= dt;
+			if (bornCd <= 0) {
+				const parent = fish[(rnd(t + active) * active) | 0];
+				const b = fish[active];
+				b.x = parent.x;
+				b.z = parent.z;
+				b.tx = parent.x;
+				b.tz = parent.z;
+				b.ph = rnd(t * 1.3 + active) * 6.28;
+				b.leap = 0;
+				b.leapCd = 3 + rnd(t + active * 1.7) * 8;
+				school[active].x = b.x;
+				school[active].z = b.z;
+				active++;
+				bornCd = REPRO_MIN + rnd(t * 2.1 + active) * (REPRO_MAX - REPRO_MIN);
+			}
+		}
 		// gather threats once: the player + any nearby land predator (cat/lion/person) near this pond
 		const reach = Z.size + 10;
 		const threats: { x: number; z: number }[] = [{ x: playerState.pos[0], z: playerState.pos[2] }];
@@ -98,7 +128,7 @@
 			if (Math.abs(m.agent.x - Z.x) < reach && Math.abs(m.agent.z - Z.z) < reach) threats.push({ x: m.agent.x, z: m.agent.z });
 		});
 
-		for (let i = 0; i < fish.length; i++) {
+		for (let i = 0; i < active; i++) {
 			const f = fish[i];
 			// nearest threat
 			let tdx = 0;
@@ -153,11 +183,17 @@
 
 			const g = groups[i];
 			if (g) {
+				g.visible = true;
 				g.position.set(f.x, WLEVEL + waveAt(f.x, f.z, t) + 0.06 + arc * 0.55, f.z); // ride the live wave surface
 				g.rotation.y = -f.h + Math.PI / 2; // model faces +Z; align to heading
 				g.rotation.z = Math.sin(f.ph) * 0.18; // body roll/wiggle
 				g.rotation.x = arc > 0 ? -Math.cos(f.leap * Math.PI) * 0.6 : 0; // nose up on the way up, down on the way down
 			}
+		}
+		// keep the not-yet-hatched slots invisible (they default to a fish sitting at the world origin otherwise)
+		for (let i = active; i < fish.length; i++) {
+			const g = groups[i];
+			if (g) g.visible = false;
 		}
 	});
 </script>
