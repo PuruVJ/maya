@@ -75,6 +75,17 @@
 		// the model talks back via note ops (limits / "I can't do that"); the engine ignores them
 		note = ops.filter((o) => o.op === 'note').map((o) => (o as { text: string }).text).join(' ') || null;
 		const actionable = ops.filter((o) => o.op !== 'note');
+		// SIZE WORDS — "big house", "small cabin", "huge tower" → scale the placed objects. The model doesn't emit
+		// scale, so we read the size from the raw instruction and multiply it in (deterministic, no retrain needed).
+		const sizeM = /\b(huge|giant|massive|grand)\b/i.test(instruction) ? 2 : /\bbig|large|tall\b/i.test(instruction) ? 1.55 : /\b(tiny|mini)\b/i.test(instruction) ? 0.5 : /\bsmall|little|cosy|cozy\b/i.test(instruction) ? 0.65 : 0;
+		if (sizeM > 0) {
+			for (const o of actionable) {
+				if (o.op === 'add') {
+					const s = (o as { scale?: [number, number, number] }).scale ?? [1, 1, 1];
+					(o as { scale?: [number, number, number] }).scale = [s[0] * sizeM, s[1] * sizeM, s[2] * sizeM];
+				}
+			}
+		}
 		if (actionable.length === 0) {
 			// safety net: nothing buildable came back — tell the user the limits if the model didn't
 			if (!note) note = LIMITS;
