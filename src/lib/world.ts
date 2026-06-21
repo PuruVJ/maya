@@ -66,6 +66,24 @@ export function repairIds<T extends { objects: { id: string }[]; zones?: { id: s
 	return world;
 }
 
+// Per-kind living cap — MIRRORS crates/worldsim/src/eco.rs's pop_cap() (the trophic pyramid: many prey, few apex).
+// The Rust cap only gates BREEDING, so it can't trim a roster that's ALREADY over it — and a saved world can carry
+// such an overshoot baked into its objects (a roster persisted before the caps existed, or before the sim starved
+// an apex bloom back down). This trims each creature kind to its ceiling AT LOAD, so a persisted world opens in
+// balance instead of reloading the same 12-lion bloom every time. Keeps the first `cap` of each kind (the
+// established founders, which sort ahead of later-appended babies/immigrants); drops the surplus. Mutates + returns.
+const CREATURE_CAP: Record<string, number> = { rabbit: 45, kangaroo: 28, person: 22, cat: 14, lion: 6, dinosaur: 3 };
+export function capCreatures<T extends { objects: { kind: string }[] }>(world: T): T {
+	const seen: Record<string, number> = {};
+	world.objects = world.objects.filter((o) => {
+		const cap = CREATURE_CAP[o.kind];
+		if (cap === undefined) return true; // a tree / house / prop — not a capped creature, always keep
+		seen[o.kind] = (seen[o.kind] ?? 0) + 1;
+		return seen[o.kind] <= cap;
+	});
+	return world;
+}
+
 export interface World {
 	v: number;
 	name: string;

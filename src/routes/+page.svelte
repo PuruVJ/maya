@@ -14,7 +14,7 @@
 	import EcoStats from '$lib/components/EcoStats.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
-	import { demoWorld, emptyWorld, type World as WorldData } from '$lib/world';
+	import { demoWorld, emptyWorld, capCreatures, type World as WorldData } from '$lib/world';
 	import { encodeWorld, decodeWorld } from '$lib/share';
 	import { loadWorld, saveWorld } from '$lib/worldStore';
 	import { SKY_BG } from '$lib/kinds';
@@ -58,7 +58,7 @@
 			// opened a SHARED link → load that world, persist it (store + local cache), then SCRUB the hash from
 			// the address bar so it's not stuck there forever.
 			try {
-				world = dedupeObjects(await decodeWorld(m[1]));
+				world = capCreatures(dedupeObjects(await decodeWorld(m[1])));
 				replaceState(location.pathname + location.search, {});
 				saveWorld($state.snapshot(world));
 			} catch {
@@ -68,7 +68,7 @@
 		} else {
 			// normal open → restore from the world store (shared backend → local IndexedDB cache → else the demo)
 			const saved = await loadWorld();
-			if (saved && Array.isArray(saved.objects)) world = dedupeObjects(saved);
+			if (saved && Array.isArray(saved.objects)) world = capCreatures(dedupeObjects(saved));
 		}
 		liveUrl = true; // from here on, edits persist to the world store (see effect below)
 	});
