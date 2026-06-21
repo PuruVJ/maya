@@ -1,0 +1,7 @@
+# Enable WASM SIMD (128-bit) so LLVM autovectorizes the sim's hot loops (distance / flocking-force math).
+# Scoped to the wasm32 target ONLY → native `cargo test` (the parity checks) builds without it and stays fast,
+# and its float results are unaffected. All current browsers (Chrome/Edge/Firefox, Safari 16.4+) support wasm
+# SIMD, so the emitted module loads everywhere we target. Determinism is preserved: simd128 lets LLVM use SIMD
+# for autovectorization but keeps IEEE semantics (no fast-math), so wasm→wasm results are bit-identical.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

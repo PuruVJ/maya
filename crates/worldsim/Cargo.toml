@@ -11,3 +11,12 @@ crate-type = ["cdylib", "rlib"]
 # wasm-bindgen only on the wasm target → native `cargo test` (parity checks) stays dependency-light + fast.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
+
+# Squeeze the shipped wasm: full LTO + a single codegen unit let LLVM inline + vectorize across the whole sim
+# (compounds with the +simd128 flag), and abort-on-panic trims the unwinding tables. Slower compile, faster +
+# smaller runtime — the right trade for a hot engine the player runs every frame. (wasm-pack builds --release.)
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
