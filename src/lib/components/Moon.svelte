@@ -12,11 +12,11 @@
 	const DIM = untrack(() => dim); // constant per mount (SkyDome remounts on sky change) → snapshot for the uniforms
 
 	const { camera } = useThrelte();
-	// LOW on the horizon (user: "I wanna see it on the horizon") — same azimuth as the moonlight (x,z kept) but a
-	// shallow elevation so it hangs in your forward view, not overhead. The directional light stays high, so the
-	// disc no longer sits exactly on the light vector — an accepted trade for a big horizon moon (depthTest:false
-	// keeps it clear of the terrain line + fog).
-	const DIR = new THREE.Vector3(30, 11, 20).normalize();
+	// Up in the SKY (~35° elevation) — high enough to clear the world-fold's reared-up far terrain so depthTest can
+	// keep it BEHIND the world + character without hills swallowing it, and clearly a distant sky body you can never
+	// walk up to (it rides with the camera, below). A horizon-low moon sat among the terrain → looked reachable +
+	// got occluded; this reads as the real, far moon.
+	const DIR = new THREE.Vector3(30, 25, 20).normalize();
 	const FAR = 170; // inside the star sphere (so the moon sits in front of the stars) and the camera far plane
 	const SIZE = 22; // a prominent, stylised moon
 

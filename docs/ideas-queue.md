@@ -58,6 +58,17 @@ constants toward a healthy, churning balance — boost a sagging species, rein i
 ### J. Fence not movable (bug)
 - A built fence can't be picked up by the move tool. Investigate the raycast / `userData.objectId` path for fences.
 
+### N. Per-user spawn regions (localStorage)
+- A "user" doesn't spawn at (0,6) — each gets their OWN spawn area spread across the grid (decent distance apart:
+  far enough to feel separate / see another's place at a distance, NOT so close it crashes). Reuse the existing
+  region/area system.
+- Store per-user in **localStorage** for now (no real auth yet): { spawnPoint, lastPosition, … } — "favour
+  computing/persisting as much as possible." (Composes with N's multi-region + B's keep-flag.)
+
+### A-done. Dynamic Mother Nature director — SHIPPED (in Rust, homeostatic)
+- The sim now drifts each kind's breeding vitality toward a target from pop/carrying-capacity each tick (struggling
+  → breed hard, booming → ease off). Fully in-sim, no JS controller. Vitality eases breed_ready + the cooldown.
+
 ### L. Move the engine's math to Rust (non-UI parts)
 - `src/lib/engine.ts` (applyOps placement, `findFreeSpot` O(n²) collision search, scatter spiral, anchor maths) is
   heavy compute living in JS. Per the architecture law it belongs in Rust; the op-orchestration / world-object

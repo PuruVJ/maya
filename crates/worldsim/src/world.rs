@@ -93,6 +93,7 @@ const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settl
 // under the per-kind cap + not over-crowded → a baby is born between them; both parents pay energy + a cooldown.
 const BREED_ENERGY: f64 = 0.6; // fullness a parent needs to spare (lowered: 0.72 starved out reproduction → decline)
 const BREED_COOLDOWN: f64 = 10.0; // seconds before a parent can breed again (16 still gave ~0 births → faster)
+const VITALITY_LERP: f64 = 0.004; // per-tick ease of the director's per-kind vitality toward its target (gentle drift)
 const HERD_BREED_R2: f64 = 13.0 * 13.0; // a mate within this range for HERD species — wide enough that a sparse,
 // scattered population (a handful of kangaroos, a thinned herd) can still pair up, not just a dense flock/city.
 const PRED_BREED_R2: f64 = 24.0 * 24.0; // SOLITARY hunters range far wider — they don't pack tight like prey herds,
@@ -1237,6 +1238,25 @@ impl World {
             if !m.dead {
                 pop[m.kind as usize] += 1;
             }
+        }
+        // 🌿 MOTHER NATURE — the homeostatic DIRECTOR, in-sim (per the Rust-owns-the-math north star). Each tick she
+        // drifts every kind's breeding VITALITY toward a target set by how far it is from carrying capacity: a sagging
+        // species (well under cap) breeds harder to recover, a booming one (at/over cap) eases off. Vitality feeds
+        // breed_ready (lower fullness bar) + the post-mating cooldown, so the world self-corrects toward a churning
+        // balance instead of stagnating or over-shooting — no JS controller, no hand-tuning.
+        for kind in [Kind::Rabbit, Kind::Cat, Kind::Kangaroo, Kind::Person, Kind::Lion, Kind::Dinosaur] {
+            let k = kind as usize;
+            let ratio = pop[k] as f64 / self.effective_cap(kind, &pop).max(1) as f64;
+            let target = if ratio < 0.35 {
+                1.7 // struggling → breed hard
+            } else if ratio < 0.7 {
+                1.25
+            } else if ratio >= 1.0 {
+                0.8 // at/over capacity → ease off
+            } else {
+                1.0
+            };
+            self.vitality[k] += (target - self.vitality[k]) * VITALITY_LERP;
         }
         // A. GESTATION — advance every pregnancy; deliver the litter at the mother's spot when it completes.
         for i in 0..n {
