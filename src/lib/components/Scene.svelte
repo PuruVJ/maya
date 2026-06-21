@@ -190,6 +190,12 @@
 	const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
 	const HOUSE_CAP = 140;
 	const corpseReap = new Set<string>(); // reused each frame → ids of fully-decayed corpses to remove (no per-frame alloc)
+	// HABITATION DECAY: an emergent (NPC-built) home that nobody lives in for too long is reclaimed, so a town only
+	// persists where people actually settle (big-world "churning steady state"). PLAYER/LLM builds carry `keep` and
+	// are NEVER touched; a home with a human nearby resets its idle clock.
+	const houseIdle = new Map<string, number>(); // building id → seconds gone uninhabited
+	const OCCUPY_R2 = 16 * 16; // a person within this of a home → it's lived-in
+	const DECAY_IDLE = 240; // seconds empty before an emergent home is reclaimed
 	// IMMIGRATION FLOOR — a living world must not be able to DIE for good. If a key species falls below a critical
 	// count (an over-hunted herd, or a world reloaded after a prior collapse — we found one persisted as a lone
 	// cat), a small wave wanders in from beyond the treeline to re-seed it. Spawned as ADULTS in a pair (so they
@@ -375,6 +381,30 @@
 				if (!blocked) {
 					const s = 0.7 + Math.random() * 0.5;
 					world.objects.push({ id: treePrefix + treeN++, kind: 'tree', pos: [tx, heightAt(tx, tz, world.terrain), tz], scale: [s, s, s] });
+				}
+			}
+			// HABITATION DECAY: an emergent home that nobody lives in for too long is reclaimed — a town persists
+			// only where people actually settle. PLAYER/LLM builds carry `keep` and are NEVER touched; a person
+			// within OCCUPY_R of a home resets its idle clock.
+			const humansAt: [number, number][] = [];
+			agentManager.forEach((m) => {
+				if (!m.dead && m.kind === 'person') humansAt.push([m.agent.x, m.agent.z]);
+			});
+			let anyDecayed = false;
+			for (const o of world.objects) {
+				if (!BUILDING_KINDS.has(o.kind) || o.keep) continue;
+				const lived = humansAt.some(([hx, hz]) => (hx - o.pos[0]) ** 2 + (hz - o.pos[2]) ** 2 < OCCUPY_R2);
+				const idle = lived ? 0 : (houseIdle.get(o.id) ?? 0) + RESTOCK_EVERY;
+				houseIdle.set(o.id, idle);
+				if (idle > DECAY_IDLE) anyDecayed = true;
+			}
+			if (anyDecayed) {
+				for (let i = world.objects.length - 1; i >= 0; i--) {
+					const o = world.objects[i];
+					if (BUILDING_KINDS.has(o.kind) && !o.keep && (houseIdle.get(o.id) ?? 0) > DECAY_IDLE) {
+						world.objects.splice(i, 1);
+						houseIdle.delete(o.id);
+					}
 				}
 			}
 		}

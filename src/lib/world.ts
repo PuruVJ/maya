@@ -14,6 +14,7 @@ export interface WorldObject {
 	asleep?: boolean;
 	juvenile?: boolean; // a Rust-bred newborn → spawns into the sim on a maturation cooldown (can't breed yet)
 	gene?: number; // inherited vigor (≈1.0) from its parents → scales its speed in the sim (genetics/evolution)
+	keep?: boolean; // PLAYER/LLM-placed → never reclaimed by habitation decay (only emergent NPC homes can rot away)
 }
 
 export interface Zone {

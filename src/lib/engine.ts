@@ -266,7 +266,10 @@ export function applyOps(
 
 	const place = (kind: string, pos: Vec3, op: { scale?: Vec3; color?: string; rot?: number }) => {
 		pos[1] = heightAt(pos[0], pos[2], world.terrain);
-		world.objects.push({ id: newId(), kind, pos, scale: op.scale ?? [1, 1, 1], color: op.color, rot: op.rot ?? 0 });
+		// PLAYER/LLM-placed buildings are permanent — flag them `keep` so habitation decay (which reclaims empty
+		// emergent NPC homes) never touches a build you made.
+		const keep = kind === 'house' || kind === 'cabin' || kind === 'tower' ? true : undefined;
+		world.objects.push({ id: newId(), kind, pos, scale: op.scale ?? [1, 1, 1], color: op.color, rot: op.rot ?? 0, keep });
 	};
 
 	for (const op of ops) {
