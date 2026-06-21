@@ -182,6 +182,11 @@
 	const gravePrefix = 'g' + Math.random().toString(36).slice(2, 8) + '-';
 	let graveN = 0;
 	const GRAVE_CAP = 70;
+	// VEGETATION: broadleaf (non-pine) trees slowly take root around a SETTLEMENT — people tend gardens/orchards,
+	// so a colony greens over time and reads as inhabited, not a bare cluster of boxes (user request). Bounded per
+	// building so it stays a leafy town, not a forest swallowing the streets.
+	const treePrefix = 'ct' + Math.random().toString(36).slice(2, 8) + '-';
+	let treeN = 0;
 	const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
 	const HOUSE_CAP = 140;
 	const corpseReap = new Set<string>(); // reused each frame → ids of fully-decayed corpses to remove (no per-frame alloc)
@@ -341,6 +346,31 @@
 					const z = bz + (Math.random() - 0.5) * 12;
 					const gene = Math.max(0.6, Math.min(1.6, center - 0.06 + Math.random() * 0.34));
 					world.objects.push({ id: migrantPrefix + migrantN++, kind, pos: [x, 0, z], gene });
+				}
+			}
+
+			// COLONY VEGETATION: a broadleaf tree occasionally takes root near a house, so a settlement greens over
+			// time into a leafy town. Bounded (~1.3 per building) so streets don't vanish under canopy; skips plots.
+			let houseCount = 0;
+			let colonyTrees = 0;
+			for (const o of world.objects) {
+				if (BUILDING_KINDS.has(o.kind)) houseCount++;
+				else if (o.kind === 'tree' && o.id.startsWith(treePrefix)) colonyTrees++;
+			}
+			if (houseCount >= 3 && colonyTrees < houseCount * 1.3 && Math.random() < 0.55) {
+				const blds = world.objects.filter((o) => BUILDING_KINDS.has(o.kind));
+				const h = blds[(Math.random() * blds.length) | 0];
+				const ta = Math.random() * Math.PI * 2;
+				const tr = 4.5 + Math.random() * 6;
+				const tx = h.pos[0] + Math.cos(ta) * tr;
+				const tz = h.pos[2] + Math.sin(ta) * tr;
+				// don't plant on a building plot or right on top of another tree
+				const blocked = world.objects.some(
+					(o) => (BUILDING_KINDS.has(o.kind) || o.kind === 'tree' || o.kind === 'pine') && Math.abs(o.pos[0] - tx) < 2.6 && Math.abs(o.pos[2] - tz) < 2.6
+				);
+				if (!blocked) {
+					const s = 0.7 + Math.random() * 0.5;
+					world.objects.push({ id: treePrefix + treeN++, kind: 'tree', pos: [tx, heightAt(tx, tz, world.terrain), tz], scale: [s, s, s] });
 				}
 			}
 		}
