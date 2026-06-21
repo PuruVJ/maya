@@ -86,6 +86,13 @@ mod wasm_api {
             self.world.spawn(agent, kind, radius, seed_id)
         }
 
+        /// Spawn into a stable read-back slot recycled by the worker proxy's free-list.
+        pub fn spawn_at(&mut self, slot: usize, x: f64, z: f64, kind_code: u8, radius: f64, seed_id: i32) -> usize {
+            let kind = crate::eco::kind_from_code(kind_code);
+            let agent = Agent::new(x, z, seed_id, &opts_for(kind, seed_id));
+            self.world.spawn_at(slot, agent, kind, radius, seed_id)
+        }
+
         pub fn set_player(&mut self, x: f64, z: f64) {
             self.world.set_player(x, z);
         }

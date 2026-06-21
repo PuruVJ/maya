@@ -6,18 +6,15 @@
  * PROXY: it owns the agent roster, drives the worker with one `tick` message per sim tick, and mirrors the
  * snapshot the worker posts back onto the `ManagedAgent`s the renderers read (`m.agent.rx/rz/rh`, `m.dead`, …).
  *
- * Why this is clean despite the async boundary: Rust `spawn` is APPEND-ONLY and `despawn` only tombstones (slots
- * are never reused), so we PREDICT each new agent's slot with a monotonic counter and tell the worker — no async
- * round-trip to learn indices. We step the worker exactly once per clock tick (pause → no messages → frozen), so
- * determinism is preserved. The snapshot rides back ~1 tick later (33 ms); the renderer's sub-tick interpolation
- * hides that latency.
+ * Why this is clean despite the async boundary: the main thread owns the stable-slot free-list. A removed
+ * agent's slot is retired before a new spawn fills it via `Sim.spawn_at`, so no async round-trip is needed to
+ * learn indices and lifetime churn stays bounded. We step exactly once per clock tick; determinism is preserved.
  *
  * Build the bundle first: `pnpm build:wasm` (emits to `static/worldsim/`). If the worker/wasm fails to load,
  * agents stay put and a console error fires — there is NO main-thread fallback, by design.
  *
  * STILL ON THE RUST TODO: ambient-forest tree push-out, the player-pet `companion` follow nuances, the placement
- * search. Plus a known follow-up the worker INHERITS, not introduces: Rust `spawn` never recycles tombstoned
- * slots, so churn (reproduction ↔ corpse-reaping) grows the agents Vec over a long session — wants slot recycling.
+ * search.
  */
 import { base } from '$app/paths';
 import { agentManager, type ManagedAgent } from './agents.svelte';
@@ -66,7 +63,8 @@ export function drainBirths(): Birth[] {
 let worker: Worker | null = null;
 let status: 'off' | 'loading' | 'ready' | 'failed' = 'off';
 
-let nextSlot = 0; // predicted Rust slot for the next spawn (matches the worker's append-only spawn index)
+let nextSlot = 0; // stable-slot high-water mark
+const freeSlots: number[] = []; // reaped tombstones, reused deterministically (LIFO)
 const slotOf = new WeakMap<ManagedAgent, number>(); // already-spawned agents → their Rust slot
 const tracked: ManagedAgent[] = []; // index = Rust slot → the agent to mirror the snapshot onto
 
@@ -190,27 +188,35 @@ export function tickRust(dt: number): void {
 	const spawns: Spawn[] = [];
 	const despawns: number[] = [];
 
-	// newly-registered agents → predict their slot (append-only) + queue a spawn command
-	agentManager.forEach((m) => {
-		if (slotOf.has(m)) return;
-		const slot = nextSlot++;
-		slotOf.set(m, slot);
-		tracked[slot] = m;
-		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile });
-	});
-
-	// one pass over the roster: detect despawns + (if a fresh snapshot arrived) mirror poses/flags onto agents
+	// Retire unregistered agents first. The worker applies despawns before spawns, so these tombstones can be
+	// safely reused by new registrations in this same roster diff.
 	for (let i = 0; i < tracked.length; i++) {
 		const m = tracked[i];
 		if (!m) continue;
 		if (!agentManager.has(m)) {
 			// its component unmounted (object removed / world cleared) → tell the worker to drop it from the sim so
-			// it doesn't linger as an invisible ghost still steering the food chain. Slot is retired (index-stable).
+			// it doesn't linger as an invisible ghost still steering the food chain.
 			despawns.push(i);
 			slotOf.delete(m);
 			tracked[i] = undefined as unknown as ManagedAgent;
+			freeSlots.push(i);
 			continue;
 		}
+	}
+
+	// Newly registered agents reuse a reaped slot before extending the stable-slot high-water mark.
+	agentManager.forEach((m) => {
+		if (slotOf.has(m)) return;
+		const slot = freeSlots.pop() ?? nextSlot++;
+		slotOf.set(m, slot);
+		tracked[slot] = m;
+		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile });
+	});
+
+	// Mirror a fresh snapshot onto the live roster.
+	for (let i = 0; i < tracked.length; i++) {
+		const m = tracked[i];
+		if (!m) continue;
 		if (!hasSnap || i >= s!.count) continue;
 		const a = m.agent;
 		a.savePrev(); // prev = last applied snapshot pose; current ← this snapshot → renderers interpolate prev→new

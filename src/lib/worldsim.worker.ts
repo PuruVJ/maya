@@ -5,11 +5,9 @@
  * worker, so stepping 1000 agents no longer steals frame time from render. The main thread (rustSim.ts) drives
  * this with one `tick` message per sim tick and renders the snapshot we post back.
  *
- * The contract that makes this clean: Rust `spawn` is APPEND-ONLY and `despawn` only TOMBSTONES (the slot is
- * never reused — read-back is index-stable). So the main thread can PREDICT each new agent's slot with a plain
- * monotonic counter and tell us that slot up-front; we just trust `sim.spawn()` returns the same index (asserted
- * below). No async round-trip to learn indices. Determinism is preserved: we step exactly once per `tick`
- * message, and the main clock emits exactly one message per clock tick (pause → no messages → frozen).
+ * The main thread owns a stable-slot free-list. It tells us which slot to retire and which slot a new spawn
+ * should occupy; Rust's `spawn_at` fills that tombstone (or appends at the high-water mark). No async round-trip
+ * is needed to learn indices, and endless birth/death churn no longer grows the WASM vectors forever.
  *
  * Snapshot transport: each step we COPY the read-back arrays (slice → owned buffers) and TRANSFER them to the
  * main thread (zero-copy handoff; ~28 KB for 1000 agents). No SharedArrayBuffer → no cross-origin-isolation
@@ -20,6 +18,7 @@
 // minimal shape of the generated wasm module (mirrors the `Sim` in crates/worldsim/src/lib.rs)
 interface RustSim {
 	spawn(x: number, z: number, kindCode: number, radius: number, seedId: number): number;
+	spawn_at(slot: number, x: number, z: number, kindCode: number, radius: number, seedId: number): number;
 	set_player(x: number, z: number): void;
 	set_companion(i: number): void;
 	despawn(i: number): void;
@@ -113,13 +112,14 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 	}
 
 	// d.type === 'tick' — apply roster changes + inputs, advance one fixed step, post the snapshot back
+	// Retire old occupants before filling slots recycled in this same roster diff.
+	for (const slot of d.despawns) sim.despawn(slot);
 	for (const s of d.spawns) {
-		const idx = sim.spawn(s.x, s.z, s.code, s.radius, s.seedId);
+		const idx = sim.spawn_at(s.slot, s.x, s.z, s.code, s.radius, s.seedId);
 		if (idx !== s.slot) console.warn('[worldsim.worker] slot desync: rust', idx, '!= predicted', s.slot);
 		if (s.companion) sim.set_companion(idx);
 		if (s.juvenile) sim.set_breed_cooldown(idx, sim.juvenile_cd()); // a newborn → must mature before it breeds
 	}
-	for (const slot of d.despawns) sim.despawn(slot);
 
 	sim.set_player(d.px, d.pz);
 	sim.set_night(d.night);

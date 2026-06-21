@@ -379,6 +379,20 @@ impl World {
         self.agents.len() - 1
     }
 
+    /// Spawn into a renderer-owned stable slot. A slot is only recycled after `despawn()` made it inert;
+    /// otherwise append rather than overwrite a still-visible corpse/live agent.
+    pub fn spawn_at(&mut self, i: usize, agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> usize {
+        if i == self.agents.len() {
+            self.agents.push(make_managed(agent, kind, radius, seed_id));
+            return i;
+        }
+        if i < self.agents.len() && self.agents[i].dead {
+            self.agents[i] = make_managed(agent, kind, radius, seed_id);
+            return i;
+        }
+        self.spawn(agent, kind, radius, seed_id)
+    }
+
     pub fn set_player(&mut self, x: f64, z: f64) {
         self.player = (x, z);
     }
@@ -393,8 +407,8 @@ impl World {
 
     /// Remove agent `i` from the simulation (its world-object was deleted / the world cleared). Marks it dead,
     /// which every pass already skips (grid insert, targeting, flock, behaviour, step) → it goes fully inert and
-    /// stops affecting the food chain, instead of lingering as an invisible ghost. The slot is not reused (the
-    /// read-back is index-stable); the JS adapter stops tracking it so it's never rendered.
+    /// stops affecting the food chain, instead of lingering as an invisible ghost. The renderer may later
+    /// recycle this same index via `spawn_at`; until then the tombstone keeps snapshot indices stable.
     pub fn despawn(&mut self, i: usize) {
         if let Some(m) = self.agents.get_mut(i) {
             m.dead = true;
@@ -1340,6 +1354,21 @@ mod tests {
         assert_eq!(a.1.to_bits(), b.1.to_bits());
         assert_eq!(a.2.to_bits(), b.2.to_bits());
         assert!(a.0.is_finite() && a.1.is_finite());
+    }
+
+    #[test]
+    fn despawned_slot_is_recycled_without_growing_world() {
+        let mut w = World::new();
+        let old = w.spawn(animal(1.0, 2.0, 1), Kind::Rabbit, 0.35, 1);
+        assert_eq!(old, 0);
+        w.despawn(old);
+
+        let reused = w.spawn_at(old, animal(9.0, 7.0, 2), Kind::Lion, 0.8, 2);
+        assert_eq!(reused, old);
+        assert_eq!(w.agents.len(), 1, "recycling must not extend the stable-slot vectors");
+        assert!(!w.agents[old].dead);
+        assert_eq!(w.agents[old].kind, Kind::Lion);
+        assert_eq!(w.agents[old].agent.x, 9.0);
     }
 
     #[test]
