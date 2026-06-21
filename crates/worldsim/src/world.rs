@@ -78,16 +78,16 @@ const CARN_RECOVER: f64 = 0.16; // /s a not-chasing carnivore recovers toward CA
 const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settles at (just below HUNGRY_LO=0.5)
 // REPRODUCTION (the world replenishes itself): two same-kind ADULTS, calm + well-fed, adjacent + off cooldown,
 // under the per-kind cap + not over-crowded → a baby is born between them; both parents pay energy + a cooldown.
-const BREED_ENERGY: f64 = 0.72; // stamina a parent needs to spare (prey when rested; a predator after a meal)
-const BREED_COOLDOWN: f64 = 24.0; // seconds before a parent can breed again
+const BREED_ENERGY: f64 = 0.6; // fullness a parent needs to spare (lowered: 0.72 starved out reproduction → decline)
+const BREED_COOLDOWN: f64 = 16.0; // seconds before a parent can breed again (was 24 → too slow to outpace deaths)
 const BREED_R2: f64 = 3.2 * 3.2; // a mate within this range
 const BREED_COST: f64 = 0.42; // fullness (energy) each parent spends on the birth (no free lunch)
-// ISOLATION RULE (user principle): a pair can only breed AWAY from crowds — a clump can't chain-reproduce into a
-// swarm. `crowd` is the neighbour count within the ~4 m flock radius, and the mate itself is 1 neighbour, so a
-// threshold of 2 means "only the two of them, no third animal within 4 m". This is the main runaway-population
-// brake (a horde literally cannot grow, since growing makes it too crowded to breed).
-const BREED_CROWD: u32 = 2;
-const POP_CAP: usize = 24; // backstop cap on living of one kind (births fail at the cap; the isolation rule does most of the work)
+// ISOLATION RULE (user principle): a pair breeds only when not in a CROWD — a clump can't chain-reproduce into a
+// swarm. `crowd` is the neighbour count within the ~4 m flock radius (the mate counts as 1). Originally 2 ("only
+// the two of them"), but that throttled births below the death rate → population decline; relaxed to 5 so a pair
+// in light company can still breed while a true horde (5+ packed) still can't. Gestation + cooldown also brake it.
+const BREED_CROWD: u32 = 5;
+const POP_CAP: usize = 40; // backstop cap on living of one kind (raised so populations have room to recover/grow)
 const JUVENILE_CD: f64 = 28.0; // a newborn carries this breed-cooldown → it must mature before it can breed
 const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
 const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
@@ -99,7 +99,7 @@ const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
 // Carnivores already eat-or-weaken via stamina; this layer adds true STARVATION for everyone.
 const ENERGY_DRAIN: f64 = 0.012; // /s fullness ebbs (~80 s empty if it never eats)
 const GRAZE_RATE: f64 = 0.16; // /s a calm herbivore on UNcrowded ground refuels (~5 s to refill)
-const GRAZE_CROWD: f64 = 7.0; // herd size at which ground is fully overgrazed → grazing yields ~nothing
+const GRAZE_CROWD: f64 = 10.0; // herd size at which ground is fully overgrazed → grazing yields ~nothing (raised: less starvation)
 const STARVE_DAMAGE: f64 = 0.05; // /s health bleeds while fullness is empty (~20 s of famine is fatal; slow enough to recover if food's found)
 const EAT_ENERGY: f64 = 0.7; // fullness a kill restores to the hunter
 
@@ -914,7 +914,7 @@ impl World {
                 let close = d * d < hunt2;
                 self.forces[i].0 += (dx / d) * a_max * CHASE_W;
                 self.forces[i].1 += (dz / d) * a_max * CHASE_W;
-                self.behave[i] = (if close && can_sprint { CHASE_BOOST } else { 1.0 }, true);
+                self.behave[i] = (if close || can_sprint { CHASE_BOOST } else { 1.0 }, true); // close → final lunge even if spent
             } else if let Some((p, prx, prz, pr)) = prey_info {
                 // stalk toward prey; sprint once close; CATCH on contact
                 let dx = prx - ax;
@@ -923,7 +923,7 @@ impl World {
                 let close = d * d < hunt2;
                 self.forces[i].0 += (dx / d) * a_max * CHASE_W;
                 self.forces[i].1 += (dz / d) * a_max * CHASE_W;
-                self.behave[i] = (if close && can_sprint { CHASE_BOOST } else { 1.0 }, true);
+                self.behave[i] = (if close || can_sprint { CHASE_BOOST } else { 1.0 }, true); // close → final lunge even if spent
                 if close && d < radius + pr + CONTACT_PAD {
                     self.kills.push(p); // caught — turned to a corpse below
                     self.agents[i].meals += 1;
@@ -1433,13 +1433,18 @@ impl World {
         // CHASE THRESHOLD — abandon prey chased too far from where the chase began (or when too spent), then
         // cool off (give_up_cd) before hunting again → never pursues forever.
         if a_hunts {
-            if self.transient[i].prey.is_some() {
+            if let Some(p) = self.transient[i].prey {
                 if self.agents[i].chase_ox.is_nan() {
                     self.agents[i].chase_ox = ax;
                     self.agents[i].chase_oz = az;
                 }
+                // COMMITMENT: prey within ~10 m → the hunter is closing for the kill and NEVER abandons it (even
+                // exhausted / far from the chase origin). Stops the "charged, then couldn't be bothered" give-up.
+                let pdx = self.agents[p].agent.x - ax;
+                let pdz = self.agents[p].agent.z - az;
+                let prey_close = pdx * pdx + pdz * pdz < 100.0;
                 let far = (ax - self.agents[i].chase_ox).powi(2) + (az - self.agents[i].chase_oz).powi(2) > MAX_CHASE2;
-                if far || self.agents[i].stamina < GIVEUP_ENERGY {
+                if !prey_close && (far || self.agents[i].stamina < GIVEUP_ENERGY) {
                     self.transient[i].prey = None;
                     self.transient[i].prey_score = 0.0;
                     self.agents[i].give_up_cd = GIVEUP_CD;
