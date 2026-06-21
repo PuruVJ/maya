@@ -9,7 +9,6 @@
 	import Moon from './Moon.svelte';
 	import ShootingStars from './ShootingStars.svelte';
 	import Aurora from './Aurora.svelte';
-	import { gpu } from '$lib/gpu.svelte'; // WebGPU migration: Sky/Stars/Clouds/Moon are shader-based → skip on ?webgpu
 
 	let { sky, ground = 'grass' }: { sky: string; ground?: string } = $props();
 
@@ -25,9 +24,7 @@
 	});
 </script>
 
-<!-- whole sky is shader-based (Threlte Sky/Stars + our Clouds/Moon/ShootingStars/Aurora) → gated until ported to
-     TSL; on ?webgpu the page's background colour shows through the transparent canvas instead -->
-{#if gpu.webgpu}{:else if sky === 'day'}
+{#if sky === 'day'}
 	<Sky elevation={28} azimuth={150} turbidity={8} rayleigh={2} />
 	<Clouds tint="#ffffff" opacity={0.7} cover={0.62} />
 {:else if sky === 'sunset'}

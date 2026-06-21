@@ -38,11 +38,6 @@
 	// trading resolution under load — the "120fps no matter what" knob. Threlte applies dpr reactively.
 	const dpr = $derived(llm.busy ? 0.6 : perf.dpr);
 
-	// WebGPU migration is ON HOLD pending the alias-based approach (see the perf-foundation-plan memory):
-	// `three/webgpu` is a SEPARATE three build, so importing it for a ?webgpu flag pulled a 2ND copy of three
-	// (the very thing vite.config dedupes) and HUNG Vite's dep optimizer → dev server down. The inert gpu.webgpu
-	// flag + the Scene/SkyDome gates stay in place for that effort; nothing imports three/webgpu now.
-
 	onMount(async () => {
 		const m = location.hash.match(/[#&]w=([^&]+)/);
 		if (m) {

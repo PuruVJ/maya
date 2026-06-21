@@ -39,7 +39,6 @@
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { drainBirths } from '$lib/rustSim';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
-	import { gpu } from '$lib/gpu.svelte'; // WebGPU migration: skip not-yet-ported ShaderMaterial effects on ?webgpu
 	import { setRustObstacles } from '$lib/rustSim';
 	import { playerState } from '$lib/playerState.svelte';
 	import { wind } from '$lib/wind';
@@ -308,33 +307,28 @@
 />
 
 <Terrain {world} />
-{#if !gpu.webgpu}<AmbientScatter {world} />{/if}
-<!-- WebGPU migration: these are raw-ShaderMaterial effects (crash under WebGPU) — skipped until ported to TSL -->
+<AmbientScatter {world} />
 <Skyline {world} />
-{#if !gpu.webgpu}
-	<SettlementGlows {world} />
-	<Chimneys {world} />
-	<DustPuffs {world} />
-	<SpawnPuffs {world} />
-	<FootPrints {world} />
-	<SplashDrops {world} />
-	<AmbientParticles sky={world.sky} />
-	<FallingLeaves sky={world.sky} ground={world.ground} />
-	<Weather ground={world.ground} sky={world.sky} />
-	<Mist {world} />
-{/if}
+<SettlementGlows {world} />
+<Chimneys {world} />
+<DustPuffs {world} />
+<SpawnPuffs {world} />
+<FootPrints {world} />
+<SplashDrops {world} />
+<AmbientParticles sky={world.sky} />
+<FallingLeaves sky={world.sky} ground={world.ground} />
+<Weather ground={world.ground} sky={world.sky} />
+<Mist {world} />
 <Birds {world} />
 <Birds {world} mode="bat" />
 <Butterflies {world} />
 <Grass {world} />
 <AgentSystem />
 <AgentImpostors {world} />
-{#if !gpu.webgpu}
-	<CreatureShadows {world} />
-	<PlacedShadows {world} />
-	<LampGlow {world} />
-	<BuildingGlow {world} />
-{/if}
+<CreatureShadows {world} />
+<PlacedShadows {world} />
+<LampGlow {world} />
+<BuildingGlow {world} />
 <MoveGhost {world} />
 <Critter {world} species="cat" companion />
 
@@ -361,7 +355,7 @@
 	{:else if obj.kind === 'house' || obj.kind === 'cabin' || obj.kind === 'tower'}
 		<Building {obj} {world} />
 	{:else if obj.kind === 'lamp'}
-		{#if !gpu.webgpu}<Lamp {obj} {world} />{/if}
+		<Lamp {obj} {world} />
 	{:else}
 		<Prop {obj} />
 	{/if}
