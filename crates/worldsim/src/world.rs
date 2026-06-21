@@ -82,8 +82,12 @@ const BREED_ENERGY: f64 = 0.72; // stamina a parent needs to spare (prey when re
 const BREED_COOLDOWN: f64 = 24.0; // seconds before a parent can breed again
 const BREED_R2: f64 = 3.2 * 3.2; // a mate within this range
 const BREED_COST: f64 = 0.42; // stamina each parent spends on the birth (no free lunch)
-const BREED_CROWD: u32 = 6; // density suppression — don't breed when this crowded (avoids runaway in a clump)
-const POP_CAP: usize = 48; // max living of one kind (resource limit → births fail at the cap, no explosion)
+// ISOLATION RULE (user principle): a pair can only breed AWAY from crowds — a clump can't chain-reproduce into a
+// swarm. `crowd` is the neighbour count within the ~4 m flock radius, and the mate itself is 1 neighbour, so a
+// threshold of 2 means "only the two of them, no third animal within 4 m". This is the main runaway-population
+// brake (a horde literally cannot grow, since growing makes it too crowded to breed).
+const BREED_CROWD: u32 = 2;
+const POP_CAP: usize = 24; // backstop cap on living of one kind (births fail at the cap; the isolation rule does most of the work)
 const JUVENILE_CD: f64 = 28.0; // a newborn carries this breed-cooldown → it must mature before it can breed
 const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
 const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
@@ -300,6 +304,13 @@ fn preys_on(a: &ManagedAgent, b: &ManagedAgent) -> bool {
         Hunts::Humans => a.aggressive && matches!(b.kind, Kind::Person),       // aggressive person → people
         Hunts::None => false,
     }
+}
+
+/// Deterministic SEX from the stable per-agent seed (≈50/50, no extra state). Breeding needs a male + a female,
+/// so half of any same-kind pairing can't reproduce — a natural ~2× brake on population growth (with the
+/// isolation rule the main one). LSB of the seed → even = female; seeds come from a hash so it's well-mixed.
+fn is_female(seed_id: i32) -> bool {
+    seed_id & 1 == 0
 }
 
 pub struct World {
@@ -1024,14 +1035,16 @@ impl World {
             && !self.transient[i].near_predator
     }
 
-    /// Nearest same-kind, breed-ready mate within BREED_R2 (grid query). Skips `i` itself.
+    /// Nearest same-kind, OPPOSITE-SEX, breed-ready mate within BREED_R2 (grid query). Skips `i` itself.
     fn find_mate(&self, i: usize) -> Option<usize> {
         let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
         let kind = self.agents[i].kind;
+        let my_sex = is_female(self.agents[i].seed_id);
         let mut found: Option<usize> = None;
         self.grid.for_each_neighbor(ax, az, |j| {
             let j = j as usize;
-            if found.is_some() || j == i || self.agents[j].kind != kind {
+            // same kind, the OTHER sex (a male + a female make a baby), and not itself
+            if found.is_some() || j == i || self.agents[j].kind != kind || is_female(self.agents[j].seed_id) == my_sex {
                 return;
             }
             let d2 = (self.agents[j].agent.x - ax).powi(2) + (self.agents[j].agent.z - az).powi(2);
