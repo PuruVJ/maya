@@ -109,7 +109,7 @@
 					base = mix(base, base * vec3(0.82, 1.06, 0.78), 0.20 * (1.0 - elev));  // valleys → lush
 					vec3 rock = vec3(0.30, 0.28, 0.255) * (0.8 + 0.4 * mott);
 					base = mix(base, rock, smoothstep(0.72, 0.42, slope)); // steep faces → exposed rock
-					base = mix(base, vec3(0.90, 0.94, 1.0), smoothstep(15.0, 27.0, vWorldPos.y) * smoothstep(0.42, 0.72, slope)); // high + flattish → snow
+					base = mix(base, vec3(0.90, 0.94, 1.0), 0.7 * smoothstep(26.0, 44.0, vWorldPos.y) * smoothstep(0.42, 0.72, slope)); // only the TALLEST peaks get a light snow dusting (was 15-27m → ordinary hills turned white)
 				}
 				if (uSnow > 0.5) {
 					// SNOW ground (a winter world): wind-blown drifts — low-freq undulation reads as soft dunes,

@@ -24,7 +24,7 @@ export function partGeo(part: Part): THREE.BufferGeometry {
 					: part.geo === 'cone'
 						? new THREE.ConeGeometry(a[0], a[1], 12)
 						: part.geo === 'pyramid'
-							? new THREE.ConeGeometry(a[0], a[1], 4)
+							? new THREE.ConeGeometry(a[0], a[1], 4).rotateY(Math.PI / 4) // 45° → the square base aligns to X/Z (axis-aligned roof), not sitting diagonal/twisted over the box walls
 							: new THREE.SphereGeometry(a[0], 12, 10);
 		geoCache.set(key, g);
 	}
