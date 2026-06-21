@@ -81,6 +81,11 @@ const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settl
 const BREED_ENERGY: f64 = 0.6; // fullness a parent needs to spare (lowered: 0.72 starved out reproduction → decline)
 const BREED_COOLDOWN: f64 = 10.0; // seconds before a parent can breed again (16 still gave ~0 births → faster)
 const BREED_R2: f64 = 5.0 * 5.0; // a mate within this range (3.2 was inside the flock comfort-spread → pairs never met)
+const HERD_BREED_R2: f64 = 13.0 * 13.0; // a mate within this range for HERD species — wide enough that a sparse,
+// scattered population (a handful of kangaroos, a thinned herd) can still pair up, not just a dense flock/city.
+const PRED_BREED_R2: f64 = 24.0 * 24.0; // SOLITARY hunters range far wider — they don't pack tight like prey herds,
+// so with the old 5 m radius a spread-out predator population never paired up and died out (user: only humans bred,
+// the rest kept dying). Mate search runs on the COARSE food-chain grid (cell = SEEK), not the 4 m flock grid.
 const BREED_COST: f64 = 0.42; // fullness (energy) each parent spends on the birth (no free lunch)
 // ISOLATION RULE (user principle): a pair breeds only when not in a CROWD — a clump can't chain-reproduce into a
 // swarm. `crowd` is the neighbour count within the ~4 m flock radius (the mate counts as 1). Originally 2 ("only
@@ -1321,15 +1326,19 @@ impl World {
         let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
         let kind = self.agents[i].kind;
         let my_sex = is_female(self.agents[i].seed_id);
+        // search the COARSE food-chain grid (cell = SEEK), NOT the 4 m flock grid — otherwise only a dense flock
+        // (rabbits) or a packed city (people) ever had two adults close enough to pair, and every sparse species
+        // (kangaroos, the predators) quietly died out. Radius is per-kind: herds tighter, lone hunters far wider.
+        let r2 = if matches!(kind, Kind::Cat | Kind::Lion | Kind::Dinosaur) { PRED_BREED_R2 } else { HERD_BREED_R2 };
         let mut found: Option<usize> = None;
-        self.grid.for_each_neighbor(ax, az, |j| {
+        self.seek_grid.for_each_neighbor(ax, az, |j| {
             let j = j as usize;
             // same kind, the OTHER sex (a male + a female make a baby), and not itself
             if found.is_some() || j == i || self.agents[j].kind != kind || is_female(self.agents[j].seed_id) == my_sex {
                 return;
             }
             let d2 = (self.agents[j].agent.x - ax).powi(2) + (self.agents[j].agent.z - az).powi(2);
-            if d2 <= BREED_R2 && self.breed_ready(j) {
+            if d2 <= r2 && self.breed_ready(j) {
                 found = Some(j);
             }
         });

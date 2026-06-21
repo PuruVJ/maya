@@ -292,11 +292,15 @@
 				// (user: "the AI must intervene when it's getting too low") + injects diversity, rather than cloning the
 				// local average or resetting to 1.0.
 				const center = Math.max(avg, globalAvg, 1.12);
+				// a wave arrives as a CLUSTER (a pack/herd entering together at one spot), not scattered to opposite edges
+				// → the founders land within mate-finding range of each other and can actually pair up.
+				const baseA = Math.random() * Math.PI * 2;
+				const baseR = 55 + Math.random() * 30; // beyond the immediate clearing, within the wander range
+				const bx = playerState.pos[0] + Math.cos(baseA) * baseR;
+				const bz = playerState.pos[2] + Math.sin(baseA) * baseR;
 				for (let k = 0; k < bring; k++) {
-					const a = Math.random() * Math.PI * 2;
-					const r = 55 + Math.random() * 30; // beyond the immediate clearing, within the wander range
-					const x = playerState.pos[0] + Math.cos(a) * r;
-					const z = playerState.pos[2] + Math.sin(a) * r;
+					const x = bx + (Math.random() - 0.5) * 12; // jittered within the group, all near one another
+					const z = bz + (Math.random() - 0.5) * 12;
 					const gene = Math.max(0.6, Math.min(1.6, center - 0.06 + Math.random() * 0.34));
 					world.objects.push({ id: migrantPrefix + migrantN++, kind, pos: [x, 0, z], gene });
 				}
