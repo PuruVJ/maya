@@ -11,6 +11,7 @@
 	import { perf } from '$lib/perf.svelte';
 	import BuildBar from '$lib/components/BuildBar.svelte';
 	import FpsPanel from '$lib/components/FpsPanel.svelte';
+	import EcoStats from '$lib/components/EcoStats.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld } from '$lib/world';
@@ -156,6 +157,7 @@
 
 <!-- live FPS / frame-time meter, top-centre -->
 <FpsPanel />
+<EcoStats />
 
 <!-- home compass — only once you've wandered off; the arrow points back to spawn, with the distance -->
 {#if homeDist > 60}
