@@ -58,6 +58,17 @@ constants toward a healthy, churning balance — boost a sagging species, rein i
 ### J. Fence not movable (bug)
 - A built fence can't be picked up by the move tool. Investigate the raycast / `userData.objectId` path for fences.
 
+### L. Move the engine's math to Rust (non-UI parts)
+- `src/lib/engine.ts` (applyOps placement, `findFreeSpot` O(n²) collision search, scatter spiral, anchor maths) is
+  heavy compute living in JS. Per the architecture law it belongs in Rust; the op-orchestration / world-object
+  authoring stays JS. Big refactor — the engine is tightly coupled to `world.objects` + the LLM ops. Worth it.
+
+### M. Regional / session creature caps (big-world)
+- Player creations: dinosaurs ≤10 per player per session, ≤20 per region; other creatures spread across regions.
+- Distinguish PLAYER-created creatures (intentional, should persist up to their cap) from the ecosystem's
+  proportional auto-breeding caps (`capCreatures` currently trims everything to the proportional cap on load).
+- Needs the region model (big-world.md) + a "keep/player-made" tag (shared with B's house-decay flag).
+
 ### K. Predator prey-choice: prefer the BIGGEST, fall back to the nearest
 - A predator should target the biggest prey available (most food), but if that's far, take a smaller one that's
   close — a size-vs-proximity balance.
