@@ -674,6 +674,11 @@ impl World {
                 continue;
             }
             if let Some(t) = self.transient[i].threat {
+                // COWARDS never swarm: rabbits & kangaroos only flee. Only fighters (cat/person/lion) mob a
+                // predator — so the tally (and the wound it deals) counts only them.
+                if !matches!(self.agents[i].kind, Kind::Cat | Kind::Person | Kind::Lion) {
+                    continue;
+                }
                 let mx = self.agents[i].agent.x;
                 let mz = self.agents[i].agent.z;
                 self.transient[t].mob_count += 1;
@@ -1779,11 +1784,11 @@ mod tests {
         w.set_player(1e4, 1e4); // keep the player out of it
         let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
         for k in 0..5 {
-            // 5 rabbits clustered to +x of the lion (well inside its danger radius)
-            w.spawn(animal(3.0 + k as f64 * 0.5, (k % 3) as f64 - 1.0, 100 + k), Kind::Rabbit, 0.35, 100 + k);
+            // 5 CATS clustered to +x of the lion (cats are fighters → they mob; cowardly prey wouldn't)
+            w.spawn(animal(3.0 + k as f64 * 0.5, (k % 3) as f64 - 1.0, 100 + k), Kind::Cat, 0.35, 100 + k);
         }
         w.tick_once(1);
-        assert!(w.agents[lion].mobbed, "5 prey fleeing one lion (≥MOB_MIN) → it is mobbed");
+        assert!(w.agents[lion].mobbed, "5 fighter-prey fleeing one lion (≥MOB_MIN) → it is mobbed");
         for t in 2..=25 {
             w.tick_once(t);
         }
@@ -1795,17 +1800,17 @@ mod tests {
         let mut w = World::new();
         w.set_player(1e4, 1e4);
         let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
-        w.spawn(animal(3.0, 0.0, 100), Kind::Rabbit, 0.35, 100);
-        w.spawn(animal(3.5, 0.0, 101), Kind::Rabbit, 0.35, 101);
+        w.spawn(animal(3.0, 0.0, 100), Kind::Cat, 0.35, 100);
+        w.spawn(animal(3.5, 0.0, 101), Kind::Cat, 0.35, 101);
         w.tick_once(1);
-        assert!(!w.agents[lion].mobbed, "only 2 prey is below MOB_MIN=4 → no mob");
+        assert!(!w.agents[lion].mobbed, "only 2 fighter-prey is below MOB_MIN=4 → no mob");
     }
 
     fn ring(w: &mut World, n: usize, r: f64) -> Vec<usize> {
         (0..n)
             .map(|k| {
                 let a = (k as f64 / n as f64) * std::f64::consts::TAU;
-                w.spawn(animal(a.cos() * r, a.sin() * r, 100 + k as i32), Kind::Rabbit, 0.35, 100 + k as i32)
+                w.spawn(animal(a.cos() * r, a.sin() * r, 100 + k as i32), Kind::Cat, 0.35, 100 + k as i32)
             })
             .collect()
     }
