@@ -44,6 +44,7 @@
 	import { worldAreaScale } from '$lib/world';
 	import { playerState } from '$lib/playerState.svelte';
 	import { heightAt } from '$lib/terrain';
+	import { nature } from '$lib/nature.svelte';
 	import { wind } from '$lib/wind';
 	import { weather } from '$lib/weather';
 	import * as THREE from 'three';
@@ -196,6 +197,11 @@
 	const GENEFLOW_CHANCE = 0.18; // ...with this probability per restock check
 	const RESTOCK_EVERY = 9; // seconds between restock checks (gradual — a collapsed species trickles back over time)
 	let restockT = RESTOCK_EVERY - 2; // first check soon after load (so a barren reloaded world revives quickly)
+	// MOTHER NATURE wildcards (see nature.svelte.ts): every couple of minutes a pack/herd/boom rolls in to stir the
+	// ecosystem (and re-seed extinct apex like dinos). Arrives clustered at the world edge, like an immigration wave.
+	const WILDCARD_MIN = 120; // seconds — soonest the next wildcard can fire
+	const WILDCARD_MAX = 240;
+	let wildcardT = 70 + Math.random() * 60; // first one a bit after you've settled in
 
 	// LAZY / DISTANCE-CAPPED REVEAL — only realize STATIC builds (houses/trees/props/lamps) NEAR the player; far
 	// ones stay unmounted until you approach (they pop in front of you, emerging from the fog/curve). So reloading
@@ -336,6 +342,28 @@
 					const gene = Math.max(0.6, Math.min(1.6, center - 0.06 + Math.random() * 0.34));
 					world.objects.push({ id: migrantPrefix + migrantN++, kind, pos: [x, 0, z], gene });
 				}
+			}
+		}
+
+		// MOTHER NATURE: every couple of minutes, roll a wildcard — a pack/herd/boom enters at the world edge (one
+		// clustered arrival, like an immigration wave but bigger + announced) so the world is never static, and
+		// rare apex species (dinos) get re-seeded after extinction.
+		wildcardT -= dt;
+		if (wildcardT <= 0) {
+			wildcardT = WILDCARD_MIN + Math.random() * (WILDCARD_MAX - WILDCARD_MIN);
+			const wc = nature.roll();
+			if (wc) {
+				const a = Math.random() * Math.PI * 2;
+				const r = 60 + Math.random() * 35; // arrives from beyond the near field
+				const bx = playerState.pos[0] + Math.cos(a) * r;
+				const bz = playerState.pos[2] + Math.sin(a) * r;
+				for (let k = 0; k < wc.count; k++) {
+					const x = bx + (Math.random() - 0.5) * 14;
+					const z = bz + (Math.random() - 0.5) * 14;
+					const gene = Math.max(0.6, Math.min(1.6, wc.gene - 0.08 + Math.random() * 0.2));
+					world.objects.push({ id: migrantPrefix + migrantN++, kind: wc.kind, pos: [x, 0, z], gene });
+				}
+				nature.announce(wc.banner);
 			}
 		}
 

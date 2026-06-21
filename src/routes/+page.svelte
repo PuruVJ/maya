@@ -12,6 +12,7 @@
 	import BuildBar from '$lib/components/BuildBar.svelte';
 	import FpsPanel from '$lib/components/FpsPanel.svelte';
 	import EcoStats from '$lib/components/EcoStats.svelte';
+	import { nature } from '$lib/nature.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld, capCreatures, type World as WorldData } from '$lib/world';
@@ -207,6 +208,16 @@
 <FpsPanel />
 <EcoStats />
 
+<!-- MOTHER NATURE wildcard announcement — a dramatic banner when she sends in a pack/herd/boom -->
+{#if nature.banner}
+	<div
+		class="pointer-events-none fixed left-1/2 top-24 z-20 max-w-[90vw] -translate-x-1/2 rounded-lg border border-white/10 bg-black/55 px-5 py-2.5 text-center text-sm font-semibold text-amber-100/95 shadow-xl backdrop-blur"
+		style="animation: natureIn 0.5s ease-out;"
+	>
+		{nature.banner}
+	</div>
+{/if}
+
 <!-- home compass — only once you've wandered off; the arrow points back to spawn, with the distance -->
 {#if homeDist > 60}
 	<div
@@ -273,3 +284,16 @@
 <BuildBar {world} />
 <ModelPicker />
 <TouchControls />
+
+<style>
+	@keyframes natureIn {
+		0% {
+			opacity: 0;
+			transform: translate(-50%, -8px) scale(0.96);
+		}
+		100% {
+			opacity: 1;
+			transform: translate(-50%, 0) scale(1);
+		}
+	}
+</style>
