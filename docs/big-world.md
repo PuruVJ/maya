@@ -49,10 +49,20 @@ storage + API + DDoS/abuse. No server-side tick, no server compute. (This is che
   [self-sustaining §6.9](./self-sustaining-world.md#69-scaling-to-millions--unified-entities--tiered-lod-simulation-not-brute-force)),
   then realizes individuals for what's near. The player **cannot distinguish** "continuously simulated" from
   "computed on arrival" — it's the same function. The world *appears* to have lived on, for $0 of server CPU.
+  - **Bounded cost (critical):** the aggregate advances by **closed-form / a few big steps, NOT DT-by-DT** — so
+    a region dormant for *millions* of ticks fast-forwards in O(few), **never** a hang. The clock gives the
+    *capability* to jump to any tick; the LOD aggregate makes the jump *cheap*. (Naive "replay every tick since
+    lastTick" would freeze the tab — don't.)
 - On leave / commit, the client writes the new `{aggregate, lastTick, durable deltas}` back to the region DO.
 - **Determinism now guarantees client↔client consistency** (two players visiting the same region from the
   same committed state compute the same world) + client-now↔client-later. That's *more* critical here, not
   less — it's what makes a shared browser-run world coherent.
+- **Presence keeps the world WARM (the shared-world superpower).** Because every visit commits a fresh
+  `lastTick`, any region people travel through is "touched" often → the next visitor's fast-forward is SHORT
+  and cheap. The crowd **collectively amortizes the catch-up** — you inherit the fast-forwards others already
+  committed. Only the true frontier (regions literally no one has visited) carries a big jump — which is even
+  thematically nice: virgin wilderness that springs to life, having "lived" a long time, when the first person
+  arrives. **Everyone's presence alone builds (and pre-warms) the world** — for $0 of server compute.
 
 Tradeoff (acceptable for ambient life): things needing *active* sim across two simultaneously-empty regions
 (a herd migrating between two unvisited areas) won't happen during full dormancy until visited; aggregate
@@ -73,10 +83,10 @@ Cloudflare Workers (paid/Standard) + **Durable Objects** — DOs are almost purp
 - **Durable Object per region** (keyed by region cell) — the authority:
   - **Owns the region's delta** (DO transactional storage) and **serializes all writes** → single-threaded per
     region, so **write-conflicts can't happen** (no locks, no LWW races). Player builds + director ops commit here.
-  - **Runs the macro sim tick via Alarms** — each *active* region self-schedules an alarm (every few min) to
-    advance settlements/populations/biomes + decay (§5 / self-sustaining §2.8). **Idle regions hibernate** (no
-    alarm = no cost) → you tick only the living world, not all of it. This is "evolves while you're away,"
-    distributed for free.
+  - **Stores `{aggregate, lastTick, durable deltas}` — does NOT run the sim.** The browser is the only thing
+    that simulates; a visiting client fast-forwards the region on arrival (§3) and commits the result. The DO
+    just holds state + serializes writes. Alarms (if used at all) are pure bookkeeping (TTL/cleanup, flush a
+    KV cache) — **never a sim tick.** Idle regions cost nothing.
 - **Storage:** DO storage for each region's delta (colocated w/ authority); **KV** for hot eventually-
   consistent read caches (far-silhouette summaries); **D1** for cross-region queries (a world map of cities);
   **R2** for cold region snapshots/exports. Client still generates the deterministic base from `worldSeed` and
@@ -129,8 +139,9 @@ Decay is load-bearing (it bounds the DB, §2) and the theme. Every scale gets bi
   **abandonment timer → dilapidate → ruins → reclaimed** (deltas removed). Ghost towns that genuinely fade.
   This *is* the Death-Stranding "structures nobody sustains crumble" mechanic.
 - **Vegetation:** treat forests as a slow population — they seed/spread when dense + healthy and **recede when
-  they go sparse** or the biome shifts. Forests advance and retreat over (server) time.
-- All three: the server sim tick advances growth + decay; clients see the deltas. Bounded, alive, churning.
+  they go sparse** or the biome shifts. Forests advance and retreat over sim time.
+- All three growth+decay processes run in the **client** sim (browser-only) — live while you're in-region,
+  and applied lazily via fast-forward (§3) for dormant time. Bounded, alive, churning. No server tick.
 
 ## 5.5 Ownership & destruction — can someone remove your build? (DECIDED)
 **Decision (2026-06-20): NO direct deletion of other people's structures.** Destruction is something the
@@ -171,11 +182,12 @@ Spectrum from invisible → hinted:
 This consciously **retires two of the four original non-negotiables** ([[project-identity]]): `local & free`
 and `world = shareable text link`. What you're taking on instead:
 
-- a **database** + a **server-side sim loop** (cron/worker ticking the macro-world),
-- an **API** + read/write of durable deltas, lightweight identity (even anonymous), **write-conflict** handling,
+- a **database** + an **API** for read/write of durable deltas (NO server-side sim loop — the sim is
+  browser-only, §3; CF only stores what clients commit → much cheaper than a ticking backend),
+- lightweight identity (even anonymous) + **write-conflict** handling (the DO serializes, so this is light),
 - **abuse / moderation** — a shared mutable world *will* be griefed; need rate limits, decay-of-bad-builds,
   region ownership or reversibility,
-- **ongoing hosting cost** + scaling (the world's delta + the sim tick grow with the player base).
+- **ongoing hosting cost** + scaling — but it's *storage + requests*, not compute (no sim CPU server-side).
 
 Net: it's no longer a weekend-local toy — it's a real backend product. **But the positioning is arguably
 more viral:** *"one quiet world we're all secretly building together, that lives on without us."* Stronger
@@ -184,8 +196,8 @@ hook than "local sandbox." Go in eyes-open on the cost/ops; that's the trade.
 ## 8. What still carries over (nothing wasted)
 - **Clock + RNG** ([`clock.ts`](../src/lib/clock.ts), [`rng.ts`](../src/lib/rng.ts)) — the deterministic base
   world + client-side fine sim both need exactly this. Already built + tested.
-- **The living-sim metabolism** (self-sustaining-world.md §2) — runs per realized region; the server runs the
-  coarse version, clients the fine version.
+- **The living-sim metabolism** (self-sustaining-world.md §2) — runs **in the browser** per realized region
+  (full near, aggregate far); CF only stores the deltas a client commits. No server-side sim.
 - **The op grammar + `applyOps`** — durable deltas ARE ops (add/remove/addZone/addPath…); the DB stores op
   deltas, `applyOps` replays them. The fine-tuned LLM still authors ops; the director still narrates.
 - **city.ts primitives, Skyline, AgentImpostors, curveWorld, the shader work** — all reused as-is.
