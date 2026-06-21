@@ -16,6 +16,7 @@
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld, capCreatures, fastForward, type World as WorldData } from '$lib/world';
+	import { heightAt } from '$lib/terrain';
 	import { encodeWorld, decodeWorld } from '$lib/share';
 	import { loadWorld, saveWorld } from '$lib/worldStore';
 	import { SKY_BG } from '$lib/kinds';
@@ -74,12 +75,16 @@
 				// DETERMINISTIC AGGREGATE FAST-FORWARD (big-world.md §3): advance the population to "now" by however
 				// long you were away — closed-form, so even a week away is instant (no tick-replay hang).
 				const away = saved.savedAt ? Date.now() - saved.savedAt : 0;
-				const net = away > 60_000 ? fastForward(w, away, 'ff' + Math.random().toString(36).slice(2, 7) + '-') : 0;
+				const ff = away > 60_000 ? fastForward(w, away, 'ff' + Math.random().toString(36).slice(2, 7) + '-', (x, z) => heightAt(x, z, w.terrain)) : { creatures: 0, houses: 0 };
 				world = w;
 				if (away > 60_000) {
 					const m = Math.round(away / 60_000);
 					const txt = m < 90 ? `${m} min` : m < 2160 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} d`;
-					const change = net > 0 ? ` · the world grew by ${net}` : net < 0 ? ` · ${-net} fewer creatures remain` : '';
+					const parts = [];
+					if (ff.houses > 0) parts.push(`${ff.houses} new homes`);
+					if (ff.creatures > 0) parts.push(`${ff.creatures} more creatures`);
+					else if (ff.creatures < 0) parts.push(`${-ff.creatures} fewer creatures`);
+					const change = parts.length ? ` · ${parts.join(', ')}` : '';
 					nature.announce(`🌍 Welcome back — ${txt} passed while you were away${change}`);
 				}
 			}

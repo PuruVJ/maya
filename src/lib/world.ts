@@ -129,9 +129,14 @@ const logisticTo = (n0: number, cap: number, r: number): number => {
  *  carrying capacity along a closed-form logistic — O(1) per species, so a week away costs the same as a minute.
  *  Prey advance first; predators then follow the NEW prey count. Materialises by adding/removing creature objects
  *  to hit the advanced counts (new arrivals carry the evolved average vigour). Returns the net population change. */
-export function fastForward<T extends { objects: WorldObject[] }>(world: T, elapsedMs: number, idPrefix: string): number {
+export function fastForward<T extends { objects: WorldObject[] }>(
+	world: T,
+	elapsedMs: number,
+	idPrefix: string,
+	groundY: (x: number, z: number) => number
+): { creatures: number; houses: number } {
 	const dt = Math.min(elapsedMs / 1000, 86_400); // model at most ~1 day of effect (the logistic saturates anyway)
-	if (dt < 30) return 0; // a blink away → nothing to do
+	if (dt < 30) return { creatures: 0, houses: 0 }; // a blink away → nothing to do
 	const count: Record<string, number> = {};
 	let geneSum = 0;
 	let geneN = 0;
@@ -151,7 +156,7 @@ export function fastForward<T extends { objects: WorldObject[] }>(world: T, elap
 		minZ = Math.min(minZ, o.pos[2]);
 		maxZ = Math.max(maxZ, o.pos[2]);
 	}
-	if (!Number.isFinite(minX)) return 0; // an empty world → nothing to advance
+	if (!Number.isFinite(minX)) return { creatures: 0, houses: 0 }; // an empty world → nothing to advance
 	const avgGene = geneN > 0 ? geneSum / geneN : 1;
 	const scale = worldAreaScale(world.objects);
 	const working: Record<string, number> = { ...count };
@@ -189,7 +194,45 @@ export function fastForward<T extends { objects: WorldObject[] }>(world: T, elap
 			}
 		}
 	}
-	return net;
+
+	// CITY GROWTH while away — a populated town keeps raising homes (settlers build between births). Add houses in
+	// proportion to the advanced people × time, grid-snapped beside the existing settlement, plot-checked + capped.
+	let houses = 0;
+	const blds = world.objects.filter((o) => BUILDING_KINDS.has(o.kind));
+	const people = target.person ?? count.person ?? 0;
+	if (blds.length >= 2 && people >= 6) {
+		let toAdd = Math.min(Math.round((dt / 900) * (people / 18)), 140 - blds.length, 30); // ~1 house / 15 min / 18 people; ≤30 per jump, ≤140 total
+		let attempts = 0;
+		while (toAdd > 0 && attempts < 400) {
+			attempts++;
+			const b = blds[(Math.random() * blds.length) | 0];
+			const gx = Math.round((b.pos[0] + (Math.random() - 0.5) * 26) / 8) * 8; // 8 m grid → aligned blocks
+			const gz = Math.round((b.pos[2] + (Math.random() - 0.5) * 26) / 8) * 8;
+			if (world.objects.some((o) => BUILDING_KINDS.has(o.kind) && Math.abs(o.pos[0] - gx) < 6 && Math.abs(o.pos[2] - gz) < 6)) continue; // plot taken
+			const h: WorldObject = { id: idPrefix + 'h' + houses, kind: 'house', pos: [gx, groundY(gx, gz), gz] };
+			world.objects.push(h);
+			blds.push(h);
+			houses++;
+			toAdd--;
+		}
+	}
+
+	// GRAVES while away — some of the dead are remembered. A few headstones near the settlement, time-proportional.
+	if (blds.length >= 2 && people >= 4) {
+		const existingGraves = world.objects.reduce((s, o) => s + (o.kind === 'grave' ? 1 : 0), 0);
+		let toAdd = Math.min(Math.round(dt / 1200), 70 - existingGraves, 15); // ≤15 per jump, ≤70 total
+		const cx = blds.reduce((s, b) => s + b.pos[0], 0) / blds.length;
+		const cz = blds.reduce((s, b) => s + b.pos[2], 0) / blds.length;
+		for (let g = 0; toAdd > 0; g++, toAdd--) {
+			const a = Math.random() * Math.PI * 2;
+			const r = 8 + Math.random() * 22; // a graveyard on the edge of town
+			const gx = cx + Math.cos(a) * r;
+			const gz = cz + Math.sin(a) * r;
+			world.objects.push({ id: idPrefix + 'g' + g, kind: 'grave', pos: [gx, groundY(gx, gz), gz], rot: Math.random() * Math.PI * 2 });
+		}
+	}
+
+	return { creatures: net, houses };
 }
 
 export interface World {
