@@ -119,6 +119,37 @@ const CH_GENE: i32 = 20; // RNG channel for the mutation roll (distinct from eco
 const SENESCENCE_FRAC: f64 = 0.75; // past this fraction of lifespan → too old to breed
 const CH_AGE: i32 = 21; // RNG channel for the lifespan-variation roll
 
+// ── GESTATION + LITTERS ─────────────────────────────────────────────────────────────────────────────────────
+// Mating doesn't clone instantly: the FEMALE conceives and GESTATES for a period, then delivers a species-sized
+// LITTER (small prey drop several young; big animals one). Game-scaled seconds (small fraction of a lifespan).
+const CH_LITTER: i32 = 22; // RNG channel for the litter-size roll
+
+/// Gestation period (seconds) by kind — bigger animals carry longer.
+fn gestation(kind: Kind) -> f64 {
+    match kind {
+        Kind::Rabbit => 8.0,
+        Kind::Cat => 12.0,
+        Kind::Kangaroo => 12.0,
+        Kind::Lion => 16.0,
+        Kind::Dinosaur => 20.0,
+        Kind::Person => 24.0,
+    }
+}
+
+/// Litter size for a delivery — r-strategists (small prey) drop many; K-strategists (big animals/people) few.
+/// Seeded per delivery so it varies. Inclusive [lo, hi].
+fn litter_size(kind: Kind, seed_id: i32, tick: i32) -> u32 {
+    let (lo, hi) = match kind {
+        Kind::Rabbit => (3u32, 5u32),
+        Kind::Cat => (2, 4),
+        Kind::Kangaroo => (1, 2),
+        Kind::Lion => (1, 3),
+        Kind::Dinosaur => (1, 2),
+        Kind::Person => (1, 1),
+    };
+    lo + (crate::simrng::rand(&[seed_id, tick, CH_LITTER]) * (hi - lo + 1) as f64).floor() as u32
+}
+
 /// Natural lifespan (seconds) by kind — small/fast prey are short-lived; big animals + people live longest.
 fn base_lifespan(kind: Kind) -> f64 {
     match kind {
@@ -180,6 +211,8 @@ pub struct ManagedAgent {
     // predators, faster predators catch prey). The whole point of breeding being more than cloning.
     pub age: f64,      // seconds lived → drives senescence (infertile elder) + old-age death
     pub lifespan: f64, // this individual's natural lifespan (per-kind base ± seeded variation); age ≥ this = dies of old age
+    pub pregnant: f64, // gestation remaining (s); >0 = a female carrying a litter (delivers at 0). Males stay 0.
+    pub unborn_gene: f64, // the vigor the carried litter will inherit (averaged from both parents at conception)
     pub meals: u32,
     pub spooked: f64,
     pub mobbed: bool,
@@ -284,6 +317,8 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         gene: 1.0, // founders are baseline vigor; evolution emerges as mutation accumulates across births
         age: 0.0,
         lifespan: base_lifespan(kind) * (0.65 + 0.7 * crate::simrng::rand(&[seed_id, CH_AGE])), // ±35% per-individual → deaths spread out, not synchronized
+        pregnant: 0.0,
+        unborn_gene: 1.0,
         meals: 0,
         spooked: 0.0,
         mobbed: false,
@@ -1060,15 +1095,42 @@ impl World {
             }
         }
 
-        // 7.5 REPRODUCTION — two same-kind ADULTS, calm + well-fed + adjacent, breed a baby (queued to `births`,
-        // spawned JS-side; the buffer is cleared per step() so it accumulates across the step's ticks). Per-kind
-        // population cap → births fail at the cap (no explosion). breed_cd marks who's paired this tick.
+        // 7.5 REPRODUCTION — GESTATION + LITTERS. Mating makes the FEMALE of a calm, well-fed, isolated, fertile
+        // opposite-sex pair PREGNANT; she carries for a gestation period, then delivers a species-sized LITTER
+        // (queued to `births`, spawned JS-side; buffer clears per step()). Per-kind cap holds at delivery.
         let mut pop = [0usize; 6];
         for m in self.agents.iter() {
             if !m.dead {
                 pop[m.kind as usize] += 1;
             }
         }
+        // A. GESTATION — advance every pregnancy; deliver the litter at the mother's spot when it completes.
+        for i in 0..n {
+            if self.agents[i].dead || self.agents[i].pregnant <= 0.0 {
+                continue;
+            }
+            self.agents[i].pregnant -= DT;
+            if self.agents[i].pregnant > 0.0 {
+                continue; // still carrying
+            }
+            self.agents[i].pregnant = 0.0;
+            let kind = self.agents[i].kind;
+            let kc = kind as usize;
+            let (mx, mz) = (self.agents[i].agent.x, self.agents[i].agent.z);
+            let want = litter_size(kind, self.agents[i].seed_id, self.clock.tick as i32);
+            let room = POP_CAP.saturating_sub(pop[kc]) as u32; // cap still holds — only deliver what fits
+            for b in 0..want.min(room) {
+                // each littermate inherits the carried vigor ± a touch more mutation, so siblings vary a little
+                let mu = (crate::simrng::rand(&[self.agents[i].seed_id, self.clock.tick as i32, b as i32, CH_GENE]) - 0.5) * 2.0 * GENE_MUT;
+                let baby_gene = (self.agents[i].unborn_gene + mu).clamp(GENE_MIN, GENE_MAX);
+                self.births.push(kc as f32);
+                self.births.push(mx as f32);
+                self.births.push(mz as f32);
+                self.births.push(baby_gene as f32);
+                pop[kc] += 1;
+            }
+        }
+        // B. MATING — a fertile opposite-sex pair conceives: the female starts gestating; both pay the breed cost.
         for i in 0..n {
             if !self.breed_ready(i) {
                 continue;
@@ -1078,20 +1140,15 @@ impl World {
                 continue;
             }
             if let Some(j) = self.find_mate(i) {
-                let (ix, iz) = (self.agents[i].agent.x, self.agents[i].agent.z);
-                let (jx, jz) = (self.agents[j].agent.x, self.agents[j].agent.z);
-                // INHERIT: average the parents' vigor, mutate a touch (deterministic via the addressed RNG), clamp
+                let mom = if is_female(self.agents[i].seed_id) { i } else { j }; // the female of the pair carries
+                // INHERIT: the litter's vigor = average of the parents' genes ± mutation (deterministic RNG), clamped
                 let mu = (crate::simrng::rand(&[self.agents[i].seed_id, self.agents[j].seed_id, self.clock.tick as i32, CH_GENE]) - 0.5) * 2.0 * GENE_MUT;
-                let baby_gene = (((self.agents[i].gene + self.agents[j].gene) * 0.5) + mu).clamp(GENE_MIN, GENE_MAX);
-                self.births.push(kc as f32);
-                self.births.push(((ix + jx) * 0.5) as f32); // born between the parents
-                self.births.push(((iz + jz) * 0.5) as f32);
-                self.births.push(baby_gene as f32); // its inherited vigor (the JS bridge ferries it back via set_gene)
+                self.agents[mom].unborn_gene = (((self.agents[i].gene + self.agents[j].gene) * 0.5) + mu).clamp(GENE_MIN, GENE_MAX);
+                self.agents[mom].pregnant = gestation(self.agents[mom].kind);
                 self.agents[i].breed_cd = BREED_COOLDOWN;
                 self.agents[j].breed_cd = BREED_COOLDOWN;
                 self.agents[i].energy = (self.agents[i].energy - BREED_COST).max(0.0);
                 self.agents[j].energy = (self.agents[j].energy - BREED_COST).max(0.0);
-                pop[kc] += 1; // the baby counts → caps births this tick too
             }
         }
 
@@ -1127,6 +1184,7 @@ impl World {
             && m.breed_cd <= 0.0
             && m.energy > BREED_ENERGY // WELL-FED (nutrition), not merely rested → food limits breeding
             && m.age < m.lifespan * SENESCENCE_FRAC // fertile window: matured, not yet an elder
+            && m.pregnant <= 0.0 // not already carrying a litter
             && !m.mobbed
             && m.spooked <= 0.0
             && m.crowd < BREED_CROWD
@@ -1885,21 +1943,20 @@ mod tests {
     }
 
     #[test]
-    fn two_well_fed_adults_breed_once() {
+    fn a_pair_gestates_then_delivers_a_litter() {
         let mut w = World::new();
         w.set_player(1e4, 1e4); // park the player far
-        w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
-        w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2); // adjacent (< BREED_R2), both full stamina (prey)
-        for t in 1..=4 {
+        w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // seeds 1,2 → an opposite-sex pair
+        w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2); // adjacent (< BREED_R2), well-fed
+        // they conceive within a few ticks; rabbit gestation is 8 s → run well past it (tick_once accumulates births)
+        for t in 1..=320 {
             w.tick_once(t);
         }
-        assert!(w.births().len() >= 4, "two adjacent well-fed adults breed a baby"); // 4 floats/birth: kc,x,z,gene
-        assert_eq!(w.births()[0], 0.0, "the baby is a rabbit (kind code 0)");
-        // both parents are on breed cooldown now → NO explosion (still just the one birth)
-        for t in 5..=40 {
-            w.tick_once(t);
-        }
-        assert_eq!(w.births().len(), 4, "parents on cooldown → exactly one birth, not a runaway");
+        let babies = w.births().len() / 4; // 4 floats/birth: kc,x,z,gene
+        assert!(babies >= 3, "a rabbit pregnancy delivers a LITTER (3–5); got {babies}");
+        assert_eq!(w.births()[0], 0.0, "the litter is rabbits (kind code 0)");
+        // both parents are on a long breed cooldown → just the one litter this window, not a runaway
+        assert!(babies <= 5, "one litter, not a runaway; got {babies}");
     }
 
     #[test]
@@ -1949,13 +2006,14 @@ mod tests {
         let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
         w.agents[a].gene = 1.4; // a fast lineage
         w.agents[b].gene = 1.4;
-        for t in 1..=4 {
-            w.tick_once(t);
+        for t in 1..=320 {
+            w.tick_once(t); // conceive, then gestate (rabbit 8 s) → the litter delivers
         }
         let births = w.births();
-        assert!(births.len() >= 4, "the pair bred");
+        assert!(births.len() >= 4, "the pair bred a litter");
         let baby_gene = births[3] as f64; // layout: [kindCode, x, z, gene]
-        assert!((baby_gene - 1.4).abs() <= GENE_MUT + 1e-6, "baby inherits ~the parents' vigor 1.4 (±mutation); got {baby_gene}");
+        // two mutation steps apply (at conception + per-littermate), each ±GENE_MUT
+        assert!((baby_gene - 1.4).abs() <= 2.0 * GENE_MUT + 1e-6, "baby inherits ~the parents' vigor 1.4 (±mutation); got {baby_gene}");
         assert!((GENE_MIN..=GENE_MAX).contains(&baby_gene), "gene clamped in range");
     }
 
