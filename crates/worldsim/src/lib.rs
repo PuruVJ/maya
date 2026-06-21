@@ -148,6 +148,10 @@ mod wasm_api {
             self.world.set_night(n);
         }
 
+        pub fn set_pop_scale(&mut self, s: f64) {
+            self.world.set_pop_scale(s);
+        }
+
         /// Replace the lake-fish lure points from a flat [x0,z0,x1,z1,…] buffer.
         pub fn set_fish(&mut self, xz: &[f64]) {
             self.world.set_fish(xz);

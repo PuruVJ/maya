@@ -66,20 +66,61 @@ export function repairIds<T extends { objects: { id: string }[]; zones?: { id: s
 	return world;
 }
 
-// Per-kind living cap — MIRRORS crates/worldsim/src/eco.rs's pop_cap() (the trophic pyramid: many prey, few apex).
-// The Rust cap only gates BREEDING, so it can't trim a roster that's ALREADY over it — and a saved world can carry
-// such an overshoot baked into its objects (a roster persisted before the caps existed, or before the sim starved
-// an apex bloom back down). This trims each creature kind to its ceiling AT LOAD, so a persisted world opens in
-// balance instead of reloading the same 12-lion bloom every time. Keeps the first `cap` of each kind (the
-// established founders, which sort ahead of later-appended babies/immigrants); drops the surplus. Mutates + returns.
-const CREATURE_CAP: Record<string, number> = { rabbit: 45, kangaroo: 28, person: 22, cat: 14, lion: 6, dinosaur: 3 };
-export function capCreatures<T extends { objects: { kind: string }[] }>(world: T): T {
+const CREATURE_KINDS = new Set(['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur']);
+// World-AREA → a population multiplier. The static-object footprint (trees + built structures, NOT roaming
+// creatures, which would feed back on themselves) defines the "inhabited" world; a bigger / more-developed world
+// supports proportionally more life. Baseline ≈ the demo's extent → scale 1; clamped to [1, 8]. Fed to the Rust
+// sim (set_pop_scale) AND used by capCreatures, so the load-trim and the live breeding cap agree.
+const AREA_BASELINE = 170 * 170; // m² — the demo world's rough static footprint
+export function worldAreaScale(objects: { kind: string; pos: [number, number, number] }[]): number {
+	let minX = Infinity;
+	let maxX = -Infinity;
+	let minZ = Infinity;
+	let maxZ = -Infinity;
+	let n = 0;
+	for (const o of objects) {
+		if (CREATURE_KINDS.has(o.kind)) continue;
+		minX = Math.min(minX, o.pos[0]);
+		maxX = Math.max(maxX, o.pos[0]);
+		minZ = Math.min(minZ, o.pos[2]);
+		maxZ = Math.max(maxZ, o.pos[2]);
+		n++;
+	}
+	if (n < 4) return 1; // too few static objects to measure a footprint → baseline
+	return Math.max(1, Math.min(8, ((maxX - minX) * (maxZ - minZ)) / AREA_BASELINE));
+}
+
+// Live per-kind ceiling — MIRRORS crates/worldsim/src/world.rs effective_cap(): PREY scale with world AREA, each
+// PREDATOR tracks a share of the live prey it eats. (Constants must match the Rust ones.)
+export function popCaps(count: Record<string, number>, scale: number): Record<string, number> {
+	const r = count.rabbit ?? 0;
+	const k = count.kangaroo ?? 0;
+	const p = count.person ?? 0;
+	const c = count.cat ?? 0;
+	const l = count.lion ?? 0;
+	return {
+		rabbit: Math.round(45 * scale),
+		kangaroo: Math.round(28 * scale),
+		person: Math.round(22 * scale),
+		cat: Math.max(2, Math.round(r * 0.3)),
+		lion: Math.max(1, Math.round((r + k + p + c) * 0.07)),
+		dinosaur: Math.max(1, Math.round((r + k + p + c + l) * 0.035))
+	};
+}
+
+// Trim each creature kind to its live ceiling AT LOAD — the Rust cap only gates BREEDING, so it can't shrink a
+// roster that's ALREADY over (a world saved before the caps, or before the sim starved an apex bloom down). Keeps
+// the first `cap` of each kind (established founders sort ahead of later babies/immigrants), drops the surplus.
+export function capCreatures<T extends { objects: { kind: string; pos: [number, number, number] }[] }>(world: T): T {
+	const scale = worldAreaScale(world.objects);
+	const count: Record<string, number> = {};
+	for (const o of world.objects) if (CREATURE_KINDS.has(o.kind)) count[o.kind] = (count[o.kind] ?? 0) + 1;
+	const cap = popCaps(count, scale);
 	const seen: Record<string, number> = {};
 	world.objects = world.objects.filter((o) => {
-		const cap = CREATURE_CAP[o.kind];
-		if (cap === undefined) return true; // a tree / house / prop — not a capped creature, always keep
+		if (!CREATURE_KINDS.has(o.kind)) return true; // a tree / house / prop — always keep
 		seen[o.kind] = (seen[o.kind] ?? 0) + 1;
-		return seen[o.kind] <= cap;
+		return seen[o.kind] <= (cap[o.kind] ?? Infinity);
 	});
 	return world;
 }

@@ -48,7 +48,7 @@ type Snap = {
 type OutMsg =
 	| { type: 'init'; base: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
-	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
+	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 type WorkerMsg = { type: 'ready' } | { type: 'failed'; error: string } | Snap;
 
 // newborns from the Rust breeding pass (kind + position) → Scene drains them into world.objects each frame
@@ -123,6 +123,13 @@ let lastDanger = 0; // most recent danger imminence (0..1) from the worker → t
 let behindTarget = 0; // 1 while a hunter is in your back hemisphere → eased into playerState.dangerBehind
 
 let pendingObstacles: Float64Array | null = null; // survives the async worker load; flushed on 'ready'
+let popScale = 1; // world-area multiplier for prey caps (Scene computes it from the world's extent), rides the tick msg
+
+/** Set the world-AREA population multiplier — bigger/more-built world → higher prey caps (predators follow prey).
+ *  Scene feeds this from the static-object extent; it rides the next tick message to the Rust world. */
+export function setRustPopScale(s: number): void {
+	popScale = s;
+}
 
 /** Feed the solid obstacles (props/buildings/ponds) to the Rust world. Accepts the same shape Scene builds for
  *  agentManager.setObstacles; flattened to the packed [x,z,r,hx,hz,cos,sin] layout (circle → hx = NaN). */
@@ -309,7 +316,7 @@ export function tickRust(dt: number): void {
 
 	// post the step to the worker (transfer the fish buffer — the worker takes ownership)
 	const fish = collectFish();
-	worker.postMessage({ type: 'tick', seq: ++postSeq, dt, px, pz, night: agentManager.nightValue, fish, spawns, despawns } satisfies OutMsg, [fish.buffer]);
+	worker.postMessage({ type: 'tick', seq: ++postSeq, dt, px, pz, night: agentManager.nightValue, popScale, fish, spawns, despawns } satisfies OutMsg, [fish.buffer]);
 
 	// IS THE HUNTER BEHIND YOU? (recompute the target only when a fresh snapshot gave us hunter positions; ease
 	// every tick for smoothness). Player forward = (-sin yaw, -cos yaw); dot with the dir to the nearest hunter

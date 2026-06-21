@@ -93,19 +93,14 @@ const BREED_CROWD: u32 = 5;
 // hunter" so never bred, yet predators never closed the kill). Breeding is interrupted only by a hunter that's
 // genuinely RIGHT THERE (≤14 m); a calm pair grazing with a lion on the skyline can still mate.
 const BREED_FEAR_R2: f64 = 14.0 * 14.0;
-/// Per-kind living cap — a TROPHIC PYRAMID, not one flat number. A flat 40-for-all let apex lions balloon (12 of
-/// them, swamping the prey base). Real food webs are wide at the bottom (many rabbits) and narrow at the top (a
-/// few lions): each predator needs a large prey base, so the higher the trophic rank, the lower the ceiling.
-const fn pop_cap(kind: Kind) -> usize {
-    match kind {
-        Kind::Rabbit => 45,   // r-strategist prey — the broad base of the pyramid
-        Kind::Kangaroo => 28, // larger prey, fewer
-        Kind::Person => 22,   // omnivore settlers (want enough to grow a town)
-        Kind::Cat => 14,      // meso-predator
-        Kind::Lion => 6,      // apex — rare by design
-        Kind::Dinosaur => 3,  // super-apex — a handful at most
-    }
-}
+// Living caps are no longer hand-tuned constants — they're a TROPHIC PYRAMID computed live (see effective_cap):
+// PREY density scales with world AREA, and each PREDATOR's ceiling tracks the live count of the prey it eats.
+const PREY_DENSITY_RABBIT: f64 = 45.0; // per BASELINE world area — broad base of the pyramid (× pop_scale live)
+const PREY_DENSITY_KANGAROO: f64 = 28.0;
+const PREY_DENSITY_PERSON: f64 = 22.0; // omnivore settlers (a town's worth at baseline; grows as the world/city does)
+const CAT_PREY_SHARE: f64 = 0.30; // a cat population ≈ 30% of its rabbit base
+const LION_PREY_SHARE: f64 = 0.07; // a lion population ≈ 7% of everything it hunts
+const DINO_PREY_SHARE: f64 = 0.035; // super-apex — rarest of all
 const JUVENILE_CD: f64 = 28.0; // a newborn carries this breed-cooldown → it must mature before it can breed
 const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
 const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
@@ -119,7 +114,8 @@ const ENERGY_DRAIN: f64 = 0.012; // /s fullness ebbs (~80 s empty if it never ea
 const GRAZE_RATE: f64 = 0.16; // /s a calm herbivore on UNcrowded ground refuels (~5 s to refill)
 const GRAZE_CROWD: f64 = 10.0; // herd size at which ground is fully overgrazed → grazing yields ~nothing (raised: less starvation)
 const STARVE_DAMAGE: f64 = 0.05; // /s health bleeds while fullness is empty (~20 s of famine is fatal; slow enough to recover if food's found)
-const EAT_ENERGY: f64 = 0.7; // fullness a kill restores to the hunter
+const EAT_ENERGY: f64 = 0.85; // fullness a kill restores — a predator GORGES on a kill (feast), then coasts (famine)
+const CARN_DRAIN_FRAC: f64 = 0.6; // carnivores burn fullness slower than grazers → they survive the gaps between kills (predators starved amid prey otherwise)
 
 // ── GENETICS (evolution) ────────────────────────────────────────────────────────────────────────────────────
 // A baby's VIGOR gene = the average of its parents' genes, ± a small mutation. Vigor scales max speed, so
@@ -450,6 +446,7 @@ pub struct World {
     player: (f64, f64),
     last_player: (f64, f64),       // previous tick's player pos → its speed (a running player scares wildlife)
     night: f64,                    // 0 day … 1 night → prey jumpier (wider danger radius)
+    pop_scale: f64,                // world-AREA multiplier for prey caps (fed from JS: bigger world → more life)
     forces: Vec<(f64, f64, u32)>,  // reused per-tick (fx, fz, crowd) flock buffer → no per-frame alloc
     behave: Vec<(f64, bool)>,      // reused per-tick (boost, pursuing) from the behaviour pass
     kills: Vec<usize>,             // prey caught this tick → turned to corpses after the behaviour pass
@@ -483,6 +480,7 @@ impl World {
             player: (0.0, 0.0),
             last_player: (f64::NAN, f64::NAN),
             night: 0.0,
+            pop_scale: 1.0,
             forces: Vec::new(),
             behave: Vec::new(),
             kills: Vec::new(),
@@ -501,6 +499,32 @@ impl World {
     /// How nocturnal the world is (0 day … 1 night) — widens the prey's danger radius.
     pub fn set_night(&mut self, n: f64) {
         self.night = n.clamp(0.0, 1.0);
+    }
+
+    /// World-AREA multiplier for the prey carrying capacity (fed from JS, which knows the world's spatial extent).
+    /// A bigger / more-built world supports proportionally more life; predators then follow the prey (see effective_cap).
+    pub fn set_pop_scale(&mut self, s: f64) {
+        self.pop_scale = s.clamp(1.0, 8.0);
+    }
+
+    /// Live carrying capacity for `kind`, given this tick's per-kind headcount `pop`. PREY (+ omnivore people)
+    /// scale with world AREA (`pop_scale`); each PREDATOR's ceiling is a share of the LIVE prey it can eat — so
+    /// more prey supports more hunters and a prey crash pulls them back down (the dynamic that retired the old
+    /// hand-tuned predator numbers). Indices use `Kind as usize` so they track the enum, not a literal.
+    fn effective_cap(&self, kind: Kind, pop: &[usize; 6]) -> usize {
+        let r = pop[Kind::Rabbit as usize] as f64;
+        let k = pop[Kind::Kangaroo as usize] as f64;
+        let p = pop[Kind::Person as usize] as f64;
+        let c = pop[Kind::Cat as usize] as f64;
+        let l = pop[Kind::Lion as usize] as f64;
+        match kind {
+            Kind::Rabbit => (PREY_DENSITY_RABBIT * self.pop_scale).round() as usize,
+            Kind::Kangaroo => (PREY_DENSITY_KANGAROO * self.pop_scale).round() as usize,
+            Kind::Person => (PREY_DENSITY_PERSON * self.pop_scale).round() as usize,
+            Kind::Cat => ((r * CAT_PREY_SHARE).round() as usize).max(2), // hunts rabbits
+            Kind::Lion => (((r + k + p + c) * LION_PREY_SHARE).round() as usize).max(1), // hunts all below it
+            Kind::Dinosaur => (((r + k + p + c + l) * DINO_PREY_SHARE).round() as usize).max(1),
+        }
     }
 
     /// Spawn an agent; returns its index.
@@ -1118,7 +1142,8 @@ impl World {
             if self.agents[i].companion {
                 self.agents[i].energy = 1.0;
             } else {
-                let mut en = self.agents[i].energy - ENERGY_DRAIN * DT;
+                let drain = if is_carnivore { ENERGY_DRAIN * CARN_DRAIN_FRAC } else { ENERGY_DRAIN };
+                let mut en = self.agents[i].energy - drain * DT;
                 if !is_carnivore && boost <= 1.0 && self.agents[i].spooked <= 0.0 {
                     let lushness = (1.0 - self.agents[i].crowd as f64 / GRAZE_CROWD).max(0.0);
                     en += GRAZE_RATE * lushness * DT;
@@ -1189,7 +1214,7 @@ impl World {
             let kc = kind as usize;
             let (mx, mz) = (self.agents[i].agent.x, self.agents[i].agent.z);
             let want = litter_size(kind, self.agents[i].seed_id, self.clock.tick as i32);
-            let room = pop_cap(kind).saturating_sub(pop[kc]) as u32; // cap still holds — only deliver what fits
+            let room = self.effective_cap(kind, &pop).saturating_sub(pop[kc]) as u32; // cap still holds — only deliver what fits
             let born = want.min(room);
             pop[kc] += born as usize; // count newborns against the cap NOW so a tickful of deliveries can't all see the same room and overshoot it
             for b in 0..born {
@@ -1210,7 +1235,7 @@ impl World {
                 continue;
             }
             let kc = self.agents[i].kind as usize;
-            if pop[kc] >= pop_cap(self.agents[i].kind) {
+            if pop[kc] >= self.effective_cap(self.agents[i].kind, &pop) {
                 continue; // at the kind's ceiling (incl. this tick's deliveries) → don't even conceive
             }
             if let Some(j) = self.find_mate(i) {

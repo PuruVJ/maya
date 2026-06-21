@@ -32,6 +32,7 @@ interface RustSim {
 	event_count(): number;
 	events_ptr(): number;
 	set_night(n: number): void;
+	set_pop_scale(s: number): void;
 	set_fish(xz: Float64Array): void;
 	set_obstacles(flat: Float64Array): void;
 	step(dt: number): void;
@@ -58,7 +59,7 @@ type Spawn = { slot: number; x: number; z: number; code: number; radius: number;
 type InMsg =
 	| { type: 'init'; base: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
-	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
+	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 
 let wasm: WasmExports | null = null;
 let sim: RustSim | null = null;
@@ -129,6 +130,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 
 	sim.set_player(d.px, d.pz);
 	sim.set_night(d.night);
+	sim.set_pop_scale(d.popScale);
 	sim.set_fish(d.fish);
 	sim.step(d.dt);
 

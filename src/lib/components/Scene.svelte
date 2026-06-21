@@ -39,7 +39,8 @@
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { drainBirths, drainBuilds } from '$lib/rustSim';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
-	import { setRustObstacles } from '$lib/rustSim';
+	import { setRustObstacles, setRustPopScale } from '$lib/rustSim';
+	import { worldAreaScale } from '$lib/world';
 	import { playerState } from '$lib/playerState.svelte';
 	import { heightAt } from '$lib/terrain';
 	import { wind } from '$lib/wind';
@@ -256,6 +257,8 @@
 		restockT += dt;
 		if (restockT >= RESTOCK_EVERY) {
 			restockT = 0;
+			// feed the world's AREA to the sim → prey caps scale with the (growing) world/city; predators follow prey
+			setRustPopScale(worldAreaScale(world.objects));
 			const live: Record<string, number> = {};
 			const geneSum: Record<string, number> = {};
 			let allGene = 0;
