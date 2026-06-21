@@ -67,27 +67,16 @@ export function repairIds<T extends { objects: { id: string }[]; zones?: { id: s
 }
 
 const CREATURE_KINDS = new Set(['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur']);
-// World-AREA → a population multiplier. The static-object footprint (trees + built structures, NOT roaming
-// creatures, which would feed back on themselves) defines the "inhabited" world; a bigger / more-developed world
-// supports proportionally more life. Baseline ≈ the demo's extent → scale 1; clamped to [1, 8]. Fed to the Rust
-// sim (set_pop_scale) AND used by capCreatures, so the load-trim and the live breeding cap agree.
-const AREA_BASELINE = 170 * 170; // m² — the demo world's rough static footprint
-export function worldAreaScale(objects: { kind: string; pos: [number, number, number] }[]): number {
-	let minX = Infinity;
-	let maxX = -Infinity;
-	let minZ = Infinity;
-	let maxZ = -Infinity;
-	let n = 0;
-	for (const o of objects) {
-		if (CREATURE_KINDS.has(o.kind)) continue;
-		minX = Math.min(minX, o.pos[0]);
-		maxX = Math.max(maxX, o.pos[0]);
-		minZ = Math.min(minZ, o.pos[2]);
-		maxZ = Math.max(maxZ, o.pos[2]);
-		n++;
-	}
-	if (n < 4) return 1; // too few static objects to measure a footprint → baseline
-	return Math.max(1, Math.min(8, ((maxX - minX) * (maxZ - minZ)) / AREA_BASELINE));
+const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
+// DEVELOPMENT → a population multiplier. Keyed on the size of the BUILT settlement (houses), NOT the scattered
+// ambient trees (which span the whole wilderness → a huge spurious footprint that ballooned the caps). A growing
+// city is what should lift the world's carrying capacity: build out → more people/animals → more building (the
+// emergent-city feedback). A fresh, cityless world sits at 1. Clamped [1, 3.5]. Fed to the Rust sim AND used by
+// capCreatures so the load-trim and the live breeding cap agree.
+export function worldAreaScale(objects: { kind: string }[]): number {
+	let builds = 0;
+	for (const o of objects) if (BUILDING_KINDS.has(o.kind)) builds++;
+	return Math.max(1, Math.min(3.5, 1 + builds / 30)); // ~+1 capacity per 30 buildings raised
 }
 
 // Live per-kind ceiling — MIRRORS crates/worldsim/src/world.rs effective_cap(): PREY scale with world AREA, each

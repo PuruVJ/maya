@@ -184,7 +184,9 @@
 	// is the rescue-effect half of a self-sustaining ecosystem; natural breeding (Rust) carries it from there.
 	const migrantPrefix = 'm' + Math.random().toString(36).slice(2, 8) + '-';
 	let migrantN = 0;
-	const IMMIGRATION: Record<string, number> = { rabbit: 6, kangaroo: 4, person: 4, cat: 4, lion: 1 };
+	const IMMIGRATION: Record<string, number> = { rabbit: 6, kangaroo: 4, person: 4, cat: 4, lion: 2 }; // lion 1→2: a lone apex can never pair-breed
+	const GENEFLOW_MAX = 8; // a population this small still gets occasional FRESH BLOOD (anti-inbreeding gene flow)
+	const GENEFLOW_CHANCE = 0.18; // ...with this probability per restock check
 	const RESTOCK_EVERY = 9; // seconds between restock checks (gradual — a collapsed species trickles back over time)
 	let restockT = RESTOCK_EVERY - 2; // first check soon after load (so a barren reloaded world revives quickly)
 
@@ -272,19 +274,30 @@
 			});
 			const globalAvg = allN > 0 ? allGene / allN : 1; // fallback vigor for a species that's gone fully extinct
 			for (const kind in IMMIGRATION) {
-				const deficit = IMMIGRATION[kind] - (live[kind] ?? 0);
-				if (deficit <= 0) continue;
-				// immigrants arrive carrying the LOCAL evolved vigor (the species average), not a pristine 1.0 —
-				// otherwise the floor's steady trickle of founders kept resetting evolution (vigor was pinned ~1.0).
-				// They're "robust dispersers", so a hair above average, with a little spread for selection to bite.
-				const avg = live[kind] ? geneSum[kind] / live[kind] : globalAvg;
-				const bring = Math.min(2, deficit); // a pair at a time → both sexes arrive over successive waves
+				const n = live[kind] ?? 0;
+				const floor = IMMIGRATION[kind];
+				const avg = n ? geneSum[kind] / n : globalAvg;
+				// HOW MANY arrive — three regimes:
+				//  · near-extinct (≤1): a lone survivor can't pair-breed, so walk in a whole VIABLE FOUNDING GROUP (≥3 →
+				//    both sexes almost certainly present, a non-inbred start).
+				//  · below floor: top up to the floor.
+				//  · small but stable: occasional FRESH BLOOD (gene flow) so a tiny pop doesn't inbreed/stagnate.
+				let bring = 0;
+				if (n <= 1) bring = Math.max(floor, 3);
+				else if (n < floor) bring = floor - n;
+				else if (n < GENEFLOW_MAX && Math.random() < GENEFLOW_CHANCE) bring = 1;
+				if (bring <= 0) continue;
+				// GENETIC RESCUE: migrants are robust dispersers from a thriving distant population — vigour at least
+				// ~1.12, biased above the struggling locals, with real spread. So immigration LIFTS a degraded gene pool
+				// (user: "the AI must intervene when it's getting too low") + injects diversity, rather than cloning the
+				// local average or resetting to 1.0.
+				const center = Math.max(avg, globalAvg, 1.12);
 				for (let k = 0; k < bring; k++) {
 					const a = Math.random() * Math.PI * 2;
 					const r = 55 + Math.random() * 30; // beyond the immediate clearing, within the wander range
 					const x = playerState.pos[0] + Math.cos(a) * r;
 					const z = playerState.pos[2] + Math.sin(a) * r;
-					const gene = Math.max(0.6, Math.min(1.6, avg + 0.01 + (Math.random() - 0.5) * 0.06));
+					const gene = Math.max(0.6, Math.min(1.6, center - 0.06 + Math.random() * 0.34));
 					world.objects.push({ id: migrantPrefix + migrantN++, kind, pos: [x, 0, z], gene });
 				}
 			}
