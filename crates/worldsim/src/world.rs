@@ -1326,7 +1326,10 @@ impl World {
             && m.pregnant <= 0.0 // not already carrying a litter
             && !m.mobbed
             && m.spooked <= 0.0
-            && m.crowd < BREED_CROWD
+            // crowd gate stops HERD prey chain-breeding into a swarm — but PEOPLE reproduce IN dense settlements,
+            // so a city (always crowded) was silently sterilising them → the human population crashed to ~0 with
+            // zero births. Exempt people; the per-kind POP_CAP still bounds them.
+            && (matches!(m.kind, Kind::Person) || m.crowd < BREED_CROWD)
             && self.transient[i].threat_d > BREED_FEAR_R2 // a hunter must be RIGHT HERE to interrupt mating, not just within the 40 m flee radius
             && !self.transient[i].near_predator
     }
