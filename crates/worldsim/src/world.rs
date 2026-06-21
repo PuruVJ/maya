@@ -143,8 +143,8 @@ const CH_AGE: i32 = 21; // RNG channel for the lifespan-variation roll
 // only emits build REQUESTS (where); JS places the house (grid-snapped, non-overlapping, globally capped).
 const BUILD_ENERGY: f64 = 0.82; // a settler must be WELL-fed to afford building
 const BUILD_COST: f64 = 0.55; // energy a build spends (so they must re-feed before the next)
-const BUILD_COOLDOWN: f64 = 90.0; // seconds between one settler's builds → a town rises gradually
-const BUILD_COMMUNITY: u32 = 3; // nearby neighbours (≈ people) that make a settlement worth building in
+const BUILD_COOLDOWN: f64 = 160.0; // seconds between one settler's builds → a town rises gradually (slowed: user "a tad too much")
+const FAMILY_R2: f64 = 9.0 * 9.0; // a HOUSEHOLD radius — a home rises only where an adult MALE+FEMALE pair settles
 const CH_BUILD: i32 = 23; // RNG channel for the staggered initial build cooldown
 
 // TELEMETRY event codes — the sim records [code, kind, x, z] so the agent can later READ what actually happened
@@ -182,7 +182,7 @@ fn litter_size(kind: Kind, seed_id: i32, tick: i32) -> u32 {
         Kind::Kangaroo => (1, 2),
         Kind::Lion => (1, 3),
         Kind::Dinosaur => (1, 2),
-        Kind::Person => (1, 1),
+        Kind::Person => (1, 2), // occasionally twins → families actually grow (user: humans weren't reproducing enough)
     };
     lo + (crate::simrng::rand(&[seed_id, tick, CH_LITTER]) * (hi - lo + 1) as f64).floor() as u32
 }
@@ -1227,8 +1227,9 @@ impl World {
             }
         }
 
-        // 7.6 EMERGENT CITIES — a well-fed adult PERSON in a community raises a house (JS places it). Clusters of
-        // settled families therefore grow a town, then a city, bit by bit. The sim just emits where to build.
+        // 7.6 EMERGENT CITIES — a settled FAMILY (an adult male+female pair) raises a home, which clusters into a
+        // town then a city. Gated on an opposite-sex adult Person nearby (NOT the generic flock `crowd`, which
+        // counts ANY neighbours — so a lone human among rabbits was building houses). The sim emits where to build.
         for i in 0..n {
             let m = &self.agents[i];
             if m.dead
@@ -1236,9 +1237,9 @@ impl World {
                 || !matches!(m.kind, Kind::Person)
                 || m.build_cd > 0.0
                 || m.energy < BUILD_ENERGY
-                || m.crowd < BUILD_COMMUNITY // needs neighbours → a settlement, not a lone wanderer
                 || m.age < m.lifespan * 0.15 // an adult, not a child
                 || self.transient[i].threat.is_some()
+                || !self.has_family(i) // only a pair-bonded household builds — no lone-wanderer houses
             {
                 continue;
             }
@@ -1305,6 +1306,29 @@ impl World {
             let d2 = (self.agents[j].agent.x - ax).powi(2) + (self.agents[j].agent.z - az).powi(2);
             if d2 <= BREED_R2 && self.breed_ready(j) {
                 found = Some(j);
+            }
+        });
+        found
+    }
+
+    /// Is there an adult, opposite-sex PERSON within a household radius of `i`? Gates house-building so only a
+    /// settled FAMILY raises a home (not a lone wanderer). Looser than `find_mate`: the partner needn't be
+    /// breed-ready right now (a couple that just had a child is still a household).
+    fn has_family(&self, i: usize) -> bool {
+        let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
+        let my_sex = is_female(self.agents[i].seed_id);
+        let mut found = false;
+        self.grid.for_each_neighbor(ax, az, |j| {
+            let j = j as usize;
+            if found || j == i || self.agents[j].dead || self.agents[j].kind != Kind::Person || is_female(self.agents[j].seed_id) == my_sex {
+                return;
+            }
+            if self.agents[j].age < self.agents[j].lifespan * 0.15 {
+                return; // a child isn't a partner
+            }
+            let d2 = (self.agents[j].agent.x - ax).powi(2) + (self.agents[j].agent.z - az).powi(2);
+            if d2 <= FAMILY_R2 {
+                found = true;
             }
         });
         found

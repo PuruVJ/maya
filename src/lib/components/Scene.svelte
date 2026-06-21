@@ -41,6 +41,7 @@
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { setRustObstacles } from '$lib/rustSim';
 	import { playerState } from '$lib/playerState.svelte';
+	import { heightAt } from '$lib/terrain';
 	import { wind } from '$lib/wind';
 	import { weather } from '$lib/weather';
 	import * as THREE from 'three';
@@ -182,7 +183,7 @@
 	// is the rescue-effect half of a self-sustaining ecosystem; natural breeding (Rust) carries it from there.
 	const migrantPrefix = 'm' + Math.random().toString(36).slice(2, 8) + '-';
 	let migrantN = 0;
-	const IMMIGRATION: Record<string, number> = { rabbit: 6, kangaroo: 4, person: 4, cat: 2, lion: 1 };
+	const IMMIGRATION: Record<string, number> = { rabbit: 6, kangaroo: 4, person: 4, cat: 4, lion: 1 };
 	const RESTOCK_EVERY = 9; // seconds between restock checks (gradual — a collapsed species trickles back over time)
 	let restockT = RESTOCK_EVERY - 2; // first check soon after load (so a barren reloaded world revives quickly)
 
@@ -229,7 +230,9 @@
 				const gx = Math.round(bd.x / 8) * 8;
 				const gz = Math.round(bd.z / 8) * 8;
 				if (world.objects.some((o) => BUILDING_KINDS.has(o.kind) && Math.abs(o.pos[0] - gx) < 6 && Math.abs(o.pos[2] - gz) < 6)) continue; // plot taken
-				world.objects.push({ id: housePrefix + houseN++, kind: 'house', pos: [gx, 0, gz] });
+				// sit the house ON the ground (terrain height), not y=0 — on raised ground a y=0 house buries into
+				// the hill and only its roof shows (looked "tiny"). heightAt mirrors the renderer's ground.
+				world.objects.push({ id: housePrefix + houseN++, kind: 'house', pos: [gx, heightAt(gx, gz, world.terrain), gz] });
 				houses++;
 			}
 		}
