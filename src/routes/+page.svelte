@@ -90,6 +90,14 @@
 			}
 		}
 		liveUrl = true; // from here on, edits persist to the world store (see effect below)
+
+		// DEV TELEPORT — type `goto(x, z)` in the browser console to jump anywhere (the player re-grounds on
+		// arrival). Handy for visiting a far-off build without the long walk.
+		if (typeof window !== 'undefined') {
+			(window as unknown as { goto: (x: number, z: number) => void }).goto = (x, z) => {
+				playerState.teleportTo = [x, 0, z];
+			};
+		}
 	});
 
 	// Live shareable URL: the world IS the link. Encode the world MERGED with the live agent snapshot
