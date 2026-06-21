@@ -79,6 +79,7 @@
 	const WADE = 0.45; // movement multiplier while wading through water (you can enter; it slows you)
 	const SINK = 0.55; // how far the avatar visually sinks when wading
 	let sink = 0; // lerped sink offset for smooth in/out
+	let camHoriz = CAM_DIST; // smoothed camera-collision distance → eases in/out of obstacles (no snap-jitter)
 	// predator strike — when a big hunter (lion/dino) reaches you it knocks you back, briefly stuns
 	// (slowed control) and shakes the camera. Non-lethal; the chase has stakes without a death system.
 	const KB = 16; // initial knockback speed (m/s, decays)
@@ -418,10 +419,16 @@
 			if (perp2 >= rr * rr) return;
 			horiz = Math.max(0.7, proj - Math.sqrt(rr * rr - perp2));
 		});
+		// SMOOTH the collision distance so the camera EASES in/out of obstacles instead of snapping to/from "right
+		// behind you" every time a prop/tree flickers in the ray test — that snap was the erratic camera jitter.
+		// Pull in quicker than it eases out (so it still ducks a real wall promptly), but a 1-frame false hit now
+		// barely moves it. (Frame-rate-independent exponential smoothing.)
+		const camRate = horiz < camHoriz ? 16 : 6;
+		camHoriz += (horiz - camHoriz) * Math.min(1, delta * camRate);
 		// keep the camera above the ground at ITS OWN xz too (not just yours), so it doesn't sink into a hill
-		// rising behind you — clamp to the higher of the two terrain heights (horiz is final now).
-		const camX = px + cdx * horiz;
-		const camZ = pz + cdz * horiz;
+		// rising behind you — clamp to the higher of the two terrain heights (camHoriz is final now).
+		const camX = px + cdx * camHoriz;
+		const camZ = pz + cdz * camHoriz;
 		const floorY = Math.max(heightAt(px, pz, world.terrain), heightAt(camX, camZ, world.terrain)) + 0.5;
 		if (camY < floorY) camY = floorY; // never dip below the ground (player's OR the camera's)
 		// camera shake on a predator strike (decays over ~0.45 s)
