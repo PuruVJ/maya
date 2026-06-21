@@ -65,10 +65,15 @@ pub const fn kind_from_code(code: u8) -> Kind {
 pub const fn eco(kind: Kind) -> Eco {
     match kind {
         Kind::Rabbit => Eco { rank: 1, speed_lo: 3.6, speed_hi: 4.8, endurance: 1.0, hunts: Hunts::None, full_after: None, sleep_secs: None, mob_toll: None },
-        Kind::Cat => Eco { rank: 2, speed_lo: 3.0, speed_hi: 3.9, endurance: 0.8, hunts: Hunts::Lower, full_after: None, sleep_secs: Some(10.0), mob_toll: Some((1, 2)) },
+        // Predators were SLOWER than their prey (cat 3.0–3.9 vs rabbit 3.6–4.8): even with the chase-vs-flee boost
+        // the fastest prey outran the fastest hunter, so carnivores starved amid 40 rabbits (telemetry: all starve
+        // victims were cats/lions, only 3 kills). Bumped so a committed chase reliably runs down an AVERAGE prey,
+        // while the fastest (high-vigor) still occasionally escape — predation works, selection still bites.
+        Kind::Cat => Eco { rank: 2, speed_lo: 3.5, speed_hi: 4.5, endurance: 0.8, hunts: Hunts::Lower, full_after: None, sleep_secs: Some(10.0), mob_toll: Some((1, 2)) },
         Kind::Kangaroo => Eco { rank: 2, speed_lo: 3.4, speed_hi: 4.6, endurance: 0.9, hunts: Hunts::None, full_after: None, sleep_secs: None, mob_toll: None },
         Kind::Person => Eco { rank: 3, speed_lo: 1.8, speed_hi: 2.5, endurance: 0.6, hunts: Hunts::Humans, full_after: None, sleep_secs: None, mob_toll: None },
-        Kind::Lion => Eco { rank: 4, speed_lo: 3.0, speed_hi: 3.9, endurance: 0.4, hunts: Hunts::Lower, full_after: Some(5), sleep_secs: Some(16.0), mob_toll: Some((1, 3)) },
+        // apex: a touch faster than the cat AND more stamina (0.4→0.55) so a lion can sustain a chase to the kill.
+        Kind::Lion => Eco { rank: 4, speed_lo: 3.7, speed_hi: 4.8, endurance: 0.55, hunts: Hunts::Lower, full_after: Some(5), sleep_secs: Some(16.0), mob_toll: Some((1, 3)) },
         Kind::Dinosaur => Eco { rank: 5, speed_lo: 4.8, speed_hi: 6.2, endurance: 0.3, hunts: Hunts::Lower, full_after: Some(9), sleep_secs: Some(24.0), mob_toll: Some((2, 5)) },
     }
 }
@@ -130,7 +135,7 @@ mod tests {
     #[test]
     fn birth_roll_parity() {
         let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-5, "expected ~{b}, got {a}");
-        close(speed_for(Kind::Cat, 100), 3.126541);
+        close(speed_for(Kind::Cat, 100), 3.640601);
         close(speed_for(Kind::Dinosaur, 7), 4.844612);
         close(speed_for(Kind::Rabbit, 12345), 4.29204);
         assert!(!aggressive(5));

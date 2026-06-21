@@ -39,10 +39,12 @@ export const ECO: Record<
 	}
 > = {
 	rabbit: { rank: 1, speed: [3.6, 4.8], endurance: 1.0, hunts: 'none' },
-	cat: { rank: 2, speed: [3.0, 3.9], endurance: 0.8, hunts: 'lower', sleepSecs: 10, mobToll: [1, 2] },
+	// predators were slower than prey → starved amid abundant rabbits; bumped so a chase runs down an average prey.
+	// MUST mirror crates/worldsim/src/eco.rs (Rust owns movement; this table feeds the JS trait mirror + parity test).
+	cat: { rank: 2, speed: [3.5, 4.5], endurance: 0.8, hunts: 'lower', sleepSecs: 10, mobToll: [1, 2] },
 	kangaroo: { rank: 2, speed: [3.4, 4.6], endurance: 0.9, hunts: 'none' },
 	person: { rank: 3, speed: [1.8, 2.5], endurance: 0.6, hunts: 'humans' },
-	lion: { rank: 4, speed: [3.0, 3.9], endurance: 0.4, hunts: 'lower', fullAfter: 5, sleepSecs: 16, mobToll: [1, 3] },
+	lion: { rank: 4, speed: [3.7, 4.8], endurance: 0.55, hunts: 'lower', fullAfter: 5, sleepSecs: 16, mobToll: [1, 3] },
 	dinosaur: { rank: 5, speed: [4.8, 6.2], endurance: 0.3, hunts: 'lower', fullAfter: 9, sleepSecs: 24, mobToll: [2, 5] }
 };
 const AGGRO_PROB = 0.2; // share of people that turn aggressive (hunt their own kind)
