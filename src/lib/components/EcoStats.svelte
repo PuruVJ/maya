@@ -1,7 +1,9 @@
 <script lang="ts">
 	// Ecosystem readout — live population by species, so the 4-pillar sim (nutrition / genetics / aging /
 	// gestation) is legible and its BALANCE can be judged: do populations hold steady, boom, or crash? Polls the
-	// agent registry at 1 Hz (cheap; never per-frame) and shows a trend arrow vs ~6 s ago so drift is visible.
+	// agent registry at 1 Hz (cheap; never per-frame). Each species CHIP flashes when its count changes — GREEN on
+	// a gain (a birth / an immigrant arriving), RED on a loss (a kill / starvation / old age) — so the churn of the
+	// living world is glanceable without staring at the numbers.
 	import { onMount } from 'svelte';
 	import { agentManager } from '$lib/agents.svelte';
 
@@ -16,7 +18,8 @@
 	] as const;
 
 	let counts = $state<Record<string, number>>({});
-	let trend = $state<Record<string, number>>({}); // -1 / 0 / +1 vs the reference snapshot
+	let pulse = $state<Record<string, number>>({}); // bumps on every change → re-keys the chip so the flash replays
+	let dir = $state<Record<string, number>>({}); // +1 = gained (green), -1 = lost (red) — picks which flash plays
 	let total = $state(0);
 	// average VIGOR (the inherited speed gene) across the live population. It's static per agent for life, so we
 	// can read it straight off the ManagedAgent (founders = 1.0) — no snapshot plumbing. Watch it drift upward as
@@ -25,7 +28,8 @@
 	let vigorTrend = $state(0);
 
 	onMount(() => {
-		let ref: Record<string, number> = {}; // counts ~6 s ago, for the trend arrow
+		let prev: Record<string, number> = {};
+		let first = true; // don't flash the whole row green on the very first sample (everything "appears")
 		let vref = 1;
 		let n = 0;
 		const sample = () => {
@@ -38,15 +42,22 @@
 				geneSum += m.gene ?? 1; // founders carry no JS gene → baseline 1.0 (matches the Rust founder gene)
 				live++;
 			});
+			if (!first) {
+				for (const { k } of SPECIES) {
+					const cur = c[k] ?? 0;
+					const was = prev[k] ?? 0;
+					if (cur !== was) {
+						dir[k] = cur > was ? 1 : -1;
+						pulse[k] = (pulse[k] ?? 0) + 1; // re-key → CSS flash animation restarts from the top
+					}
+				}
+			}
 			counts = c;
 			total = live;
 			vigor = live > 0 ? geneSum / live : 1;
+			prev = c; // absent species → 0 on the next compare, so a drop-to-zero still registers (chip just vanishes)
+			first = false;
 			if (n % 6 === 0) {
-				// every ~6 s: recompute the trends vs the previous reference, then re-anchor
-				const t: Record<string, number> = {};
-				for (const { k } of SPECIES) t[k] = Math.sign((c[k] ?? 0) - (ref[k] ?? 0));
-				trend = t;
-				ref = c;
 				vigorTrend = Math.sign(vigor - vref - 0.002); // small deadband so noise doesn't flicker the arrow
 				vref = vigor;
 			}
@@ -60,16 +71,50 @@
 
 {#if total > 0}
 	<div
-		class="pointer-events-none fixed left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-black/40 px-3 py-1 text-[13px] font-medium text-white/85 backdrop-blur"
-		title="Live population by species — watch it boom/steady/crash to judge the ecosystem balance"
+		class="pointer-events-none fixed left-1/2 top-12 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full bg-black/40 px-3 py-1 text-[13px] font-medium text-white/85 backdrop-blur"
+		title="Live population by species — chips flash green on a gain (birth / immigrant), red on a loss (kill / starve / old age)"
 	>
 		{#each SPECIES as { k, icon } (k)}
 			{#if counts[k]}
-				<span class="tabular-nums">{icon} {counts[k]}{trend[k] > 0 ? '↑' : trend[k] < 0 ? '↓' : ''}</span>
+				{#key pulse[k]}
+					<span class="chip tabular-nums" class:up={dir[k] > 0} class:down={dir[k] < 0}>{icon} {counts[k]}</span>
+				{/key}
 			{/if}
 		{/each}
-		<span class="tabular-nums text-emerald-300/90" title="Average inherited vigor (speed gene) — drifts up as evolution selects faster lineages">
+		<span class="ml-1 tabular-nums text-emerald-300/90" title="Average inherited vigor (speed gene) — drifts up as evolution selects faster lineages">
 			⚡{vigor.toFixed(2)}{vigorTrend > 0 ? '↑' : vigorTrend < 0 ? '↓' : ''}
 		</span>
 	</div>
 {/if}
+
+<style>
+	.chip {
+		border-radius: 6px;
+		padding: 0 4px;
+		background-color: rgba(0, 0, 0, 0); /* baseline → the flash animation tints then fades back to this */
+	}
+	.chip.up {
+		animation: flash-up 1.1s ease-out;
+	}
+	.chip.down {
+		animation: flash-down 1.1s ease-out;
+	}
+	@keyframes flash-up {
+		0%,
+		8% {
+			background-color: rgba(16, 185, 129, 0.9);
+		}
+		100% {
+			background-color: rgba(16, 185, 129, 0);
+		}
+	}
+	@keyframes flash-down {
+		0%,
+		8% {
+			background-color: rgba(239, 68, 68, 0.9);
+		}
+		100% {
+			background-color: rgba(239, 68, 68, 0);
+		}
+	}
+</style>
