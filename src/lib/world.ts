@@ -76,7 +76,7 @@ const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
 export function worldAreaScale(objects: { kind: string }[]): number {
 	let builds = 0;
 	for (const o of objects) if (BUILDING_KINDS.has(o.kind)) builds++;
-	return Math.max(1, Math.min(3.5, 1 + builds / 30)); // ~+1 capacity per 30 buildings raised
+	return Math.max(1, Math.min(3, 1 + builds / 40)); // ~+1 capacity per 40 buildings (softened: a big city hit 300+ agents)
 }
 
 // Live per-kind ceiling — MIRRORS crates/worldsim/src/world.rs effective_cap(): PREY scale with world AREA, each
@@ -88,8 +88,8 @@ export function popCaps(count: Record<string, number>, scale: number): Record<st
 	const c = count.cat ?? 0;
 	const l = count.lion ?? 0;
 	return {
-		rabbit: Math.round(45 * scale),
-		kangaroo: Math.round(28 * scale),
+		rabbit: Math.round(30 * scale), // MIRRORS world.rs PREY_DENSITY_* (trimmed to keep the agent count sane)
+		kangaroo: Math.round(20 * scale),
 		person: Math.round(22 * scale),
 		cat: Math.max(2, Math.round(r * 0.3)),
 		lion: Math.max(1, Math.round((r + k + p + c) * 0.07)),

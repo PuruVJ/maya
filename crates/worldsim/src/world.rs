@@ -107,9 +107,9 @@ const BREED_CROWD: u32 = 5;
 const BREED_FEAR_R2: f64 = 14.0 * 14.0;
 // Living caps are no longer hand-tuned constants — they're a TROPHIC PYRAMID computed live (see effective_cap):
 // PREY density scales with world AREA, and each PREDATOR's ceiling tracks the live count of the prey it eats.
-const PREY_DENSITY_RABBIT: f64 = 45.0; // per BASELINE world area — broad base of the pyramid (× pop_scale live)
-const PREY_DENSITY_KANGAROO: f64 = 28.0;
-const PREY_DENSITY_PERSON: f64 = 22.0; // omnivore settlers (a town's worth at baseline; grows as the world/city does)
+const PREY_DENSITY_RABBIT: f64 = 30.0; // per BASELINE world area — broad base of the pyramid (× pop_scale live).
+const PREY_DENSITY_KANGAROO: f64 = 20.0; // trimmed from 45/28: a scaled-up city flooded the world (300+ agents,
+const PREY_DENSITY_PERSON: f64 = 22.0; // a perf + visual-clutter problem). People kept (cities are the point).
 const CAT_PREY_SHARE: f64 = 0.30; // a cat population ≈ 30% of its rabbit base
 const LION_PREY_SHARE: f64 = 0.07; // a lion population ≈ 7% of everything it hunts
 const DINO_PREY_SHARE: f64 = 0.035; // super-apex — rarest of all
