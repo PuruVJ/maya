@@ -93,7 +93,19 @@ const BREED_CROWD: u32 = 5;
 // hunter" so never bred, yet predators never closed the kill). Breeding is interrupted only by a hunter that's
 // genuinely RIGHT THERE (≤14 m); a calm pair grazing with a lion on the skyline can still mate.
 const BREED_FEAR_R2: f64 = 14.0 * 14.0;
-const POP_CAP: usize = 40; // backstop cap on living of one kind (raised so populations have room to recover/grow)
+/// Per-kind living cap — a TROPHIC PYRAMID, not one flat number. A flat 40-for-all let apex lions balloon (12 of
+/// them, swamping the prey base). Real food webs are wide at the bottom (many rabbits) and narrow at the top (a
+/// few lions): each predator needs a large prey base, so the higher the trophic rank, the lower the ceiling.
+const fn pop_cap(kind: Kind) -> usize {
+    match kind {
+        Kind::Rabbit => 45,   // r-strategist prey — the broad base of the pyramid
+        Kind::Kangaroo => 28, // larger prey, fewer
+        Kind::Person => 22,   // omnivore settlers (want enough to grow a town)
+        Kind::Cat => 14,      // meso-predator
+        Kind::Lion => 6,      // apex — rare by design
+        Kind::Dinosaur => 3,  // super-apex — a handful at most
+    }
+}
 const JUVENILE_CD: f64 = 28.0; // a newborn carries this breed-cooldown → it must mature before it can breed
 const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
 const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
@@ -1177,8 +1189,10 @@ impl World {
             let kc = kind as usize;
             let (mx, mz) = (self.agents[i].agent.x, self.agents[i].agent.z);
             let want = litter_size(kind, self.agents[i].seed_id, self.clock.tick as i32);
-            let room = POP_CAP.saturating_sub(pop[kc]) as u32; // cap still holds — only deliver what fits
-            for b in 0..want.min(room) {
+            let room = pop_cap(kind).saturating_sub(pop[kc]) as u32; // cap still holds — only deliver what fits
+            let born = want.min(room);
+            pop[kc] += born as usize; // count newborns against the cap NOW so a tickful of deliveries can't all see the same room and overshoot it
+            for b in 0..born {
                 // each littermate inherits the carried vigor ± a touch more mutation, so siblings vary a little
                 let mu = (crate::simrng::rand(&[self.agents[i].seed_id, self.clock.tick as i32, b as i32, CH_GENE]) - 0.5) * 2.0 * GENE_MUT;
                 let baby_gene = (self.agents[i].unborn_gene + mu).clamp(GENE_MIN, GENE_MAX);
@@ -1196,8 +1210,8 @@ impl World {
                 continue;
             }
             let kc = self.agents[i].kind as usize;
-            if pop[kc] >= POP_CAP {
-                continue;
+            if pop[kc] >= pop_cap(self.agents[i].kind) {
+                continue; // at the kind's ceiling (incl. this tick's deliveries) → don't even conceive
             }
             if let Some(j) = self.find_mate(i) {
                 let mom = if is_female(self.agents[i].seed_id) { i } else { j }; // the female of the pair carries
