@@ -1,16 +1,23 @@
 /**
- * THE agent engine — the headless Rust/WASM core (`crates/worldsim`) IS the simulation; JS + three.js is a thin
- * render layer (see the `rust-owns-all-compute` memory + the migration roadmap in the work-queue). There is no
- * JS sim and no toggle: the legacy `agents.svelte.ts` tick is being deleted. The `Sim` keeps its state in WASM
- * linear memory; we read transforms back as zero-copy typed-array VIEWS (never a per-agent JS↔WASM call) and
- * mirror them onto the `ManagedAgent`s, which are now just lightweight render mirrors the renderers read
- * (`m.agent.rx/rz/rh` + `m.dead/m.asleep`).
+ * THE agent engine adapter — the headless Rust/WASM core (`crates/worldsim`) IS the simulation; JS + three.js is
+ * a thin render layer (see the `rust-owns-all-compute` memory). As of the perf foundation (see the
+ * `perf-foundation-plan` memory), the wasm + the `Sim` run in a WEB WORKER (worldsim.worker.ts) — OFF the main
+ * thread — so stepping 1000 agents no longer steals frame time from render. This module is the main-thread
+ * PROXY: it owns the agent roster, drives the worker with one `tick` message per sim tick, and mirrors the
+ * snapshot the worker posts back onto the `ManagedAgent`s the renderers read (`m.agent.rx/rz/rh`, `m.dead`, …).
  *
- * Build the bundle first: `pnpm build:wasm` (emits to `static/worldsim/`, served at `/worldsim/`). If the wasm
- * fails to load, agents stay put and a console error fires — there is NO JS fallback, by design.
+ * Why this is clean despite the async boundary: Rust `spawn` is APPEND-ONLY and `despawn` only tombstones (slots
+ * are never reused), so we PREDICT each new agent's slot with a monotonic counter and tell the worker — no async
+ * round-trip to learn indices. We step the worker exactly once per clock tick (pause → no messages → frozen), so
+ * determinism is preserved. The snapshot rides back ~1 tick later (33 ms); the renderer's sub-tick interpolation
+ * hides that latency.
  *
- * STILL ON THE RUST TODO (tracked in the work-queue, being ported): ambient-forest tree push-out (`#resolveTrees`),
- * the player-pet `companion` follow, and the placement search (`findFreeSpot`). Until then those behave as noted.
+ * Build the bundle first: `pnpm build:wasm` (emits to `static/worldsim/`). If the worker/wasm fails to load,
+ * agents stay put and a console error fires — there is NO main-thread fallback, by design.
+ *
+ * STILL ON THE RUST TODO: ambient-forest tree push-out, the player-pet `companion` follow nuances, the placement
+ * search. Plus a known follow-up the worker INHERITS, not introduces: Rust `spawn` never recycles tombstoned
+ * slots, so churn (reproduction ↔ corpse-reaping) grows the agents Vec over a long session — wants slot recycling.
  */
 import { base } from '$app/paths';
 import { agentManager, type ManagedAgent } from './agents.svelte';
@@ -20,6 +27,30 @@ import { playerState } from './playerState.svelte';
 // kind string → the stable code the Rust `kind_from_code` expects (enum order: see crates/worldsim/src/eco.rs)
 const KIND_CODE: Record<string, number> = { rabbit: 0, cat: 1, kangaroo: 2, person: 3, lion: 4, dinosaur: 5 };
 const KIND_NAME = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] as const; // birth kindCode → kind
+// behaviour code → the renderer's pose name (must match crates/worldsim Behavior::code order)
+const BEHAVIORS = ['wander', 'pause', 'lookAround', 'groom', 'sit', 'pounce'] as const;
+
+// ── worker message shapes (mirror worldsim.worker.ts) ───────────────────────────────────────────────
+type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean };
+type Snap = {
+	type: 'snap';
+	seq: number;
+	count: number;
+	xs: Float32Array;
+	zs: Float32Array;
+	headings: Float32Array;
+	healths: Float32Array;
+	flags: Uint32Array;
+	behaviors: Uint8Array;
+	progress: Float32Array;
+	births: Float32Array;
+	danger: number;
+};
+type OutMsg =
+	| { type: 'init'; base: string; obstacles: Float64Array | null }
+	| { type: 'obstacles'; flat: Float64Array }
+	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
+type WorkerMsg = { type: 'ready' } | { type: 'failed'; error: string } | Snap;
 
 // newborns from the Rust breeding pass (kind + position) → Scene drains them into world.objects each frame
 export type Birth = { kind: string; x: number; z: number };
@@ -32,61 +63,20 @@ export function drainBirths(): Birth[] {
 	return out;
 }
 
-// minimal self-typed surface of the generated wasm module — so svelte-check needs NO generated pkg files and
-// the default (JS) path never imports them. Mirrors the `#[wasm_bindgen] Sim` in crates/worldsim/src/lib.rs.
-interface RustSim {
-	spawn(x: number, z: number, kindCode: number, radius: number, seedId: number): number;
-	set_player(x: number, z: number): void;
-	set_companion(i: number): void;
-	despawn(i: number): void;
-	set_breed_cooldown(i: number, cd: number): void;
-	juvenile_cd(): number;
-	birth_count(): number;
-	births_ptr(): number;
-	set_night(n: number): void;
-	set_fish(xz: Float64Array): void;
-	set_obstacles(flat: Float64Array): void;
-	step(dt: number): void;
-	count(): number;
-	danger(): number;
-	xs_ptr(): number;
-	zs_ptr(): number;
-	headings_ptr(): number;
-	healths_ptr(): number;
-	flags_ptr(): number;
-	behaviors_ptr(): number;
-	progress_ptr(): number;
-}
-interface WasmExports {
-	memory: WebAssembly.Memory;
-}
-interface WasmModule {
-	default: (input?: unknown) => Promise<WasmExports>;
-	Sim: new () => RustSim;
-}
-
-let wasm: WasmExports | null = null;
-let sim: RustSim | null = null;
+let worker: Worker | null = null;
 let status: 'off' | 'loading' | 'ready' | 'failed' = 'off';
 
-const slotOf = new WeakMap<ManagedAgent, number>(); // already-spawned agents → their Rust index
-const tracked: ManagedAgent[] = []; // index = Rust slot → the agent to write transforms back onto
+let nextSlot = 0; // predicted Rust slot for the next spawn (matches the worker's append-only spawn index)
+const slotOf = new WeakMap<ManagedAgent, number>(); // already-spawned agents → their Rust slot
+const tracked: ManagedAgent[] = []; // index = Rust slot → the agent to mirror the snapshot onto
 
-// typed-array views over WASM memory, rebuilt when the buffer detaches (grows) or the agent count changes
-let viewBuf: ArrayBuffer | null = null;
-let viewCount = -1;
-let xs: Float32Array = new Float32Array();
-let zs: Float32Array = new Float32Array();
-let headings: Float32Array = new Float32Array();
-let healths: Float32Array = new Float32Array();
-let flags: Uint32Array = new Uint32Array();
-let behaviors: Uint8Array = new Uint8Array();
-let progress: Float32Array = new Float32Array();
-// behaviour code → the renderer's pose name (must match crates/worldsim Behavior::code order)
-const BEHAVIORS = ['wander', 'pause', 'lookAround', 'groom', 'sit', 'pounce'] as const;
+let snap: Snap | null = null; // latest snapshot from the worker (not yet applied)
+let appliedSeq = -1; // seq of the last snapshot we applied (skip re-applying the same one)
+let postSeq = 0; // monotonic id stamped on each tick message (echoed back on its snapshot)
+let lastDanger = 0; // most recent danger imminence (0..1) from the worker → the UI vignette
+let behindTarget = 0; // 1 while a hunter is in your back hemisphere → eased into playerState.dangerBehind
 
-// latest obstacle set, kept so it survives the async wasm load (Scene may push obstacles before the Sim exists)
-let pendingObstacles: Float64Array | null = null;
+let pendingObstacles: Float64Array | null = null; // survives the async worker load; flushed on 'ready'
 
 /** Feed the solid obstacles (props/buildings/ponds) to the Rust world. Accepts the same shape Scene builds for
  *  agentManager.setObstacles; flattened to the packed [x,z,r,hx,hz,cos,sin] layout (circle → hx = NaN). */
@@ -104,117 +94,130 @@ export function setRustObstacles(obs: { x: number; z: number; r: number; hx?: nu
 		flat[b + 6] = o.sin ?? 0;
 	}
 	pendingObstacles = flat;
-	if (sim) sim.set_obstacles(flat);
+	if (worker && status === 'ready') worker.postMessage({ type: 'obstacles', flat } satisfies OutMsg); // clone (no transfer — keep pendingObstacles intact)
 }
 
 /** Lifecycle status — `AgentSystem` only ticks the world once this is `'ready'` (agents idle while loading;
- *  `'failed'` means the wasm didn't load → agents stay put, no JS fallback). */
+ *  `'failed'` means the worker/wasm didn't load → agents stay put, no main-thread fallback). */
 export function rustStatus(): typeof status {
 	return status;
 }
 
-/** Lazy-load the wasm bundle + construct the `Sim`. Idempotent; resolves true once the engine is live. */
+/** Lazy-spawn the sim worker (it loads the wasm + constructs the `Sim`). Idempotent; resolves true once ready. */
 export async function initRustSim(): Promise<boolean> {
 	if (status === 'ready') return true;
 	if (status === 'loading') return false;
-	status = 'loading';
-	try {
-		// runtime URL (served from static/) → kept opaque to Vite so the wasm glue resolves its own .wasm via
-		// import.meta.url. @vite-ignore: do not try to bundle/transform this dynamic import.
-		const mod = (await import(/* @vite-ignore */ `${base}/worldsim/worldsim.js`)) as unknown as WasmModule;
-		wasm = await mod.default();
-		sim = new mod.Sim();
-		if (pendingObstacles) sim.set_obstacles(pendingObstacles); // apply anything Scene pushed before we loaded
-		status = 'ready';
-		console.info('[rustSim] engine=rust ready');
-		return true;
-	} catch (e) {
+	if (typeof Worker === 'undefined') {
 		status = 'failed';
-		console.error('[rustSim] init failed — agents will not move (no JS fallback). Did you run `pnpm build:wasm`?', e);
-		return false;
+		return false; // not in a browser (SSR / no worker support) — the app is client-only so this shouldn't hit
 	}
-}
-
-/** Rebuild the memory views if the WASM buffer grew (detached) or the agent count changed. */
-function refreshViews(): void {
-	if (!sim || !wasm) return;
-	const c = sim.count();
-	if (viewBuf === wasm.memory.buffer && viewCount === c) return;
-	viewBuf = wasm.memory.buffer;
-	viewCount = c;
-	xs = new Float32Array(viewBuf, sim.xs_ptr(), c);
-	zs = new Float32Array(viewBuf, sim.zs_ptr(), c);
-	headings = new Float32Array(viewBuf, sim.headings_ptr(), c);
-	healths = new Float32Array(viewBuf, sim.healths_ptr(), c);
-	flags = new Uint32Array(viewBuf, sim.flags_ptr(), c);
-	behaviors = new Uint8Array(viewBuf, sim.behaviors_ptr(), c);
-	progress = new Float32Array(viewBuf, sim.progress_ptr(), c);
-}
-
-/** Spawn any newly-registered agents into the Rust world (at their current pose → continuity on hot-swap). */
-function syncRoster(): void {
-	if (!sim) return;
-	agentManager.forEach((m) => {
-		if (slotOf.has(m)) return;
-		const code = KIND_CODE[m.kind] ?? 0;
-		const i = sim!.spawn(m.agent.x, m.agent.z, code, m.radius, m.seedId);
-		if (m.companion) sim!.set_companion(i); // the player's pet → follows you, won't flee you
-		if (m.juvenile) sim!.set_breed_cooldown(i, sim!.juvenile_cd()); // a newborn → must mature before it breeds
-		slotOf.set(m, i);
-		tracked[i] = m;
+	status = 'loading';
+	return new Promise<boolean>((resolve) => {
+		try {
+			worker = new Worker(new URL('./worldsim.worker.ts', import.meta.url), { type: 'module' });
+			worker.onmessage = (e: MessageEvent<WorkerMsg>) => {
+				const d = e.data;
+				if (d.type === 'ready') {
+					status = 'ready';
+					if (pendingObstacles) worker!.postMessage({ type: 'obstacles', flat: pendingObstacles } satisfies OutMsg);
+					console.info('[rustSim] engine=rust ready (worker)');
+					resolve(true);
+				} else if (d.type === 'failed') {
+					status = 'failed';
+					console.error('[rustSim] worker init failed — agents will not move (no fallback). Did you run `pnpm build:wasm`?', d.error);
+					resolve(false);
+				} else if (d.type === 'snap') {
+					snap = d; // newest snapshot — applied on the next tickRust
+				}
+			};
+			worker.onerror = (err) => {
+				status = 'failed';
+				console.error('[rustSim] worker error', err.message);
+				resolve(false);
+			};
+			worker.postMessage({ type: 'init', base, obstacles: pendingObstacles } satisfies OutMsg);
+		} catch (e) {
+			status = 'failed';
+			console.error('[rustSim] could not spawn the sim worker', e);
+			resolve(false);
+		}
 	});
 }
 
-/** Current danger imminence (0..1) from the Rust core, for the UI vignette in rust mode (0 until ready). */
+/** Current danger imminence (0..1), for the UI vignette in rust mode (0 until ready). */
 export function rustDanger(): number {
-	return sim ? sim.danger() : 0;
+	return lastDanger;
+}
+
+/** Live fish positions → a fresh transferable buffer (the worker uses them to lure an idle cat to the bank). */
+function collectFish(): Float64Array {
+	const out = new Float64Array(fishRegistry.count * 2);
+	let i = 0;
+	fishRegistry.forEach((f) => {
+		out[i++] = f.x;
+		out[i++] = f.z;
+	});
+	return out;
 }
 
 /**
- * One fixed-DT tick driven by the Rust core. Mirrors the JS tick's contract: snapshot each agent's pose for
- * render interpolation (as agents.svelte.ts does before moving), advance the sim, then copy transforms + the
- * dead/asleep flags back onto the `ManagedAgent`s. Call once per emitted clock tick (like `agentManager.tick`).
+ * One fixed-DT tick. Mirrors the old synchronous contract from the caller's view (AgentSystem still calls this
+ * once per emitted clock tick), but the heavy lifting now happens in the worker: here we (1) APPLY the latest
+ * snapshot onto the ManagedAgents — savePrev → set pose → the renderers interpolate; (2) diff the roster into
+ * spawn/despawn commands; (3) post the next step to the worker. The snapshot for THIS step arrives before the
+ * next frame, so we run ~1 tick behind — invisible at ambient speeds.
  */
 export function tickRust(dt: number): void {
-	if (!sim || !wasm) return;
-	syncRoster();
-	sim.set_player(playerState.pos[0], playerState.pos[2]);
-	sim.set_night(agentManager.nightValue);
-	feedFish();
-	// snapshot prev pose BEFORE the step so interpolate(alpha) blends prev→new (mirrors agents.svelte.ts:428)
-	for (let i = 0; i < tracked.length; i++) tracked[i]?.agent.savePrev();
-	sim.step(dt);
-	// drain this step's NEWBORNS (Rust bred them) → queue for Scene to turn into world-objects (which then mount
-	// + spawn back into the sim as juveniles). Read the flat [kindCode,x,z,…] births buffer.
-	const nb = sim.birth_count();
-	if (nb > 0) {
-		const b = new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 3);
-		for (let k = 0; k < nb; k++) {
-			pendingBirths.push({ kind: KIND_NAME[b[k * 3]] ?? 'rabbit', x: b[k * 3 + 1], z: b[k * 3 + 2] });
-		}
+	if (!worker || status !== 'ready') return;
+	const s = snap;
+	const hasSnap = s !== null && s.seq !== appliedSeq;
+	if (hasSnap) {
+		appliedSeq = s!.seq;
+		lastDanger = s!.danger;
+		// drain this snapshot's NEWBORNS (Rust bred them) → Scene turns each into a world-object (which mounts +
+		// spawns back into the sim as a juvenile). Flat [kindCode,x,z,…].
+		const nb = s!.births.length / 3;
+		for (let k = 0; k < nb; k++) pendingBirths.push({ kind: KIND_NAME[s!.births[k * 3]] ?? 'rabbit', x: s!.births[k * 3 + 1], z: s!.births[k * 3 + 2] });
 	}
-	refreshViews();
+
+	const px = playerState.pos[0];
+	const pz = playerState.pos[2];
 	const TAU = Math.PI * 2;
 	let huntX = 0;
 	let huntZ = 0;
-	let huntD2 = Infinity; // nearest active player-hunter → for the "it's behind you" dread cue
+	let huntD2 = Infinity; // nearest active player-hunter → the "it's behind you" dread cue
+
+	const spawns: Spawn[] = [];
+	const despawns: number[] = [];
+
+	// newly-registered agents → predict their slot (append-only) + queue a spawn command
+	agentManager.forEach((m) => {
+		if (slotOf.has(m)) return;
+		const slot = nextSlot++;
+		slotOf.set(m, slot);
+		tracked[slot] = m;
+		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile });
+	});
+
+	// one pass over the roster: detect despawns + (if a fresh snapshot arrived) mirror poses/flags onto agents
 	for (let i = 0; i < tracked.length; i++) {
 		const m = tracked[i];
 		if (!m) continue;
 		if (!agentManager.has(m)) {
-			// its component unmounted (object removed / world cleared) → drop it from the Rust sim so it doesn't
-			// linger as an invisible ghost that still steers the food chain. Slot is retired (read-back is by index).
-			sim.despawn(i);
+			// its component unmounted (object removed / world cleared) → tell the worker to drop it from the sim so
+			// it doesn't linger as an invisible ghost still steering the food chain. Slot is retired (index-stable).
+			despawns.push(i);
 			slotOf.delete(m);
 			tracked[i] = undefined as unknown as ManagedAgent;
 			continue;
 		}
+		if (!hasSnap || i >= s!.count) continue;
 		const a = m.agent;
-		const nx = xs[i];
-		const nz = zs[i];
-		const nh = headings[i];
-		// derive speed + turnRate from the per-tick delta (prev pose was snapshot by savePrev above) so the
-		// renderers' gait (leg swing) + banking animate — the Rust read-back gives pose, not velocity.
+		a.savePrev(); // prev = last applied snapshot pose; current ← this snapshot → renderers interpolate prev→new
+		const nx = s!.xs[i];
+		const nz = s!.zs[i];
+		const nh = s!.headings[i];
+		// derive speed + turnRate from the per-tick delta so the gait (leg swing) + banking animate
 		a.speed = Math.hypot(nx - a.prevX, nz - a.prevZ) / dt;
 		let dh = nh - a.prevHeading;
 		while (dh > Math.PI) dh -= TAU;
@@ -223,64 +226,47 @@ export function tickRust(dt: number): void {
 		a.x = nx;
 		a.z = nz;
 		a.heading = nh;
-		a.behavior = BEHAVIORS[behaviors[i]] ?? 'wander'; // idle pose (sit/groom/pounce/…) for the near renderers
-		a.progress = progress[i]; // 0..1 through that behaviour → groom cycle / pounce arc / lookAround sweep
-		m.health = healths[i];
-		const f = flags[i];
+		a.behavior = BEHAVIORS[s!.behaviors[i]] ?? 'wander';
+		a.progress = s!.progress[i];
+		m.health = s!.healths[i];
+		const f = s!.flags[i];
 		m.dead = (f & 1) !== 0;
 		m.corpseAge = m.dead ? m.corpseAge + dt : 0; // age corpses → Scene's reaper sinks + removes the old ones
 		m.asleep = (f & 2) !== 0;
 		m.hunting = (f & 8) !== 0; // bit3 → this apex is charging the player → the view glares its eyes
 		if (m.hunting) {
-			const dx = nx - playerState.pos[0];
-			const dz = nz - playerState.pos[2];
+			const dx = nx - px;
+			const dz = nz - pz;
 			const d2 = dx * dx + dz * dz;
 			if (d2 < huntD2) ((huntD2 = d2), (huntX = nx), (huntZ = nz));
 		}
 	}
-	// IS THE HUNTER BEHIND YOU? The dread of an unseen pursuer. Player forward = (-sin yaw, -cos yaw) (matches
-	// Player.svelte movement); dot with the direction to the nearest hunter < 0 → it's in your back hemisphere.
-	let behindTarget = 0;
-	if (huntD2 < Infinity) {
-		const yaw = playerState.yaw;
-		const fx = -Math.sin(yaw);
-		const fz = -Math.cos(yaw);
-		let tx = huntX - playerState.pos[0];
-		let tz = huntZ - playerState.pos[2];
-		const tl = Math.hypot(tx, tz) || 1;
-		tx /= tl;
-		tz /= tl;
-		if (fx * tx + fz * tz < -0.15) behindTarget = 1; // small deadzone so a side-on hunter doesn't flicker it
+
+	// post the step to the worker (transfer the fish buffer — the worker takes ownership)
+	const fish = collectFish();
+	worker.postMessage({ type: 'tick', seq: ++postSeq, dt, px, pz, night: agentManager.nightValue, fish, spawns, despawns } satisfies OutMsg, [fish.buffer]);
+
+	// IS THE HUNTER BEHIND YOU? (recompute the target only when a fresh snapshot gave us hunter positions; ease
+	// every tick for smoothness). Player forward = (-sin yaw, -cos yaw); dot with the dir to the nearest hunter
+	// < 0 → it's in your back hemisphere. The dread of an unseen pursuer.
+	if (hasSnap) {
+		behindTarget = 0;
+		if (huntD2 < Infinity) {
+			const yaw = playerState.yaw;
+			const fx = -Math.sin(yaw);
+			const fz = -Math.cos(yaw);
+			let tx = huntX - px;
+			let tz = huntZ - pz;
+			const tl = Math.hypot(tx, tz) || 1;
+			tx /= tl;
+			tz /= tl;
+			if (fx * tx + fz * tz < -0.15) behindTarget = 1; // small deadzone so a side-on hunter doesn't flicker it
+		}
 	}
 	playerState.dangerBehind += (behindTarget - playerState.dangerBehind) * Math.min(1, 4 * dt); // eased
-	// the Rust read-back has positions but not the per-agent perf flags — recompute LOD + shadow budget so the
-	// impostor/shadow culling (and thus FPS) is identical to the JS path.
-	agentManager.assignPerfFlags(playerState.pos[0], playerState.pos[2]);
-	// mirror the eased Rust danger onto playerState so the UI vignette swells/fades (the JS tick — which would
-	// otherwise write this — doesn't run in rust mode).
-	playerState.danger = sim.danger();
-}
 
-// reused buffer for the lure points fed to the Rust sim each tick (fish move every frame, so re-feed)
-let fishScratch = new Float64Array(0);
-
-/** Push the live lake-fish positions into the Rust sim so an idle cat is lured to the bank (the pond obstacle
- *  then stops it dry). Reuses a scratch buffer; feeds an empty set to clear when the last school unregisters. */
-function feedFish(): void {
-	if (!sim) return;
-	const fc = fishRegistry.count;
-	if (fc === 0) {
-		if (fishScratch.length > 0) {
-			fishScratch = new Float64Array(0);
-			sim.set_fish(fishScratch);
-		}
-		return;
-	}
-	if (fishScratch.length !== fc * 2) fishScratch = new Float64Array(fc * 2);
-	let i = 0;
-	fishRegistry.forEach((f) => {
-		fishScratch[i++] = f.x;
-		fishScratch[i++] = f.z;
-	});
-	sim.set_fish(fishScratch);
+	// the worker produced positions but not the per-agent perf flags — recompute LOD + shadow budget so the
+	// impostor/shadow culling (and thus FPS) is unchanged. Cheap, no alloc; runs every tick (player moves).
+	agentManager.assignPerfFlags(px, pz);
+	playerState.danger = lastDanger; // mirror the eased Rust danger onto playerState so the UI vignette swells/fades
 }
