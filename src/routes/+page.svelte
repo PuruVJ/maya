@@ -9,6 +9,7 @@
 	import EditController from '$lib/components/EditController.svelte';
 	import AdaptiveResolution from '$lib/components/AdaptiveResolution.svelte';
 	import { perf } from '$lib/perf.svelte';
+	import { gpu } from '$lib/gpu.svelte';
 	import BuildBar from '$lib/components/BuildBar.svelte';
 	import FpsPanel from '$lib/components/FpsPanel.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
@@ -44,6 +45,7 @@
 	// Until a shader is ported it simply renders with its base material on this path (plain, not broken). We flip
 	// the default only once WebGPU reaches visual parity.
 	const useWebGPU = typeof location !== 'undefined' && /(?:[?#&])webgpu(?:\b|=)/.test(location.search + location.hash);
+	gpu.webgpu = useWebGPU; // publish to the shader gates BEFORE any Canvas child mounts (set once, never changes)
 	// the renderer factory Threlte's <Canvas createRenderer> calls; undefined → Threlte builds its WebGLRenderer.
 	let createRenderer = $state<((canvas: HTMLCanvasElement) => WebGLRenderer) | undefined>(undefined);
 
