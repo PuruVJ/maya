@@ -14,7 +14,7 @@
 	import EcoStats from '$lib/components/EcoStats.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
-	import { demoWorld, emptyWorld } from '$lib/world';
+	import { demoWorld, emptyWorld, type World as WorldData } from '$lib/world';
 	import { encodeWorld, decodeWorld } from '$lib/share';
 	import { loadWorld, saveWorld } from '$lib/worldStore';
 	import { SKY_BG } from '$lib/kinds';
@@ -80,6 +80,23 @@
 	// when you change it, not every second. replaceState (no history spam); skipped when the hash is the same.
 	// the player's live pose → packed into a SHARE link (the Share button) so a shared world reopens where you stood
 	const playerPose = () => ({ x: playerState.pos[0], z: playerState.pos[2], yaw: playerState.yaw });
+	// A save snapshot that captures the LIVE moment, not the placed-at spots: each creature's world-object pos is
+	// rewritten to where it ACTUALLY is now (so a reloaded world resumes mid-wander, not reset to spawn), dead ones
+	// are dropped (don't resurrect a corpse), and the player's pose rides along in `start` so you reopen standing
+	// where you left. Operates on a detached $state.snapshot copy — the live world is untouched.
+	function liveWorldSnapshot(): WorldData {
+		const snap = $state.snapshot(world) as WorldData;
+		const live = agentManager.liveSnapshot(); // objId → live {x, z, dead, asleep}
+		snap.objects = snap.objects.filter((o) => {
+			const ls = live.get(o.id);
+			if (!ls) return true; // a static prop / house / tree → keep as placed
+			if (ls.dead) return false; // a creature that died → don't persist it back to life
+			o.pos = [ls.x, o.pos[1], ls.z]; // a live creature → save where it wandered to
+			return true;
+		});
+		snap.start = playerPose(); // resume the player where they stood (Player restores world.start on load)
+		return snap;
+	}
 	// EDITS → debounced save to the world store (local IndexedDB cache + best-effort sync to the shared backend).
 	// JSON.stringify gives deep dep-tracking; the world only mutates on edits (animal movement lives in the agent
 	// manager, not world.objects), so this fires on builds/moves/paint, NOT frames — and never touches the URL.
@@ -88,15 +105,34 @@
 		JSON.stringify(world);
 		if (!liveUrl) return;
 		clearTimeout(editTimer);
-		editTimer = setTimeout(() => saveWorld($state.snapshot(world)), 500);
+		editTimer = setTimeout(() => saveWorld(liveWorldSnapshot()), 500);
 		return () => clearTimeout(editTimer);
 	});
-	// (b) REMOVED for perf (2026-06-21) — the 1 Hz live-snapshot re-encode (gzip the WHOLE world + every agent
-	// position + replaceState) was a periodic main-thread STALL every second whenever animals were present
-	// (i.e. effectively always), dropping the frame rate even while standing still. Live agent POSITIONS no
-	// longer persist across reload (they respawn at their placed spots — a minor nicety); BUILDS still persist
-	// via the on-edit effect above, and Share captures the live moment on demand. The durable, ever-living
-	// world belongs in the DB (docs/big-world.md), not a per-second URL gzip. See docs/sim-decisions.md C2.
+
+	// LIVE-WORLD PERSISTENCE — agents wander in the sim (not in world.objects), so the on-edit save above never
+	// captures their movement; a reload used to reset every creature to its placed spot and the player to spawn.
+	// So: (a) a low-frequency periodic save (~15 s — NOT the old 1 Hz URL-gzip that stalled the frame; this is an
+	// async DB write of a detached snapshot) snapshots where everyone has wandered, and (b) a save the moment the
+	// tab is hidden / unloaded captures the freshest pose right before you leave. Result: the world resumes mid-life.
+	$effect(() => {
+		if (!liveUrl) return;
+		const persist = () => saveWorld(liveWorldSnapshot());
+		const id = setInterval(persist, 15000);
+		const onHide = () => {
+			if (document.visibilityState === 'hidden') persist();
+		};
+		document.addEventListener('visibilitychange', onHide);
+		window.addEventListener('pagehide', persist);
+		return () => {
+			clearInterval(id);
+			document.removeEventListener('visibilitychange', onHide);
+			window.removeEventListener('pagehide', persist);
+		};
+	});
+	// HISTORY: live positions once re-encoded into the #w= URL every 1 Hz (gzip the WHOLE world + replaceState) —
+	// a per-second main-thread STALL, so it was cut (2026-06-21) and positions stopped persisting. The effect above
+	// brings them back the RIGHT way (big-world.md): an async DB snapshot at 15 s / on-hide, no URL, no per-frame
+	// cost. See docs/sim-decisions.md C2.
 
 	function reset() {
 		if (!confirm('Reset to the demo world? This clears everything you’ve built here.')) return;
