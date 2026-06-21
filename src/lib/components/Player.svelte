@@ -51,22 +51,30 @@
 	let lastPointerX = 0;
 	let lastPointerY = 0;
 	let sprinting = false; // Shift toggles; only matters while moving
-	// HMR RESUME: if the player singleton is already live (a code change re-mounted only THIS component, not a
-	// real reload), start from the live position — not the default spawn — so a hot-reload doesn't teleport you
-	// home. On a genuine fresh load, `live` is false and we begin at spawn, then the `start` effect restores the
-	// saved pose below.
-	let px = playerState.live ? playerState.pos[0] : 0;
-	let py = playerState.live ? playerState.pos[1] : 0.9;
-	let pz = playerState.live ? playerState.pos[2] : 6;
-	let moved = playerState.live; // already-live → treat as "taken control" so the saved-start restore is skipped
-	if (playerState.live) yaw = playerState.yaw;
+	// HMR / RELOAD RESUME — read the live pose from sessionStorage (survives a Vite module re-eval AND a reload,
+	// unlike a module singleton), so a code change no longer teleports you back to spawn. A SHARE link (#w=) is the
+	// exception: there the URL's start pose is authoritative, so we ignore the stored pose.
+	let _resume: { x: number; y: number; z: number; yaw: number } | null = null;
+	if (typeof location === 'undefined' || !/[#&]w=/.test(location.hash)) {
+		try {
+			const s = sessionStorage.getItem('playerPose');
+			if (s) _resume = JSON.parse(s);
+		} catch {
+			/* unavailable */
+		}
+	}
+	let px = _resume ? _resume.x : 0;
+	let py = _resume ? _resume.y : 0.9;
+	let pz = _resume ? _resume.z : 6;
+	let moved = !!_resume; // resuming → skip the saved-start restore below
+	if (_resume) yaw = _resume.yaw;
 
 	// Restore the saved player pose from a shared/reloaded link (world.start, decoded from the URL) the
-	// moment it arrives — as long as you haven't moved yet (and aren't resuming a live HMR session) — so you
+	// moment it arrives — as long as you haven't moved yet (and aren't resuming a stored live session) — so you
 	// reopen standing where you left off.
 	$effect(() => {
 		const s = world.start;
-		if (s && !moved && !playerState.live) {
+		if (s && !moved) {
 			px = s.x;
 			pz = s.z;
 			yaw = s.yaw;

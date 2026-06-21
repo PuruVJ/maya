@@ -19,15 +19,23 @@ export class PlayerState {
 	// one-shot teleport request (e.g. the "go home" command sets a target); Player consumes + clears it next
 	// frame. Plain field (polled each frame), not $state.
 	teleportTo: [number, number, number] | null = null;
-	// has the player ever taken control? This singleton survives an HMR re-mount (only the Player COMPONENT
-	// remounts on a code change), so it lets Player resume from the live pos instead of snapping back to the
-	// stale saved `start` — which is what made every code change teleport you home.
-	live = false;
+	#lastSave = 0;
 
 	place(pos: [number, number, number], yaw: number) {
 		this.pos = pos;
 		this.yaw = yaw;
-		this.live = true;
+		// Mirror the live pose into sessionStorage (throttled). It survives an HMR module re-eval AND a reload —
+		// unlike a module singleton, which Vite re-creates on hot updates — so Player can resume here instead of
+		// snapping back to spawn/saved-start. THIS is what fixes "every code change teleports me home".
+		const now = typeof performance !== 'undefined' ? performance.now() : 0;
+		if (now - this.#lastSave > 350) {
+			this.#lastSave = now;
+			try {
+				sessionStorage.setItem('playerPose', JSON.stringify({ x: pos[0], y: pos[1], z: pos[2], yaw }));
+			} catch {
+				/* private mode / unavailable → resume just won't work, no harm */
+			}
+		}
 	}
 
 	// FSM: derive the movement state from this frame's facts
