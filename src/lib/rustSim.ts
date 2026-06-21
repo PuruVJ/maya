@@ -19,6 +19,18 @@ import { playerState } from './playerState.svelte';
 
 // kind string → the stable code the Rust `kind_from_code` expects (enum order: see crates/worldsim/src/eco.rs)
 const KIND_CODE: Record<string, number> = { rabbit: 0, cat: 1, kangaroo: 2, person: 3, lion: 4, dinosaur: 5 };
+const KIND_NAME = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] as const; // birth kindCode → kind
+
+// newborns from the Rust breeding pass (kind + position) → Scene drains them into world.objects each frame
+export type Birth = { kind: string; x: number; z: number };
+let pendingBirths: Birth[] = [];
+/** Pull (and clear) the babies bred since the last call — Scene turns each into a world-object. */
+export function drainBirths(): Birth[] {
+	if (pendingBirths.length === 0) return pendingBirths;
+	const out = pendingBirths;
+	pendingBirths = [];
+	return out;
+}
 
 // minimal self-typed surface of the generated wasm module — so svelte-check needs NO generated pkg files and
 // the default (JS) path never imports them. Mirrors the `#[wasm_bindgen] Sim` in crates/worldsim/src/lib.rs.
@@ -27,6 +39,10 @@ interface RustSim {
 	set_player(x: number, z: number): void;
 	set_companion(i: number): void;
 	despawn(i: number): void;
+	set_breed_cooldown(i: number, cd: number): void;
+	juvenile_cd(): number;
+	birth_count(): number;
+	births_ptr(): number;
 	set_night(n: number): void;
 	set_fish(xz: Float64Array): void;
 	set_obstacles(flat: Float64Array): void;
@@ -143,6 +159,7 @@ function syncRoster(): void {
 		const code = KIND_CODE[m.kind] ?? 0;
 		const i = sim!.spawn(m.agent.x, m.agent.z, code, m.radius, m.seedId);
 		if (m.companion) sim!.set_companion(i); // the player's pet → follows you, won't flee you
+		if (m.juvenile) sim!.set_breed_cooldown(i, sim!.juvenile_cd()); // a newborn → must mature before it breeds
 		slotOf.set(m, i);
 		tracked[i] = m;
 	});
@@ -167,6 +184,15 @@ export function tickRust(dt: number): void {
 	// snapshot prev pose BEFORE the step so interpolate(alpha) blends prev→new (mirrors agents.svelte.ts:428)
 	for (let i = 0; i < tracked.length; i++) tracked[i]?.agent.savePrev();
 	sim.step(dt);
+	// drain this step's NEWBORNS (Rust bred them) → queue for Scene to turn into world-objects (which then mount
+	// + spawn back into the sim as juveniles). Read the flat [kindCode,x,z,…] births buffer.
+	const nb = sim.birth_count();
+	if (nb > 0) {
+		const b = new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 3);
+		for (let k = 0; k < nb; k++) {
+			pendingBirths.push({ kind: KIND_NAME[b[k * 3]] ?? 'rabbit', x: b[k * 3 + 1], z: b[k * 3 + 2] });
+		}
+	}
 	refreshViews();
 	const TAU = Math.PI * 2;
 	let huntX = 0;

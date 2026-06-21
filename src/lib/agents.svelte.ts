@@ -86,6 +86,7 @@ export interface ManagedAgent {
 	dead: boolean; // caught → corpse (mirrored from Rust)
 	asleep: boolean; // resting (mirrored from Rust)
 	hunting: boolean; // this apex is charging YOU right now (mirrored from Rust) → its eyeshine glares red
+	juvenile?: boolean; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown when it spawns into the sim
 	sleepTimer: number; // seconds left in the current sleep
 	chaseOX: number; // where the current prey-chase began (NaN = none)
 	chaseOZ: number;

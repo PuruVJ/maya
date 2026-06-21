@@ -12,6 +12,7 @@ export interface WorldObject {
 	// way. `pos` already holds the live position at encode time; these flag its condition.
 	dead?: boolean;
 	asleep?: boolean;
+	juvenile?: boolean; // a Rust-bred newborn → spawns into the sim on a maturation cooldown (can't breed yet)
 }
 
 export interface Zone {

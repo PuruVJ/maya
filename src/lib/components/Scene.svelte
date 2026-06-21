@@ -37,6 +37,7 @@
 	import { SKY_FOG, kindDef } from '$lib/kinds';
 	import { treeAt, treeRadius, onPath, SCATTER_STEP } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
+	import { drainBirths } from '$lib/rustSim';
 	import { agentManager } from '$lib/agents.svelte';
 	import { setRustObstacles } from '$lib/rustSim';
 	import { playerState } from '$lib/playerState.svelte';
@@ -147,6 +148,7 @@
 	const REVEAL_CAP = 6; // max mounts/frame — each is real work (meshes + an agent), so cap to avoid a hitch
 	const REVEAL_FRAMES = 12; // ...but catch a big backlog up within ~this many frames (≈0.2 s) so it's not a slow drip
 	let revealed = $state(0);
+	let babyN = 0; // unique-id counter for Rust-bred newborns (id 'b<n>' → distinct from the engine's 'o<n>')
 
 	// LAZY / DISTANCE-CAPPED REVEAL — only realize STATIC builds (houses/trees/props/lamps) NEAR the player; far
 	// ones stay unmounted until you approach (they pop in front of you, emerging from the fog/curve). So reloading
@@ -173,6 +175,13 @@
 	let reflashN = 0; // return strokes left in the current strike (real lightning FLICKERS, it doesn't single-flash)
 	let reflashCd = 0; // seconds to the next return stroke
 	useTask((dt) => {
+		// REPRODUCTION: Rust bred new animals → turn each into a world-object (a baby of that kind), which mounts
+		// its renderer + spawns into the sim (as a maturing juvenile). The per-kind cap keeps this bounded.
+		const babies = drainBirths();
+		for (const b of babies) {
+			world.objects.push({ id: 'b' + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true });
+		}
+
 		wind.uTime.value += dt; // the ONE shared foliage clock — Tree + AmbientScatter read it (never tick it)
 		weather.uWet.value = world.sky === 'fog' ? 1 : 0; // shared rain-wetness → prop materials soak in the rain
 		weather.uSnow.value = world.ground === 'snow' ? 1 : 0; // shared snow → up-faces of props/rocks/bushes cap white

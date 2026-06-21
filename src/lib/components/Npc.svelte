@@ -39,6 +39,7 @@
 		const m = makeManaged(agent, 'person', 0.4 * objScale, MENU, obj.id, seedId); // radius scales → collision + far impostor
 		if (obj.dead) m.dead = true; // restore live state from a shared link
 		else if (obj.asleep) ((m.asleep = true), (m.sleepTimer = 6));
+		if (obj.juvenile) m.juvenile = true; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown
 		return m;
 	});
 	$effect(() => {

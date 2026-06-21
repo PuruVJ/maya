@@ -76,6 +76,15 @@ const RECOVER: f64 = 0.16; // /s at rest (prey/people only), × endurance
 // idling predator stays hungry → keeps hunting.
 const CARN_RECOVER: f64 = 0.16; // /s a not-chasing carnivore recovers toward CARN_IDLE
 const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settles at (just below HUNGRY_LO=0.5)
+// REPRODUCTION (the world replenishes itself): two same-kind ADULTS, calm + well-fed, adjacent + off cooldown,
+// under the per-kind cap + not over-crowded → a baby is born between them; both parents pay energy + a cooldown.
+const BREED_ENERGY: f64 = 0.72; // stamina a parent needs to spare (prey when rested; a predator after a meal)
+const BREED_COOLDOWN: f64 = 24.0; // seconds before a parent can breed again
+const BREED_R2: f64 = 3.2 * 3.2; // a mate within this range
+const BREED_COST: f64 = 0.42; // stamina each parent spends on the birth (no free lunch)
+const BREED_CROWD: u32 = 6; // density suppression — don't breed when this crowded (avoids runaway in a clump)
+const POP_CAP: usize = 48; // max living of one kind (resource limit → births fail at the cap, no explosion)
+const JUVENILE_CD: f64 = 28.0; // a newborn carries this breed-cooldown → it must mature before it can breed
 const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
 const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
 const HEAL: f64 = 0.04; // health/s regained while unharmed
@@ -138,6 +147,7 @@ pub struct ManagedAgent {
     pub bully: Option<usize>, // who last wounded it in a rival fight → it flees this one while spooked
     pub companion: bool,      // the player's pet → its leash tracks the player (follows) and it doesn't fear you
     pub hunting: bool,        // this apex is actively charging the PLAYER this tick → the view glares its eyes
+    pub breed_cd: f64,        // seconds until it can breed again (>0 = on cooldown / a maturing juvenile)
     pub crowd: u32,           // flock neighbours this tick
 }
 
@@ -237,6 +247,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         bully: None,
         companion: false,
         hunting: false,
+        breed_cd: 0.0,
         crowd: 0,
     }
 }
@@ -311,6 +322,7 @@ pub struct World {
     ob_grid: SpatialHashGrid,      // obstacle lookup grid (cell = OBSTACLE_CELL), rebuilt on set_obstacles
     has_obstacles: bool,
     ob_scratch: Vec<u32>,          // reused obstacle-query scratch (mem::take'd in → no per-agent alloc)
+    births: Vec<f32>,              // this tick's births, flat [kindCode, x, z, …] → JS spawns the babies
 }
 
 impl Default for World {
@@ -341,6 +353,7 @@ impl World {
             ob_grid: SpatialHashGrid::new(OBSTACLE_CELL),
             has_obstacles: false,
             ob_scratch: Vec::new(),
+            births: Vec::new(),
         }
     }
 
@@ -484,11 +497,22 @@ impl World {
 
     /// Drive the sim from real elapsed seconds (advances the clock; runs each emitted fixed-DT tick).
     pub fn step(&mut self, real_dt: f64) {
+        self.births.clear(); // births accumulate across this step's ticks; JS drains them after step()
         let n = self.clock.advance(real_dt);
         for k in 0..n {
             let tick = self.clock.tick - (n - 1 - k) as i64;
             self.tick_once(tick as i32);
         }
+    }
+
+    /// This step's newborns, flat [kindCode, x, z, …] — JS reads this after step() and spawns the babies.
+    pub fn births(&self) -> &[f32] {
+        &self.births
+    }
+
+    /// The maturation cooldown JS should stamp on a newborn (single source of truth for both sides).
+    pub fn juvenile_cd(&self) -> f64 {
+        JUVENILE_CD
     }
 
     /// One fixed-DT sim step at the given integer tick (for the addressed rng). grid → flock → step.
@@ -912,6 +936,9 @@ impl World {
             if self.agents[i].wake_cd > 0.0 {
                 self.agents[i].wake_cd -= DT;
             }
+            if self.agents[i].breed_cd > 0.0 {
+                self.agents[i].breed_cd -= DT; // post-birth / juvenile maturation cooldown ebbs
+            }
             // an exhausted carnivore lies down to sleep it off — but never with a threat / nearby peer / fresh
             // scare keeping it on edge, and not right after waking (wake_cd → anti sleep/wake flip).
             if is_carnivore
@@ -925,6 +952,37 @@ impl World {
             {
                 self.agents[i].asleep = true;
                 self.agents[i].sleep_timer = sleep_secs(self.agents[i].kind);
+            }
+        }
+
+        // 7.5 REPRODUCTION — two same-kind ADULTS, calm + well-fed + adjacent, breed a baby (queued to `births`,
+        // spawned JS-side; the buffer is cleared per step() so it accumulates across the step's ticks). Per-kind
+        // population cap → births fail at the cap (no explosion). breed_cd marks who's paired this tick.
+        let mut pop = [0usize; 6];
+        for m in self.agents.iter() {
+            if !m.dead {
+                pop[m.kind as usize] += 1;
+            }
+        }
+        for i in 0..n {
+            if !self.breed_ready(i) {
+                continue;
+            }
+            let kc = self.agents[i].kind as usize;
+            if pop[kc] >= POP_CAP {
+                continue;
+            }
+            if let Some(j) = self.find_mate(i) {
+                let (ix, iz) = (self.agents[i].agent.x, self.agents[i].agent.z);
+                let (jx, jz) = (self.agents[j].agent.x, self.agents[j].agent.z);
+                self.births.push(kc as f32);
+                self.births.push(((ix + jx) * 0.5) as f32); // born between the parents
+                self.births.push(((iz + jz) * 0.5) as f32);
+                self.agents[i].breed_cd = BREED_COOLDOWN;
+                self.agents[j].breed_cd = BREED_COOLDOWN;
+                self.agents[i].stamina = (self.agents[i].stamina - BREED_COST).max(0.0);
+                self.agents[j].stamina = (self.agents[j].stamina - BREED_COST).max(0.0);
+                pop[kc] += 1; // the baby counts → caps births this tick too
             }
         }
 
@@ -948,6 +1006,46 @@ impl World {
                 }
                 self.resolve_obstacles(i);
             }
+        }
+    }
+
+    /// Is agent `i` ready to breed this tick? An adult (off cooldown), calm (no threat / not mobbed / not
+    /// spooked / awake), well-fed (spare stamina), and not over-crowded.
+    fn breed_ready(&self, i: usize) -> bool {
+        let m = &self.agents[i];
+        !m.dead
+            && !m.asleep
+            && m.breed_cd <= 0.0
+            && m.stamina > BREED_ENERGY
+            && !m.mobbed
+            && m.spooked <= 0.0
+            && m.crowd < BREED_CROWD
+            && self.transient[i].threat.is_none()
+            && !self.transient[i].near_predator
+    }
+
+    /// Nearest same-kind, breed-ready mate within BREED_R2 (grid query). Skips `i` itself.
+    fn find_mate(&self, i: usize) -> Option<usize> {
+        let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
+        let kind = self.agents[i].kind;
+        let mut found: Option<usize> = None;
+        self.grid.for_each_neighbor(ax, az, |j| {
+            let j = j as usize;
+            if found.is_some() || j == i || self.agents[j].kind != kind {
+                return;
+            }
+            let d2 = (self.agents[j].agent.x - ax).powi(2) + (self.agents[j].agent.z - az).powi(2);
+            if d2 <= BREED_R2 && self.breed_ready(j) {
+                found = Some(j);
+            }
+        });
+        found
+    }
+
+    /// Mark a spawned agent (a newborn) with a maturation cooldown so it can't breed until it grows up.
+    pub fn set_breed_cooldown(&mut self, i: usize, cd: f64) {
+        if let Some(m) = self.agents.get_mut(i) {
+            m.breed_cd = cd;
         }
     }
 
@@ -1648,6 +1746,38 @@ mod tests {
         }
         let d1 = (6.0 - w.agents[cat].agent.x).hypot(-w.agents[cat].agent.z);
         assert!(d1 < d0 - 1.0, "an idle cat is drawn to the lake fish (dist {d0} → {d1})");
+    }
+
+    #[test]
+    fn two_well_fed_adults_breed_once() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4); // park the player far
+        w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2); // adjacent (< BREED_R2), both full stamina (prey)
+        for t in 1..=4 {
+            w.tick_once(t);
+        }
+        assert!(w.births().len() >= 3, "two adjacent well-fed adults breed a baby");
+        assert_eq!(w.births()[0], 0.0, "the baby is a rabbit (kind code 0)");
+        // both parents are on breed cooldown now → NO explosion (still just the one birth)
+        for t in 5..=40 {
+            w.tick_once(t);
+        }
+        assert_eq!(w.births().len(), 3, "parents on cooldown → exactly one birth, not a runaway");
+    }
+
+    #[test]
+    fn a_hungry_or_juvenile_agent_does_not_breed() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
+        w.agents[a].stamina = 0.3; // hungry → not breed-ready
+        w.set_breed_cooldown(b, JUVENILE_CD); // a juvenile, still maturing
+        for t in 1..=6 {
+            w.tick_once(t);
+        }
+        assert_eq!(w.births().len(), 0, "a hungry parent + a juvenile mate → no birth");
     }
 
     #[test]

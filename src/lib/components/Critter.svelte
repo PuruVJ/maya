@@ -97,6 +97,7 @@
 		if (companion) m.companion = true; // manager won't scare it off, and it can't be your own pet's prey-panic
 		if (obj?.dead) m.dead = true; // restore live state from a shared link (a corpse stays a corpse)
 		else if (obj?.asleep) ((m.asleep = true), (m.sleepTimer = 6));
+		if (obj?.juvenile) m.juvenile = true; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown
 		return m;
 	});
 	$effect(() => {
