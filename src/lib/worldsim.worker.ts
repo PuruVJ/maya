@@ -23,6 +23,7 @@ interface RustSim {
 	set_companion(i: number): void;
 	despawn(i: number): void;
 	set_breed_cooldown(i: number, cd: number): void;
+	set_gene(i: number, gene: number): void;
 	juvenile_cd(): number;
 	birth_count(): number;
 	births_ptr(): number;
@@ -49,7 +50,7 @@ interface WasmModule {
 }
 
 // the main thread sends one of these; we reply with 'ready' / 'failed' / 'snap'
-type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean };
+type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number };
 type InMsg =
 	| { type: 'init'; base: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
@@ -119,6 +120,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 		if (idx !== s.slot) console.warn('[worldsim.worker] slot desync: rust', idx, '!= predicted', s.slot);
 		if (s.companion) sim.set_companion(idx);
 		if (s.juvenile) sim.set_breed_cooldown(idx, sim.juvenile_cd()); // a newborn → must mature before it breeds
+		if (s.gene !== 1) sim.set_gene(idx, s.gene); // a bred baby's inherited vigor (genetics)
 	}
 
 	sim.set_player(d.px, d.pz);
@@ -136,7 +138,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 	const sb = behaviors.slice();
 	const sp = progress.slice();
 	const nb = sim.birth_count();
-	const births = nb > 0 ? new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 3).slice() : new Float32Array(0);
+	const births = nb > 0 ? new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 4).slice() : new Float32Array(0); // [kc,x,z,gene]×nb
 
 	ctx.postMessage(
 		{ type: 'snap', seq: d.seq, count: viewCount, xs: sx, zs: sz, headings: sh, healths: shp, flags: sf, behaviors: sb, progress: sp, births, danger: sim.danger() },

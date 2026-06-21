@@ -111,15 +111,19 @@ mod wasm_api {
         pub fn set_breed_cooldown(&mut self, i: usize, cd: f64) {
             self.world.set_breed_cooldown(i, cd);
         }
+        /// Apply a bred baby's inherited vigor gene (by index) — scales its speed (genetics/evolution).
+        pub fn set_gene(&mut self, i: usize, gene: f64) {
+            self.world.set_gene(i, gene);
+        }
         /// The cooldown JS should stamp on a newborn.
         pub fn juvenile_cd(&self) -> f64 {
             self.world.juvenile_cd()
         }
-        /// Newborns from the last step(): count of births (each is [kindCode, x, z]).
+        /// Newborns from the last step(): count of births (each is [kindCode, x, z, gene]).
         pub fn birth_count(&self) -> usize {
-            self.world.births().len() / 3
+            self.world.births().len() / 4
         }
-        /// Pointer to the flat births buffer [kindCode, x, z, …] (length = birth_count()*3) for a zero-copy read.
+        /// Pointer to the flat births buffer [kindCode, x, z, gene, …] (length = birth_count()*4) for a zero-copy read.
         pub fn births_ptr(&self) -> *const f32 {
             self.world.births().as_ptr()
         }

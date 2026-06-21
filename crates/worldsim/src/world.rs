@@ -102,6 +102,15 @@ const GRAZE_RATE: f64 = 0.16; // /s a calm herbivore on UNcrowded ground refuels
 const GRAZE_CROWD: f64 = 7.0; // herd size at which ground is fully overgrazed → grazing yields ~nothing
 const STARVE_DAMAGE: f64 = 0.05; // /s health bleeds while fullness is empty (~20 s of famine is fatal; slow enough to recover if food's found)
 const EAT_ENERGY: f64 = 0.7; // fullness a kill restores to the hunter
+
+// ── GENETICS (evolution) ────────────────────────────────────────────────────────────────────────────────────
+// A baby's VIGOR gene = the average of its parents' genes, ± a small mutation. Vigor scales max speed, so
+// selection has something to act on: faster prey survive predators, faster predators catch prey → the
+// population ADAPTS over generations. Clamped so a runaway lineage can't become absurd.
+const GENE_MIN: f64 = 0.6;
+const GENE_MAX: f64 = 1.6;
+const GENE_MUT: f64 = 0.05; // ± mutation magnitude per birth
+const CH_GENE: i32 = 20; // RNG channel for the mutation roll (distinct from eco/steering channels)
 const HEAL: f64 = 0.04; // health/s regained while unharmed
 // HYSTERESIS hunger latch (the user's flip-flop fix): a carnivore commits to hunting below LO and won't stop
 // (rest) until eating lifts it past HI — without the gap, energy at one threshold flipped hunting on/off every
@@ -147,6 +156,9 @@ pub struct ManagedAgent {
     // carnivores kill). Hits 0 → starvation (health bleeds). Separate from stamina so a fed animal can still be
     // sprint-tired, and a rested animal can still be starving. This is the bottom-up population regulator.
     pub health: f64, // 0..1; ≤0 = death
+    pub gene: f64,   // VIGOR — a heritable multiplier on max speed (≈1.0). Offspring inherit the average of both
+    // parents' genes ± mutation, so traits compound across generations → natural selection (faster prey escape
+    // predators, faster predators catch prey). The whole point of breeding being more than cloning.
     pub meals: u32,
     pub spooked: f64,
     pub mobbed: bool,
@@ -248,6 +260,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         stamina: if matches!(e.hunts, Hunts::Lower) { 0.45 } else { 1.0 }, // carnivores start a touch hungry
         energy: 0.8, // start well-fed but not full → must eat to thrive + breed
         health: 1.0,
+        gene: 1.0, // founders are baseline vigor; evolution emerges as mutation accumulates across births
         meals: 0,
         spooked: 0.0,
         mobbed: false,
@@ -1034,9 +1047,13 @@ impl World {
             if let Some(j) = self.find_mate(i) {
                 let (ix, iz) = (self.agents[i].agent.x, self.agents[i].agent.z);
                 let (jx, jz) = (self.agents[j].agent.x, self.agents[j].agent.z);
+                // INHERIT: average the parents' vigor, mutate a touch (deterministic via the addressed RNG), clamp
+                let mu = (crate::simrng::rand(&[self.agents[i].seed_id, self.agents[j].seed_id, self.clock.tick as i32, CH_GENE]) - 0.5) * 2.0 * GENE_MUT;
+                let baby_gene = (((self.agents[i].gene + self.agents[j].gene) * 0.5) + mu).clamp(GENE_MIN, GENE_MAX);
                 self.births.push(kc as f32);
                 self.births.push(((ix + jx) * 0.5) as f32); // born between the parents
                 self.births.push(((iz + jz) * 0.5) as f32);
+                self.births.push(baby_gene as f32); // its inherited vigor (the JS bridge ferries it back via set_gene)
                 self.agents[i].breed_cd = BREED_COOLDOWN;
                 self.agents[j].breed_cd = BREED_COOLDOWN;
                 self.agents[i].energy = (self.agents[i].energy - BREED_COST).max(0.0);
@@ -1107,6 +1124,15 @@ impl World {
     pub fn set_breed_cooldown(&mut self, i: usize, cd: f64) {
         if let Some(m) = self.agents.get_mut(i) {
             m.breed_cd = cd;
+        }
+    }
+
+    /// Apply an inherited VIGOR gene to a freshly-spawned bred baby: store it (so its own offspring inherit) and
+    /// scale its max speed by it. Called once, right after the JS bridge spawns the baby. Founders skip this.
+    pub fn set_gene(&mut self, i: usize, gene: f64) {
+        if let Some(m) = self.agents.get_mut(i) {
+            m.gene = gene;
+            m.agent.max_speed *= gene; // vigor → faster (or slower) than the kind's base speed roll
         }
     }
 
@@ -1833,13 +1859,13 @@ mod tests {
         for t in 1..=4 {
             w.tick_once(t);
         }
-        assert!(w.births().len() >= 3, "two adjacent well-fed adults breed a baby");
+        assert!(w.births().len() >= 4, "two adjacent well-fed adults breed a baby"); // 4 floats/birth: kc,x,z,gene
         assert_eq!(w.births()[0], 0.0, "the baby is a rabbit (kind code 0)");
         // both parents are on breed cooldown now → NO explosion (still just the one birth)
         for t in 5..=40 {
             w.tick_once(t);
         }
-        assert_eq!(w.births().len(), 3, "parents on cooldown → exactly one birth, not a runaway");
+        assert_eq!(w.births().len(), 4, "parents on cooldown → exactly one birth, not a runaway");
     }
 
     #[test]
@@ -1879,6 +1905,24 @@ mod tests {
             w.tick_once(t);
         }
         assert!(w.agents[c].health < 1.0, "empty fullness starves (health bleeds); got {}", w.agents[c].health);
+    }
+
+    #[test]
+    fn offspring_inherit_parent_vigor() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
+        w.agents[a].gene = 1.4; // a fast lineage
+        w.agents[b].gene = 1.4;
+        for t in 1..=4 {
+            w.tick_once(t);
+        }
+        let births = w.births();
+        assert!(births.len() >= 4, "the pair bred");
+        let baby_gene = births[3] as f64; // layout: [kindCode, x, z, gene]
+        assert!((baby_gene - 1.4).abs() <= GENE_MUT + 1e-6, "baby inherits ~the parents' vigor 1.4 (±mutation); got {baby_gene}");
+        assert!((GENE_MIN..=GENE_MAX).contains(&baby_gene), "gene clamped in range");
     }
 
     #[test]

@@ -194,7 +194,7 @@
 		// its renderer + spawns into the sim (as a maturing juvenile). The per-kind cap keeps this bounded.
 		const babies = drainBirths();
 		for (const b of babies) {
-			world.objects.push({ id: 'b' + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true });
+			world.objects.push({ id: 'b' + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene });
 		}
 
 		// CORPSE REAPER: a body that's fully decayed (sunk into the earth, see Critter/Npc) is removed from the

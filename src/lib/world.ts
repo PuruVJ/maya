@@ -13,6 +13,7 @@ export interface WorldObject {
 	dead?: boolean;
 	asleep?: boolean;
 	juvenile?: boolean; // a Rust-bred newborn → spawns into the sim on a maturation cooldown (can't breed yet)
+	gene?: number; // inherited vigor (≈1.0) from its parents → scales its speed in the sim (genetics/evolution)
 }
 
 export interface Zone {

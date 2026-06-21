@@ -28,7 +28,7 @@ const KIND_NAME = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] as
 const BEHAVIORS = ['wander', 'pause', 'lookAround', 'groom', 'sit', 'pounce'] as const;
 
 // ── worker message shapes (mirror worldsim.worker.ts) ───────────────────────────────────────────────
-type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean };
+type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number };
 type Snap = {
 	type: 'snap';
 	seq: number;
@@ -50,7 +50,7 @@ type OutMsg =
 type WorkerMsg = { type: 'ready' } | { type: 'failed'; error: string } | Snap;
 
 // newborns from the Rust breeding pass (kind + position) → Scene drains them into world.objects each frame
-export type Birth = { kind: string; x: number; z: number };
+export type Birth = { kind: string; x: number; z: number; gene: number };
 let pendingBirths: Birth[] = [];
 /** Pull (and clear) the babies bred since the last call — Scene turns each into a world-object. */
 export function drainBirths(): Birth[] {
@@ -174,8 +174,9 @@ export function tickRust(dt: number): void {
 		lastDanger = s!.danger;
 		// drain this snapshot's NEWBORNS (Rust bred them) → Scene turns each into a world-object (which mounts +
 		// spawns back into the sim as a juvenile). Flat [kindCode,x,z,…].
-		const nb = s!.births.length / 3;
-		for (let k = 0; k < nb; k++) pendingBirths.push({ kind: KIND_NAME[s!.births[k * 3]] ?? 'rabbit', x: s!.births[k * 3 + 1], z: s!.births[k * 3 + 2] });
+		const nb = s!.births.length / 4; // [kindCode, x, z, gene] per birth
+		for (let k = 0; k < nb; k++)
+			pendingBirths.push({ kind: KIND_NAME[s!.births[k * 4]] ?? 'rabbit', x: s!.births[k * 4 + 1], z: s!.births[k * 4 + 2], gene: s!.births[k * 4 + 3] });
 	}
 
 	const px = playerState.pos[0];
@@ -210,7 +211,7 @@ export function tickRust(dt: number): void {
 		const slot = freeSlots.pop() ?? nextSlot++;
 		slotOf.set(m, slot);
 		tracked[slot] = m;
-		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile });
+		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile, gene: m.gene ?? 1 });
 	});
 
 	// Mirror a fresh snapshot onto the live roster.
