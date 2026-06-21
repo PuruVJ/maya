@@ -84,6 +84,13 @@
 	const idlePhase = (H % 628) / 100; // 0–6.28, per-person → standing-idle sway/breath is desynchronised across a crowd
 	let phase = 0;
 	let t = 0;
+	// JUVENILE GROWTH: a Rust-bred newborn person is born small and grows to adult size over its maturation
+	// window (≈ the breed-cooldown) — render-only (collision/impostor stay adult). core scale is now driven
+	// imperatively in the task (was the static `scale={objScale}` prop) so it can animate.
+	const BABY_SCALE = 0.45;
+	const GROW_SECS = 34;
+	const GROW_RATE = (1 - BABY_SCALE) / GROW_SECS;
+	let growth = untrack(() => (obj.juvenile ? BABY_SCALE : 1)); // current size fraction (1 = adult)
 	// MESH-LOD (see Critter.svelte): a far+alive person is drawn by the instanced impostor, so shed the
 	// articulated body to keep the scene graph small at crowd scale. Spawned-far people start mesh-LESS.
 	const MESH_GRACE = 1.2; // seconds meshed after going far → no thrash at the LOD2 boundary
@@ -93,6 +100,7 @@
 
 	useTask((dt) => {
 		t += dt;
+		if (growth < 1) growth = Math.min(1, growth + GROW_RATE * dt); // a juvenile matures toward adult size
 		// the manager already stepped `agent` this frame — we only read & render it
 
 		// FAR → the impostor draws it (alive OR a tipped corpse): hide and, after a short grace, SHED the mesh.
@@ -109,6 +117,7 @@
 		if (!showMesh) showMesh = true; // came near → remount (refs bind next frame)
 		if (!group || !core) return; // mesh still mounting this frame
 		group.visible = true;
+		core.scale.setScalar(objScale * growth); // drives base size + juvenile growth (was a static prop)
 
 		agent.interpolate(clock.alpha); // smooth the fixed-rate (30 Hz) sim across render frames
 		const gy = heightAt(agent.rx, agent.rz, world.terrain);
@@ -177,8 +186,8 @@
      impostor instead, so the scene graph stays small at crowd scale. -->
 {#if showMesh}
 	<T.Group bind:ref={group} userData={{ objectId: obj.id }}>
-		<!-- objScale scales the whole avatar from the feet (group origin = ground); world pos is set on `group` -->
-		<T.Group bind:ref={core} scale={objScale}>
+		<!-- objScale (× juvenile growth) scales the whole avatar from the feet — set imperatively in the task -->
+		<T.Group bind:ref={core}>
 		<!-- torso · SHARED geometry + cached material -->
 		<T.Mesh position={[0, 1.05, 0]} geometry={NPC.torso} material={creatureMat(SHIRT)} castShadow />
 		<!-- head pivot -->

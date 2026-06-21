@@ -131,6 +131,13 @@
 
 	let phase = 0;
 	let t = 0;
+	// JUVENILE GROWTH: a Rust-bred newborn is born small and visibly GROWS to adult size over its maturation
+	// window (≈ the breed-cooldown), so babies read as babies and you watch them grow up. Render-only — the
+	// collision radius + far impostor stay adult-sized (a baby colliding/impostoring as full-size is unnoticeable).
+	const BABY_SCALE = 0.45; // born at 45% of adult size
+	const GROW_SECS = 34; // ~tracks JUVENILE_CD → matures into a full-size breeder
+	const GROW_RATE = (1 - BABY_SCALE) / GROW_SECS;
+	let growth = untrack(() => (obj?.juvenile ? BABY_SCALE : 1)); // current size fraction (1 = adult)
 	// MESH-LOD: a far+alive agent is drawn by the instanced impostor (AgentImpostors), so it doesn't need its
 	// articulated ~15-node mesh hierarchy at all — we shed it (the `{#if showMesh}` below) to keep the scene
 	// graph small at herd scale (1000 agents). Spawned-far agents start mesh-LESS so a big scatter never builds
@@ -142,6 +149,8 @@
 
 	useTask((dt) => {
 		t += dt;
+		if (growth < 1) growth = Math.min(1, growth + GROW_RATE * dt); // a juvenile matures toward adult size
+		const eSC = SC * growth; // effective render scale this frame (== SC for adults)
 		if (sleeping !== managed.asleep) sleeping = managed.asleep; // toggle the zzz billboard
 		// companion pet → its wander-leash centre tracks you, so it trails along and never strays far (set
 		// before any early-out so it keeps following even if it briefly falls behind)
@@ -186,7 +195,7 @@
 			core.rotation.z = flop.step(dt, Math.PI / 2);
 			core.rotation.x = 0;
 			core.position.y = bodyY.step(dt, -0.05);
-			core.scale.set(SC, SC, SC);
+			core.scale.set(eSC, eSC, eSC);
 			return;
 		}
 
@@ -197,7 +206,7 @@
 			core.position.y = bodyY.step(dt, -0.15) + Math.sin(t * 1.6) * 0.02;
 			core.rotation.z = lean.step(dt, 0);
 			core.rotation.x = pitch.step(dt, -0.3);
-			core.scale.set(SC, SC, SC);
+			core.scale.set(eSC, eSC, eSC);
 			const tuck = -0.5;
 			if (legFR) legFR.rotation.x = tuck;
 			if (legFL) legFL.rotation.x = tuck;
@@ -322,12 +331,12 @@
 
 		const isBound = S.gait === 'hop' || S.gait === 'bipedHop';
 		if (!isBound) leanT += Math.sin(phase) * 0.04 * gait; // trot weight-shift (not for bounders)
-		const bob = Math.abs(Math.sin(phase)) * (isBound ? 0.5 * SC : 0.06) * gait;
+		const bob = Math.abs(Math.sin(phase)) * (isBound ? 0.5 * eSC : 0.06) * gait;
 
 		core.position.y = bodyY.step(dt, bodyYT) + bob + hop;
 		core.rotation.z = lean.step(dt, leanT);
 		core.rotation.x = pitch.step(dt, pitchT);
-		core.scale.set(SC, SC * stretch, SC / Math.sqrt(stretch));
+		core.scale.set(eSC, eSC * stretch, eSC / Math.sqrt(stretch));
 
 		if (head) {
 			head.rotation.y = headYaw.step(dt, headYawT);
