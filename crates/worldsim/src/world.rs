@@ -15,9 +15,9 @@ use crate::spatialhash::SpatialHashGrid;
 use crate::steering::{Agent, AgentOpts, Behavior};
 
 const NEIGHBOR_RADIUS: f64 = 4.0; // also the grid cell size (flocking only)
-const DENSITY_THRESHOLD: f64 = 0.4; // spread ramps in almost immediately (was 1.0 → small clumps lingered)
-const SEP_WEIGHT: f64 = 1.8; // push apart a touch harder → divergent fan-out
-const ALI_WEIGHT: f64 = 0.05; // was 0.4 → agents matched velocities + moved as ONE direction; near-off so they FAN OUT
+const DENSITY_THRESHOLD: f64 = 0.85; // gentle spread (0.4 was too aggressive → predators jitter-sprint to exhaustion)
+const SEP_WEIGHT: f64 = 1.5; // gentle (1.8 jittered co-spawned predators into exhaustion)
+const ALI_WEIGHT: f64 = 0.05; // was 0.4 → agents matched velocities + moved as ONE direction; near-off so they FAN OUT (KEEP)
 
 // food-chain targeting (chunk b)
 const SEEK: f64 = 100.0; // a predator notices + stalks prey within this radius; also the seek-grid cell size
@@ -141,12 +141,13 @@ pub struct ManagedAgent {
 /// don't clump); animals keep a tighter leash + loose flocks. `max_speed` is the per-individual eco roll.
 pub fn opts_for(kind: Kind, seed_id: i32) -> AgentOpts {
     let max_speed = eco::speed_for(kind, seed_id);
-    // higher wanderlust → more agents are far-roaming EXPLORERS that relocate their leash + journey the map,
-    // so they DISPERSE instead of orbiting overlapping home spawns and clumping. Wider leash too (roam further).
+    // moderate wanderlust → some far-roaming explorers (helps spread), but not so high that predators + prey
+    // never encounter each other (0.72/0.52 over-spread the world → hunters found nothing). Dispersion comes
+    // mainly from the killed alignment + low cohesion now, not from flinging everyone to the map's edges.
     if kind == Kind::Person {
-        AgentOpts { max_speed, home_radius: 55.0, wander_rate: 1.3, accel: 7.0, turn_speed: 5.0, wanderlust: 0.72 }
+        AgentOpts { max_speed, home_radius: 46.0, wander_rate: 1.3, accel: 7.0, turn_speed: 5.0, wanderlust: 0.6 }
     } else {
-        AgentOpts { max_speed, home_radius: 42.0, wander_rate: 1.3, accel: 7.0, turn_speed: 5.0, wanderlust: 0.52 }
+        AgentOpts { max_speed, home_radius: 36.0, wander_rate: 1.3, accel: 7.0, turn_speed: 5.0, wanderlust: 0.42 }
     }
 }
 
@@ -943,7 +944,7 @@ impl World {
         let m = &self.agents[i];
         let (ax, az, avx, avz, a_max) = (m.agent.x, m.agent.z, m.agent.vx, m.agent.vz, m.agent.max_speed);
         let is_person = matches!(m.kind, Kind::Person);
-        let sep_r = m.radius + if is_person { 2.1 } else { 1.7 }; // wider personal space → less crowding (was 1.5/1.2)
+        let sep_r = m.radius + if is_person { 1.6 } else { 1.3 }; // moderate spacing (2.1/1.7 was too pushy)
         let hard_r = m.radius + if is_person { 0.4 } else { 0.3 };
         let sep_r2 = sep_r * sep_r;
         let nr2 = NEIGHBOR_RADIUS * NEIGHBOR_RADIUS;
@@ -1580,10 +1581,10 @@ mod tests {
     fn opts_for_matches_the_view_configs() {
         // people EXPLORE most (widest leash + highest wanderlust → disperse); animals a bit tighter. Tuned UP
         // for dispersion (the clustering complaint): person leash 55 / wl 0.72, animal leash 42 / wl 0.52.
-        assert_eq!(opts_for(Kind::Person, 1).home_radius, 55.0);
-        assert_eq!(opts_for(Kind::Person, 1).wanderlust, 0.72);
-        assert_eq!(opts_for(Kind::Rabbit, 1).home_radius, 42.0);
-        assert_eq!(opts_for(Kind::Rabbit, 1).wanderlust, 0.52);
+        assert_eq!(opts_for(Kind::Person, 1).home_radius, 46.0);
+        assert_eq!(opts_for(Kind::Person, 1).wanderlust, 0.6);
+        assert_eq!(opts_for(Kind::Rabbit, 1).home_radius, 36.0);
+        assert_eq!(opts_for(Kind::Rabbit, 1).wanderlust, 0.42);
         assert!(opts_for(Kind::Person, 1).wanderlust > opts_for(Kind::Rabbit, 1).wanderlust);
         // max_speed is the per-individual eco roll
         assert_eq!(opts_for(Kind::Cat, 100).max_speed, eco::speed_for(Kind::Cat, 100));

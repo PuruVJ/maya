@@ -66,7 +66,7 @@
 		day: { amb: 0.65, dir: 1.15, ambC: '#ffffff', dirC: '#fff6e0' },
 		sunset: { amb: 0.5, dir: 0.8, ambC: '#ffd6b0', dirC: '#ff8f4d' },
 		fog: { amb: 0.6, dir: 0.3, ambC: '#aeb6c2', dirC: '#c2c9d4' }, // overcast/RAIN: dimmer + greyer than a clear day (was brighter than day!), weak diffuse sun
-		night: { amb: 0.58, dir: 0.85, ambC: '#9fb3da', dirC: '#c2d2f4' }, // clearly lit, just cool & blue (not dark)
+		night: { amb: 0.82, dir: 1.1, ambC: '#aebfe0', dirC: '#cfddf8' }, // user: "everything too dark" → brighter moonlight (was 0.58/0.85)
 		space: { amb: 0.52, dir: 0.72, ambC: '#8a9ace', dirC: '#aab8e4' }
 	};
 	const light = $derived(LIGHT[world.sky] ?? LIGHT.day);
