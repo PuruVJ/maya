@@ -40,6 +40,9 @@ const GIVEUP_ENERGY: f64 = 0.06; // ...or it abandons the chase early when this 
 // mobbing (chunk e) — when prey heavily outnumber one hunter, the herd turns and swarms it
 const MOB_MIN: u32 = 4; // this many prey fleeing ONE hunter flips them flee → swarm
 const MOB_RELEASE: u32 = 3; // hysteresis: a mobbed hunter stays mobbed until the swarm thins BELOW this
+const GUARD_RALLY: u32 = 4; // mob_count (people double-weighted) on a hunter at which adult MALE people stop fleeing
+// and CHARGE it instead — village guards rallying to defend the threatened (a female + child). 4 ⇒ ≥1 OTHER person
+// is also under threat, so a lone man doesn't suicide; women + children always flee to safety.
 const MOB_W: f64 = 2.2; // converge force as the mob charges the predator
 const MOB_KILL_DPS: f64 = 0.03; // health/s a hunter loses PER attacker pressed against it (size+health combo)
 const SLASH_CD: f64 = 1.2; // seconds between a cornered hunter's retaliatory slashes (each kills one attacker)
@@ -979,12 +982,19 @@ impl World {
                 self.forces[i].1 += (dz / d) * a_max * FLEE_W;
                 self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
             } else if let Some((tx, tz)) = threat_pos {
-                // if the hunter is MOBBED the herd has the numbers → CHARGE it (drive it off); else FLEE it
+                // if the hunter is MOBBED the herd has the numbers → CHARGE it (drive it off); else FLEE it.
                 let threat_mobbed = self.transient[i].threat.map_or(false, |t| self.agents[t].mobbed);
-                let (dx, dz, w) = if threat_mobbed {
-                    (tx - ax, tz - az, MOB_W) // converge on the hunter
+                // VILLAGE GUARDS: an adult MALE person holds his ground + charges a predator threatening the
+                // community (rally count reached) instead of fleeing — defending the women + children, who flee.
+                let rally = self.transient[i].threat.map_or(0, |t| self.transient[t].mob_count);
+                let is_guard = matches!(self.agents[i].kind, Kind::Person)
+                    && !is_female(self.agents[i].seed_id)
+                    && self.agents[i].age >= self.agents[i].lifespan * 0.15
+                    && rally >= GUARD_RALLY;
+                let (dx, dz, w) = if threat_mobbed || is_guard {
+                    (tx - ax, tz - az, MOB_W) // converge on the hunter (a mob, or a guard standing to defend)
                 } else {
-                    (ax - tx, az - tz, FLEE_W) // flee the hunter
+                    (ax - tx, az - tz, FLEE_W) // flee the hunter (women, children, prey)
                 };
                 let d = dx.hypot(dz).max(0.1);
                 self.forces[i].0 += (dx / d) * a_max * w;
