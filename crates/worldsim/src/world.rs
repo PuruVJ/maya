@@ -111,6 +111,25 @@ const GENE_MIN: f64 = 0.6;
 const GENE_MAX: f64 = 1.6;
 const GENE_MUT: f64 = 0.05; // ± mutation magnitude per birth
 const CH_GENE: i32 = 20; // RNG channel for the mutation roll (distinct from eco/steering channels)
+
+// ── AGING (generational turnover) ───────────────────────────────────────────────────────────────────────────
+// Every animal accrues `age`; past SENESCENCE_FRAC of its lifespan it's an infertile elder, and at its lifespan
+// it dies of old age (most are eaten / starve first — this is the backstop that keeps lineages cycling). Lifespan
+// is per-kind × a seeded ±35% so a cohort dies spread out, not all at once. Game-scaled seconds, not real years.
+const SENESCENCE_FRAC: f64 = 0.75; // past this fraction of lifespan → too old to breed
+const CH_AGE: i32 = 21; // RNG channel for the lifespan-variation roll
+
+/// Natural lifespan (seconds) by kind — small/fast prey are short-lived; big animals + people live longest.
+fn base_lifespan(kind: Kind) -> f64 {
+    match kind {
+        Kind::Rabbit => 240.0,
+        Kind::Kangaroo => 320.0,
+        Kind::Cat => 360.0,
+        Kind::Lion => 420.0,
+        Kind::Dinosaur => 540.0,
+        Kind::Person => 600.0,
+    }
+}
 const HEAL: f64 = 0.04; // health/s regained while unharmed
 // HYSTERESIS hunger latch (the user's flip-flop fix): a carnivore commits to hunting below LO and won't stop
 // (rest) until eating lifts it past HI — without the gap, energy at one threshold flipped hunting on/off every
@@ -159,6 +178,8 @@ pub struct ManagedAgent {
     pub gene: f64,   // VIGOR — a heritable multiplier on max speed (≈1.0). Offspring inherit the average of both
     // parents' genes ± mutation, so traits compound across generations → natural selection (faster prey escape
     // predators, faster predators catch prey). The whole point of breeding being more than cloning.
+    pub age: f64,      // seconds lived → drives senescence (infertile elder) + old-age death
+    pub lifespan: f64, // this individual's natural lifespan (per-kind base ± seeded variation); age ≥ this = dies of old age
     pub meals: u32,
     pub spooked: f64,
     pub mobbed: bool,
@@ -261,6 +282,8 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         energy: 0.8, // start well-fed but not full → must eat to thrive + breed
         health: 1.0,
         gene: 1.0, // founders are baseline vigor; evolution emerges as mutation accumulates across births
+        age: 0.0,
+        lifespan: base_lifespan(kind) * (0.65 + 0.7 * crate::simrng::rand(&[seed_id, CH_AGE])), // ±35% per-individual → deaths spread out, not synchronized
         meals: 0,
         spooked: 0.0,
         mobbed: false,
@@ -954,6 +977,16 @@ impl World {
                 self.agents[i].agent.vz = 0.0;
                 continue;
             }
+            // AGING: live a little; die of old age once past the natural lifespan (predation/starvation usually
+            // get them first — this is the backstop that turns generations over). The player's pet is exempt.
+            self.agents[i].age += DT;
+            if !self.agents[i].companion && self.agents[i].age >= self.agents[i].lifespan {
+                self.agents[i].dead = true;
+                self.agents[i].asleep = false;
+                self.agents[i].agent.vx = 0.0;
+                self.agents[i].agent.vz = 0.0;
+                continue;
+            }
             let boost = self.behave[i].0;
             let endurance = self.agents[i].endurance;
             let is_carnivore = matches!(eco(self.agents[i].kind).hunts, Hunts::Lower);
@@ -1093,6 +1126,7 @@ impl World {
             && !m.asleep
             && m.breed_cd <= 0.0
             && m.energy > BREED_ENERGY // WELL-FED (nutrition), not merely rested → food limits breeding
+            && m.age < m.lifespan * SENESCENCE_FRAC // fertile window: matured, not yet an elder
             && !m.mobbed
             && m.spooked <= 0.0
             && m.crowd < BREED_CROWD
@@ -1923,6 +1957,31 @@ mod tests {
         let baby_gene = births[3] as f64; // layout: [kindCode, x, z, gene]
         assert!((baby_gene - 1.4).abs() <= GENE_MUT + 1e-6, "baby inherits ~the parents' vigor 1.4 (±mutation); got {baby_gene}");
         assert!((GENE_MIN..=GENE_MAX).contains(&baby_gene), "gene clamped in range");
+    }
+
+    #[test]
+    fn an_animal_dies_of_old_age() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let r = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        w.agents[r].age = w.agents[r].lifespan - 0.02; // on the brink of its natural lifespan
+        for t in 1..=4 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[r].dead, "an animal past its natural lifespan dies of old age");
+    }
+
+    #[test]
+    fn an_elder_is_infertile() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2); // a fertile would-be mate
+        w.agents[a].age = w.agents[a].lifespan * 0.9; // past senescence (0.75) → an infertile elder
+        for t in 1..=6 {
+            w.tick_once(t);
+        }
+        assert_eq!(w.births().len(), 0, "no fertile pair (the only mate is a senescent elder) → no birth");
     }
 
     #[test]
