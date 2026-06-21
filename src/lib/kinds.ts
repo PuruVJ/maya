@@ -70,13 +70,14 @@ export const KINDS: Record<string, KindDef> = {
 		]
 	},
 	// a GRAVE — raised at the spot a person died; a turned-earth mound, a weathered headstone, a small cross.
+	// PALE stone so it reads as a moonlit tombstone in the perpetual-night world (dark stone just vanished to black).
 	grave: {
-		r: 0.5, h: 1, col: 'box', color: '#9a9aa2',
+		r: 0.5, h: 1, col: 'box', color: '#cfd0da',
 		parts: [
-			{ geo: 'box', args: [0.6, 0.12, 0.92], pos: [0, 0.06, 0], color: '#57483a' }, // turned-earth mound
-			{ geo: 'box', args: [0.46, 0.5, 0.12], pos: [0, 0.3, -0.32], color: '#9a9aa2' }, // headstone
-			{ geo: 'box', args: [0.1, 0.3, 0.09], pos: [0, 0.64, -0.33], color: '#a8a8b0' }, // cross — upright
-			{ geo: 'box', args: [0.3, 0.1, 0.09], pos: [0, 0.62, -0.33], color: '#a8a8b0' } // cross — arms
+			{ geo: 'box', args: [0.6, 0.12, 0.92], pos: [0, 0.06, 0], color: '#8a7660' }, // turned-earth mound (lighter)
+			{ geo: 'box', args: [0.46, 0.5, 0.12], pos: [0, 0.3, -0.32], color: '#d2d3dc' }, // headstone — pale weathered stone
+			{ geo: 'box', args: [0.1, 0.3, 0.09], pos: [0, 0.64, -0.33], color: '#dcdde4' }, // cross — upright
+			{ geo: 'box', args: [0.3, 0.1, 0.09], pos: [0, 0.62, -0.33], color: '#dcdde4' } // cross — arms
 		]
 	},
 	house: {
