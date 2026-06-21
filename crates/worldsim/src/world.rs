@@ -47,7 +47,7 @@ const FLEE_W: f64 = 2.6; // strong — overrides wander when running for your li
 const CHASE_W: f64 = 2.0;
 const AVOID_W: f64 = 1.8; // gentle personal space — every animal steers AROUND the player's body
 const FLEE_BOOST: f64 = 1.7; // panic-run speed multiplier
-const CHASE_BOOST: f64 = 1.45;
+const CHASE_BOOST: f64 = 1.95; // a committed chase BEATS a flee (was 1.45 < FLEE → prey always escaped, no kills)
 const CONTACT_PAD: f64 = 0.4; // extra reach that counts as a catch
 const CAN_SPRINT: f64 = 0.03; // stamina above this can still sprint
 const LURE_R: f64 = 11.0; // an idle cat within this range of a lake fish pads to the bank after it (never catches)
@@ -70,6 +70,12 @@ struct Obstacle {
 // stamina / energy / metabolism (chunk d)
 const EXERT_DRAIN: f64 = 0.22; // /s while sprinting, divided by endurance
 const RECOVER: f64 = 0.16; // /s at rest (prey/people only), × endurance
+// NIGHT-ONLY world (user: "we don't need extensive sleeping algo") → predators stay ACTIVE hunters, not
+// sleepers: while not chasing they recover toward a "sprint-ready but still HUNGRY" level so they sustain the
+// hunt without an exhaustion-sleep loop. Eating still refuels fully (+ food-coma). CARN_IDLE < HUNGRY_LO so an
+// idling predator stays hungry → keeps hunting.
+const CARN_RECOVER: f64 = 0.16; // /s a not-chasing carnivore recovers toward CARN_IDLE
+const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settles at (just below HUNGRY_LO=0.5)
 const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
 const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
 const HEAL: f64 = 0.04; // health/s regained while unharmed
@@ -878,7 +884,13 @@ impl World {
                 s = (s - (EXERT_DRAIN / endurance) * DT).max(0.0);
             }
             if is_carnivore {
-                s = (s - BASAL_DRAIN * DT).max(0.0); // always ebbs; refuels only by eating
+                if boost > 1.0 {
+                    s = (s - BASAL_DRAIN * DT).max(0.0); // chasing: exert (above) + basal drain
+                } else if s < CARN_IDLE {
+                    s = (s + CARN_RECOVER * DT).min(CARN_IDLE); // not chasing → recover toward the hunt-ready level
+                } else {
+                    s = (s - BASAL_DRAIN * DT).max(0.0); // sated (just ate) → ebb back down toward hunting
+                }
             } else if boost <= 1.0 {
                 s = (s + RECOVER * endurance * DT).min(1.0); // prey/people rest-recover
             }
@@ -904,6 +916,7 @@ impl World {
             // scare keeping it on edge, and not right after waking (wake_cd → anti sleep/wake flip).
             if is_carnivore
                 && self.agents[i].stamina <= 0.0
+                && self.transient[i].prey.is_none() // NEVER doze while there's prey to chase → stays an active hunter
                 && self.agents[i].wake_cd <= 0.0
                 && self.agents[i].spooked <= 0.0
                 && !self.agents[i].mobbed
@@ -1373,12 +1386,18 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_carnivore_sleeps() {
+    fn tired_carnivore_recovers_and_stays_active() {
+        // NIGHT-ONLY redesign (user: "we don't need extensive sleeping algo"): a tired, idle carnivore now
+        // RECOVERS toward the hunt-ready level instead of dozing — so predators stay active hunters.
         let mut w = World::new();
-        let cat = w.spawn(animal(50.0, 50.0, 1), Kind::Cat, 0.35, 1); // alone, far from the player
+        w.set_player(1e4, 1e4); // park the player far
+        let cat = w.spawn(animal(50.0, 50.0, 1), Kind::Cat, 0.35, 1); // alone, no prey
         w.agents[cat].stamina = 0.0;
-        w.tick_once(1);
-        assert!(w.agents[cat].asleep, "an exhausted carnivore with nothing threatening it sleeps");
+        for t in 1..=120 {
+            w.tick_once(t);
+        }
+        assert!(!w.agents[cat].asleep, "no exhaustion-sleep loop — a tired predator recovers + keeps hunting");
+        assert!(w.agents[cat].stamina > 0.2 && w.agents[cat].stamina <= CARN_IDLE + 1e-6, "recovers toward the active-hunger level ({}), not to full", w.agents[cat].stamina);
     }
 
     #[test]
