@@ -2,14 +2,13 @@
 	import { onMount } from 'svelte';
 	import { replaceState } from '$app/navigation';
 	import { Canvas } from '@threlte/core';
-	import { PCFShadowMap, type WebGLRenderer } from 'three';
+	import { PCFShadowMap } from 'three';
 	import { World } from '@threlte/rapier';
 	import Scene from '$lib/components/Scene.svelte';
 	import Player from '$lib/components/Player.svelte';
 	import EditController from '$lib/components/EditController.svelte';
 	import AdaptiveResolution from '$lib/components/AdaptiveResolution.svelte';
 	import { perf } from '$lib/perf.svelte';
-	import { gpu } from '$lib/gpu.svelte';
 	import BuildBar from '$lib/components/BuildBar.svelte';
 	import FpsPanel from '$lib/components/FpsPanel.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
@@ -39,36 +38,12 @@
 	// trading resolution under load — the "120fps no matter what" knob. Threlte applies dpr reactively.
 	const dpr = $derived(llm.busy ? 0.6 : perf.dpr);
 
-	// WebGPU MIGRATION (flag-gated, incremental — see the perf-foundation-plan memory + the migration TODO).
-	// Default is WebGL (everything as today, perfect). Opt in with ?webgpu (or #webgpu) to drive Threlte's Canvas
-	// with three's WebGPURenderer instead — the path we're porting the shaders (GLSL onBeforeCompile → TSL) onto.
-	// Until a shader is ported it simply renders with its base material on this path (plain, not broken). We flip
-	// the default only once WebGPU reaches visual parity.
-	const useWebGPU = typeof location !== 'undefined' && /(?:[?#&])webgpu(?:\b|=)/.test(location.search + location.hash);
-	gpu.webgpu = useWebGPU; // publish to the shader gates BEFORE any Canvas child mounts (set once, never changes)
-	// the renderer factory Threlte's <Canvas createRenderer> calls; undefined → Threlte builds its WebGLRenderer.
-	let createRenderer = $state<((canvas: HTMLCanvasElement) => WebGLRenderer) | undefined>(undefined);
+	// WebGPU migration is ON HOLD pending the alias-based approach (see the perf-foundation-plan memory):
+	// `three/webgpu` is a SEPARATE three build, so importing it for a ?webgpu flag pulled a 2ND copy of three
+	// (the very thing vite.config dedupes) and HUNG Vite's dep optimizer → dev server down. The inert gpu.webgpu
+	// flag + the Scene/SkyDome gates stay in place for that effort; nothing imports three/webgpu now.
 
 	onMount(async () => {
-		if (useWebGPU) {
-			try {
-				const { WebGPURenderer } = await import('three/webgpu');
-				createRenderer = (canvas: HTMLCanvasElement) => {
-					const r = new WebGPURenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
-					// Threlte's render task is SYNC, but WebGPURenderer needs async backend init → no-op render until
-					// it's ready (else .render() throws "called before the backend is initialized").
-					const realRender = r.render.bind(r) as (...a: unknown[]) => unknown;
-					let ready = false;
-					(r as unknown as { render: (...a: unknown[]) => unknown }).render = (...a: unknown[]) => (ready ? realRender(...a) : undefined);
-					r.init()
-						.then(() => ((ready = true), console.info('[webgpu] backend ready')))
-						.catch((e) => console.error('[webgpu] init failed', e));
-					return r as unknown as WebGLRenderer;
-				};
-			} catch (e) {
-				console.error('[webgpu] could not load three/webgpu — staying on WebGL', e);
-			}
-		}
 		const m = location.hash.match(/[#&]w=([^&]+)/);
 		if (m) {
 			try {
@@ -161,9 +136,7 @@
 </script>
 
 <div class="fixed inset-0" style:background={SKY_BG[world.sky] ?? SKY_BG.day}>
-	<!-- WebGL renders immediately; the WebGPU path waits one tick for the async three/webgpu import (createRenderer) -->
-	{#if !useWebGPU || createRenderer}
-	<Canvas shadows={PCFShadowMap} {dpr} {createRenderer}>
+	<Canvas shadows={PCFShadowMap} {dpr}>
 		<World>
 			<AdaptiveResolution />
 			<Scene {world} />
@@ -171,7 +144,6 @@
 			<EditController {world} />
 		</World>
 	</Canvas>
-	{/if}
 </div>
 
 <!-- danger vignette — red edges swell as a predator closes in to hunt you (manager → playerState.danger) -->
