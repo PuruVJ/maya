@@ -59,6 +59,12 @@ const LOD1_DIST = 26;
 // Exported so those components can init their mesh-mounted state from spawn distance (avoid the mount storm).
 export const LOD2_DIST = 62;
 const SHADOW_AGENTS = 12; // only the nearest few cast shadows (shadows are the dominant cost at scale)
+// MESH BUDGET — cap full articulated meshes to the nearest N agents. Distance-LOD alone fails for a CLUSTER:
+// spawn 1000 cats around you and hundreds sit inside LOD2_DIST → hundreds of ~15-node bodies + per-frame tasks
+// + shadow work → the main thread hangs (the Worker moved the SIM off-thread, not this render cost). With a
+// COUNT cap, surplus near agents fall back to the instanced impostor (2 draw calls), so a dense crowd costs a
+// fixed amount no matter how many you spawn — the nearest N stay fully articulated (you only scrutinise those).
+const MESH_BUDGET = 96;
 
 // CORPSE DECAY: now that reproduction makes the world cycle life→death→corpse forever, bodies would pile up
 // without bound (scene graph + the saved share-link both grow). A corpse lingers (you wanted to SEE dead
@@ -147,6 +153,7 @@ export function makeManaged(agent: Agent, kind: string, radius: number, menu: Be
 class AgentManager {
 	#agents = new Set<ManagedAgent>();
 	#shadowScratch: ManagedAgent[] = []; // reused nearest-N buffer for the shadow budget (no per-frame alloc)
+	#meshScratch: ManagedAgent[] = []; // reused nearest-N buffer for the mesh budget (no per-frame alloc)
 	#night = 0; // 0 day → 1 night (set from the sky) → fed to the Rust sim
 
 	/** How nocturnal the world is right now (0 day … 1 night) — drives the food chain's day/night mood. */
@@ -167,7 +174,30 @@ class AgentManager {
 			m.dist = Math.hypot(m.agent.x - px, m.agent.z - pz);
 			m.lod = m.dist > LOD2_DIST ? 2 : m.dist > LOD1_DIST ? 1 : 0;
 		}
+		this.#assignMeshBudget();
 		this.#assignShadows();
+	}
+
+	/** Cap full articulated meshes to the nearest MESH_BUDGET — anyone farther than the budget-th nearest is
+	 *  forced to the instanced impostor (lod 2), so a dense crowd costs a fixed amount however many you spawn.
+	 *  One O(N·K) selection (reused buffer, no alloc) to find the budget-th nearest distance, then one O(N) demote. */
+	#assignMeshBudget(): void {
+		if (this.#agents.size <= MESH_BUDGET) return; // everyone fits → keep their distance-LOD
+		const near = this.#meshScratch;
+		near.length = 0;
+		let maxI = 0; // index in `near` of the FARTHEST currently-kept candidate
+		for (const m of this.#agents) {
+			if (near.length < MESH_BUDGET) {
+				near.push(m);
+				if (m.dist > near[maxI].dist) maxI = near.length - 1;
+			} else if (m.dist < near[maxI].dist) {
+				near[maxI] = m;
+				maxI = 0; // re-find the farthest kept
+				for (let i = 1; i < MESH_BUDGET; i++) if (near[i].dist > near[maxI].dist) maxI = i;
+			}
+		}
+		const cutoff = near[maxI].dist; // distance of the MESH_BUDGET-th nearest agent
+		for (const m of this.#agents) if (m.dist > cutoff && m.lod < 2) m.lod = 2; // surplus near agents → impostor
 	}
 
 	register(m: ManagedAgent): void {
