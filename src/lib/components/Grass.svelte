@@ -35,9 +35,9 @@
 	// textured carpet instead of vanishing to sub-pixel. Only the very outer rim dissolves into the ground
 	// colour over a long band, so the field reads as grass all the way out with no hard ring.
 	const TIERS: Tier[] = [
-		{ step: 0.55, rIn: 0, rOut: 56, band: 22, bmin: 0.45, bmax: 1.1, w: 0.08 }, // near — dense, fine
-		{ step: 1.1, rIn: 48, rOut: 130, band: 30, bmin: 0.6, bmax: 1.4, w: 0.2 }, // mid — lush out to ~130 m
-		{ step: 2.2, rIn: 120, rOut: 260, band: 70, bmin: 0.9, bmax: 1.7, w: 0.5 } // far — wide short blades read as texture, dissolve 190→260
+		{ step: 0.55, rIn: 0, rOut: 56, band: 22, bmin: 0.28, bmax: 0.68, w: 0.08 }, // near — dense, fine (shorter blades per user)
+		{ step: 1.1, rIn: 48, rOut: 130, band: 30, bmin: 0.38, bmax: 0.88, w: 0.2 }, // mid — lush out to ~130 m
+		{ step: 2.2, rIn: 120, rOut: 260, band: 70, bmin: 0.56, bmax: 1.06, w: 0.5 } // far — wide short blades read as texture, dissolve 190→260
 	];
 
 	// ── shared uniforms (mutated each frame / on world change; the SAME objects feed every tier) ────────

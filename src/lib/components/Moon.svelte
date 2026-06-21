@@ -12,7 +12,11 @@
 	const DIM = untrack(() => dim); // constant per mount (SkyDome remounts on sky change) → snapshot for the uniforms
 
 	const { camera } = useThrelte();
-	const DIR = new THREE.Vector3(30, 45, 20).normalize(); // == Scene's directional-light dir → the moon sits exactly where its (moon)light comes from, so disc, shadows and the water trail all agree
+	// LOW on the horizon (user: "I wanna see it on the horizon") — same azimuth as the moonlight (x,z kept) but a
+	// shallow elevation so it hangs in your forward view, not overhead. The directional light stays high, so the
+	// disc no longer sits exactly on the light vector — an accepted trade for a big horizon moon (depthTest:false
+	// keeps it clear of the terrain line + fog).
+	const DIR = new THREE.Vector3(30, 11, 20).normalize();
 	const FAR = 170; // inside the star sphere (so the moon sits in front of the stars) and the camera far plane
 	const SIZE = 22; // a prominent, stylised moon
 
