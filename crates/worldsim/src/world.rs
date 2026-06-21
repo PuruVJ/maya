@@ -1526,7 +1526,17 @@ impl World {
                     h
                 }
             };
-            let coh_w = if is_person { 0.02 } else { 0.04 }; // was 0.06/0.1 — weak so they don't re-clump
+            // SOCIAL STRUCTURE: women + children keep a HOME group (stronger cohesion → a domestic cluster), while
+            // grown men range out (very weak cohesion) to hunt + guard the bounds. Other species: a gentle default.
+            let coh_w = if is_person {
+                if is_female(m.seed_id) || m.age < m.lifespan * 0.15 {
+                    0.06 // women + children cluster
+                } else {
+                    0.012 // men range out
+                }
+            } else {
+                0.04
+            };
             let c = (a_max * coh_w) / cl;
             fx += cdx * c;
             fz += cdz * c;
