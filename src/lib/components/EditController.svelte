@@ -12,6 +12,7 @@
 	import { kindDef } from '$lib/kinds';
 	import { deletePoofs } from '$lib/buildFx';
 	import { playerState } from '$lib/playerState.svelte';
+	import { curvedGroundXZ } from '$lib/curveWorld';
 	import type { World } from '$lib/world';
 
 	let { world }: { world: World } = $props();
@@ -21,8 +22,6 @@
 	const { camera, scene, renderer } = useThrelte();
 	const raycaster = new THREE.Raycaster();
 	const ndc = new THREE.Vector2();
-	const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-	const hit = new THREE.Vector3();
 
 	let downX = 0;
 	let downY = 0;
@@ -76,21 +75,25 @@
 			return;
 		}
 
-		// move tool
+		// move tool — drop where the ray meets the CURVED ground (the world-fold rears the ground up; a flat
+		// y=0 raycast overshot and dropped things far back, see curvedGroundXZ).
 		if (!editor.held) {
 			editor.held = pickObjectId(); // pick up (null if the tap missed → just try again)
-			if (editor.held && raycaster.ray.intersectPlane(groundPlane, hit)) editor.ghost = [hit.x, 0, hit.z];
+			const g = editor.held ? curvedGroundXZ(raycaster.ray) : null;
+			if (g) editor.ghost = [g.x, 0, g.z];
 		} else {
-			if (raycaster.ray.intersectPlane(groundPlane, hit)) {
+			const g = curvedGroundXZ(raycaster.ray);
+			if (g) {
 				history.push(world);
-				applyOps(world, [{ op: 'move', id: editor.held, pos: [hit.x, 0, hit.z] }], player());
+				applyOps(world, [{ op: 'move', id: editor.held, pos: [g.x, 0, g.z] }], player());
 			}
 			editor.held = null; // drop
 			editor.ghost = null;
 		}
 	}
 
-	// while carrying, the ghost hologram follows the cursor's ground point (cheap: ray-vs-plane math)
+	// while carrying, the ghost hologram follows the cursor's ground point (un-folds the curve so it sits under
+	// the cursor, not far behind it)
 	function onMove(e: PointerEvent) {
 		if (editor.tool !== 'move' || !editor.held || !isCanvas(e)) return;
 		const cam = camera.current;
@@ -99,7 +102,8 @@
 		ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
 		ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 		raycaster.setFromCamera(ndc, cam);
-		if (raycaster.ray.intersectPlane(groundPlane, hit)) editor.ghost = [hit.x, 0, hit.z];
+		const g = curvedGroundXZ(raycaster.ray);
+		if (g) editor.ghost = [g.x, 0, g.z];
 	}
 
 	$effect(() => {
