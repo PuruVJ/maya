@@ -16,6 +16,10 @@
 
 	// creatures are handled by the animal push-out (agentManager); everything else is a solid placed object
 	const CREATURES = new Set(['person', 'cat', 'lion', 'rabbit', 'kangaroo', 'dinosaur']);
+	// Camera occlusion is intentionally narrower than player collision. Pulling the camera in for every lamp,
+	// rock, bush, or ambient trunk made normal movement feel like a zoom pump. Only substantial buildings
+	// should block the view, and even then the camera keeps a comfortable over-the-shoulder distance.
+	const CAMERA_BLOCKERS = new Set(['house', 'cabin', 'tower']);
 
 	const ss = (a: number, b: number, x: number) => {
 		const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
@@ -391,12 +395,13 @@
 		let horiz = dist * Math.cos(pitch);
 		let camY = py + dist * Math.sin(pitch);
 
-		// CAMERA COLLISION — if a building/prop sits between you and the camera, pull the camera in to just
-		// before it (ray-circle along the actual player→camera direction) so you never see through/into a wall.
+		// CAMERA COLLISION — only substantial buildings occlude the camera. Small props and ambient trunks are
+		// deliberately ignored: letting every bush/rock/tree collapse the orbit camera caused constant zooming
+		// in normal play. Pull in promptly for a real wall, but never all the way onto the character.
 		const cdx = Math.sin(yaw);
 		const cdz = Math.cos(yaw);
 		for (const o of world.objects) {
-			if (CREATURES.has(o.kind)) continue; // see straight through animals
+			if (!CAMERA_BLOCKERS.has(o.kind)) continue;
 			const ox = o.pos[0] - px;
 			const oz = o.pos[2] - pz;
 			const proj = ox * cdx + oz * cdz; // distance along the ray to the object's closest point
@@ -404,21 +409,8 @@
 			const rr = kindDef(o.kind).r * Math.max(o.scale?.[0] ?? 1, o.scale?.[2] ?? 1) + 0.4;
 			const perp2 = (ox - cdx * proj) ** 2 + (oz - cdz * proj) ** 2;
 			if (perp2 >= rr * rr) continue; // the ray misses this footprint
-			horiz = Math.max(0.7, proj - Math.sqrt(rr * rr - perp2)); // pull in to the entry point (min, so we don't slam into you)
+			horiz = Math.max(5, proj - Math.sqrt(rr * rr - perp2)); // keep a stable shoulder-camera distance
 		}
-		// ...and the same for AMBIENT-FOREST trunks, so the camera doesn't clip into trees in a dense forest
-		// (deterministic placement, like the player's own trunk push-out; skip trees culled on roads/water).
-		forEachTreeNear(px, pz, horiz + 1, (tr) => {
-			if (inWater(world.zones, tr.x, tr.z) || onPath(world.paths, tr.x, tr.z)) return;
-			const ox = tr.x - px;
-			const oz = tr.z - pz;
-			const proj = ox * cdx + oz * cdz;
-			if (proj <= 0 || proj > horiz) return;
-			const rr = treeRadius(tr.scale) + 0.4;
-			const perp2 = (ox - cdx * proj) ** 2 + (oz - cdz * proj) ** 2;
-			if (perp2 >= rr * rr) return;
-			horiz = Math.max(0.7, proj - Math.sqrt(rr * rr - perp2));
-		});
 		// SMOOTH the collision distance so the camera EASES in/out of obstacles instead of snapping to/from "right
 		// behind you" every time a prop/tree flickers in the ray test — that snap was the erratic camera jitter.
 		// Pull in quicker than it eases out (so it still ducks a real wall promptly), but a 1-frame false hit now
