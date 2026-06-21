@@ -430,11 +430,14 @@
 {#snippet lionBody()}
 	<T.Mesh geometry={PRIM.box} scale={[0.6, 0.5, 1.3]} position={[0, 0.52, 0]} material={mBody} castShadow />
 	<T.Group bind:ref={head} position={[0, 0.66, 0.82]}>
-		{#if !female}<!-- only MALE lions grow the mane → reads the sexes apart -->
-			<T.Mesh geometry={PRIM.sphere} scale={[0.95, 0.9, 0.9]} position={[0, 0, -0.04]} material={mAccent} castShadow />
+		{#if !female}<!-- only MALE lions grow the mane → reads the sexes apart. Pushed BACK + flatter in z so it
+			rings/frames the face from behind instead of swallowing it (it used to bury the eyes). -->
+			<T.Mesh geometry={PRIM.sphere} scale={[1.0, 0.95, 0.82]} position={[0, 0.03, -0.22]} material={mAccent} castShadow />
 		{/if}
 		<T.Mesh geometry={PRIM.sphere} scale={[0.5, 0.5, 0.5]} material={mBody} castShadow />
-		{@render eyes(0.12, 0.06, 0.2, 0.085)}
+		{@render eyes(0.12, 0.07, 0.27, 0.085)}<!-- eyes forward of the mane's front so a maned male still has a face -->
+		<T.Mesh geometry={PRIM.sphere} scale={[0.26, 0.22, 0.3]} position={[0, -0.04, 0.28]} material={mBody} castShadow /><!-- muzzle: protrudes past the mane -->
+		<T.Mesh geometry={PRIM.sphere} scale={[0.08, 0.06, 0.08]} position={[0, -0.05, 0.42]} material={mAccent} castShadow /><!-- nose tip -->
 		<T.Mesh geometry={PRIM.cone} scale={[0.13, 0.16, 0.13]} position={[0.18, 0.34, 0]} material={mAccent} castShadow />
 		<T.Mesh geometry={PRIM.cone} scale={[0.13, 0.16, 0.13]} position={[-0.18, 0.34, 0]} material={mAccent} castShadow />
 	</T.Group>
