@@ -81,7 +81,7 @@ const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settl
 const BREED_ENERGY: f64 = 0.72; // stamina a parent needs to spare (prey when rested; a predator after a meal)
 const BREED_COOLDOWN: f64 = 24.0; // seconds before a parent can breed again
 const BREED_R2: f64 = 3.2 * 3.2; // a mate within this range
-const BREED_COST: f64 = 0.42; // stamina each parent spends on the birth (no free lunch)
+const BREED_COST: f64 = 0.42; // fullness (energy) each parent spends on the birth (no free lunch)
 // ISOLATION RULE (user principle): a pair can only breed AWAY from crowds — a clump can't chain-reproduce into a
 // swarm. `crowd` is the neighbour count within the ~4 m flock radius, and the mate itself is 1 neighbour, so a
 // threshold of 2 means "only the two of them, no third animal within 4 m". This is the main runaway-population
@@ -91,6 +91,17 @@ const POP_CAP: usize = 24; // backstop cap on living of one kind (births fail at
 const JUVENILE_CD: f64 = 28.0; // a newborn carries this breed-cooldown → it must mature before it can breed
 const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
 const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
+
+// ── NUTRITION (the bottom-up population regulator) ──────────────────────────────────────────────────────────
+// Every animal burns `energy` (fullness) and must EAT to refill it. Herbivores GRAZE — but grazing is DENSITY-
+// DEPENDENT: a herbivore in a crowd is on overgrazed ground and refuels poorly, so a herd outgrows its food
+// and starves back down. That's emergent CARRYING CAPACITY (a spatial regrowing food field is the next step).
+// Carnivores already eat-or-weaken via stamina; this layer adds true STARVATION for everyone.
+const ENERGY_DRAIN: f64 = 0.012; // /s fullness ebbs (~80 s empty if it never eats)
+const GRAZE_RATE: f64 = 0.16; // /s a calm herbivore on UNcrowded ground refuels (~5 s to refill)
+const GRAZE_CROWD: f64 = 7.0; // herd size at which ground is fully overgrazed → grazing yields ~nothing
+const STARVE_DAMAGE: f64 = 0.05; // /s health bleeds while fullness is empty (~20 s of famine is fatal; slow enough to recover if food's found)
+const EAT_ENERGY: f64 = 0.7; // fullness a kill restores to the hunter
 const HEAL: f64 = 0.04; // health/s regained while unharmed
 // HYSTERESIS hunger latch (the user's flip-flop fix): a carnivore commits to hunting below LO and won't stop
 // (rest) until eating lifts it past HI — without the gap, energy at one threshold flipped hunting on/off every
@@ -131,8 +142,11 @@ pub struct ManagedAgent {
     pub endurance: f64,
     pub aggressive: bool, // people only — hunts its own kind
     pub seed_id: i32,
-    pub stamina: f64, // 0..1 sprint resource
-    pub health: f64,  // 0..1; ≤0 = death
+    pub stamina: f64, // 0..1 sprint resource (drained by running, recovered by resting)
+    pub energy: f64,  // 0..1 NUTRITION / fullness — drains over time; refuel by EATING (herbivores graze,
+    // carnivores kill). Hits 0 → starvation (health bleeds). Separate from stamina so a fed animal can still be
+    // sprint-tired, and a rested animal can still be starving. This is the bottom-up population regulator.
+    pub health: f64, // 0..1; ≤0 = death
     pub meals: u32,
     pub spooked: f64,
     pub mobbed: bool,
@@ -232,6 +246,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         aggressive: matches!(kind, Kind::Person) && eco::aggressive(seed_id),
         seed_id,
         stamina: if matches!(e.hunts, Hunts::Lower) { 0.45 } else { 1.0 }, // carnivores start a touch hungry
+        energy: 0.8, // start well-fed but not full → must eat to thrive + breed
         health: 1.0,
         meals: 0,
         spooked: 0.0,
@@ -842,6 +857,7 @@ impl World {
                     self.kills.push(p); // caught — turned to a corpse below
                     self.agents[i].meals += 1;
                     self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
+                    self.agents[i].energy = (self.agents[i].energy + EAT_ENERGY).min(1.0); // the meal fills its belly
                     // EAT — a kill refuels energy; once gorged (full_after kills) it drops into a food-coma
                     if eco(self.agents[i].kind).full_after.map_or(false, |fa| self.agents[i].meals >= fa) {
                         self.agents[i].stamina = self.agents[i].stamina.min(0.15);
@@ -951,7 +967,25 @@ impl World {
                     self.agents[i].hungry = false;
                 }
             }
-            self.agents[i].health = (self.agents[i].health + HEAL * DT).min(1.0);
+            // ── NUTRITION: every animal burns fullness; NON-predators FORAGE it back (herbivores + people), but
+            // overgrazed (crowded) ground yields little → a herd outgrows its food and starves back (carrying
+            // capacity). Carnivores refill only by killing (above). The player's pet is exempt (magically fed).
+            if self.agents[i].companion {
+                self.agents[i].energy = 1.0;
+            } else {
+                let mut en = self.agents[i].energy - ENERGY_DRAIN * DT;
+                if !is_carnivore && boost <= 1.0 && self.agents[i].spooked <= 0.0 {
+                    let lushness = (1.0 - self.agents[i].crowd as f64 / GRAZE_CROWD).max(0.0);
+                    en += GRAZE_RATE * lushness * DT;
+                }
+                self.agents[i].energy = en.clamp(0.0, 1.0);
+            }
+            // health heals when fed, but BLEEDS when the belly's empty (starvation) → overpopulation dies back
+            if self.agents[i].energy > 0.0 {
+                self.agents[i].health = (self.agents[i].health + HEAL * DT).min(1.0);
+            } else {
+                self.agents[i].health = (self.agents[i].health - STARVE_DAMAGE * DT).max(0.0);
+            }
             if self.agents[i].spooked > 0.0 {
                 self.agents[i].spooked -= DT;
             }
@@ -1005,8 +1039,8 @@ impl World {
                 self.births.push(((iz + jz) * 0.5) as f32);
                 self.agents[i].breed_cd = BREED_COOLDOWN;
                 self.agents[j].breed_cd = BREED_COOLDOWN;
-                self.agents[i].stamina = (self.agents[i].stamina - BREED_COST).max(0.0);
-                self.agents[j].stamina = (self.agents[j].stamina - BREED_COST).max(0.0);
+                self.agents[i].energy = (self.agents[i].energy - BREED_COST).max(0.0);
+                self.agents[j].energy = (self.agents[j].energy - BREED_COST).max(0.0);
                 pop[kc] += 1; // the baby counts → caps births this tick too
             }
         }
@@ -1041,7 +1075,7 @@ impl World {
         !m.dead
             && !m.asleep
             && m.breed_cd <= 0.0
-            && m.stamina > BREED_ENERGY
+            && m.energy > BREED_ENERGY // WELL-FED (nutrition), not merely rested → food limits breeding
             && !m.mobbed
             && m.spooked <= 0.0
             && m.crowd < BREED_CROWD
@@ -1814,12 +1848,37 @@ mod tests {
         w.set_player(1e4, 1e4);
         let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
-        w.agents[a].stamina = 0.3; // hungry → not breed-ready
+        w.agents[a].energy = 0.3; // hungry → not breed-ready
         w.set_breed_cooldown(b, JUVENILE_CD); // a juvenile, still maturing
         for t in 1..=6 {
             w.tick_once(t);
         }
         assert_eq!(w.births().len(), 0, "a hungry parent + a juvenile mate → no birth");
+    }
+
+    #[test]
+    fn a_lone_herbivore_grazes_its_fullness_back_up() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        let r = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        w.agents[r].energy = 0.2; // got hungry
+        for t in 1..=30 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[r].energy > 0.3, "a calm, uncrowded herbivore grazes back up; got {}", w.agents[r].energy);
+    }
+
+    #[test]
+    fn empty_fullness_starves_health() {
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        // a carnivore can't graze, and with no prey it can't refill → empty fullness must bleed health (starvation)
+        let c = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.35, 1);
+        w.agents[c].energy = 0.0;
+        for t in 1..=30 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[c].health < 1.0, "empty fullness starves (health bleeds); got {}", w.agents[c].health);
     }
 
     #[test]
