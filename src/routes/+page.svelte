@@ -7,6 +7,8 @@
 	import Scene from '$lib/components/Scene.svelte';
 	import Player from '$lib/components/Player.svelte';
 	import EditController from '$lib/components/EditController.svelte';
+	import AdaptiveResolution from '$lib/components/AdaptiveResolution.svelte';
+	import { perf } from '$lib/perf.svelte';
 	import BuildBar from '$lib/components/BuildBar.svelte';
 	import FpsPanel from '$lib/components/FpsPanel.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
@@ -30,11 +32,11 @@
 	let shareMsg = $state('');
 	let liveUrl = $state(false); // gate the live-URL updater until the initial (maybe shared) world has settled
 
-	// The LLM and the renderer share one GPU. While a build is generating, the model saturates the
-	// GPU and frames stutter — so we render at a low resolution for those ~2s (slightly soft, but
-	// smooth), then snap back to crisp. Threlte applies `dpr` reactively to renderer.setPixelRatio.
-	const fullDpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio, 2) : 1.5;
-	const dpr = $derived(llm.busy ? 0.6 : fullDpr);
+	// Render pixel-ratio. Two drivers, in priority: (1) while a build is GENERATING, the model saturates the
+	// shared GPU → pin to a low 0.6 for those ~2s (soft but smooth), then release. (2) otherwise, DYNAMIC
+	// RESOLUTION SCALING (perf.dpr, driven by AdaptiveResolution inside the Canvas) holds the fps target by
+	// trading resolution under load — the "120fps no matter what" knob. Threlte applies dpr reactively.
+	const dpr = $derived(llm.busy ? 0.6 : perf.dpr);
 
 	onMount(async () => {
 		const m = location.hash.match(/[#&]w=([^&]+)/);
@@ -131,6 +133,7 @@
 <div class="fixed inset-0" style:background={SKY_BG[world.sky] ?? SKY_BG.day}>
 	<Canvas shadows={PCFShadowMap} {dpr}>
 		<World>
+			<AdaptiveResolution />
 			<Scene {world} />
 			<Player {world} />
 			<EditController {world} />
