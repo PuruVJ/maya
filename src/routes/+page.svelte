@@ -15,7 +15,7 @@
 	import { nature } from '$lib/nature.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
-	import { demoWorld, emptyWorld, capCreatures, type World as WorldData } from '$lib/world';
+	import { demoWorld, emptyWorld, capCreatures, fastForward, type World as WorldData } from '$lib/world';
 	import { encodeWorld, decodeWorld } from '$lib/share';
 	import { loadWorld, saveWorld } from '$lib/worldStore';
 	import { SKY_BG } from '$lib/kinds';
@@ -70,14 +70,17 @@
 			// normal open → restore from the world store (shared backend → local IndexedDB cache → else the demo)
 			const saved = await loadWorld();
 			if (saved && Array.isArray(saved.objects)) {
-				world = capCreatures(dedupeObjects(saved));
-				// how long were you away? (fast-forward seam — for now we just acknowledge the gap; the deterministic
-				// aggregate advance from big-world.md §3 plugs in here next.)
+				const w = capCreatures(dedupeObjects(saved));
+				// DETERMINISTIC AGGREGATE FAST-FORWARD (big-world.md §3): advance the population to "now" by however
+				// long you were away — closed-form, so even a week away is instant (no tick-replay hang).
 				const away = saved.savedAt ? Date.now() - saved.savedAt : 0;
+				const net = away > 60_000 ? fastForward(w, away, 'ff' + Math.random().toString(36).slice(2, 7) + '-') : 0;
+				world = w;
 				if (away > 60_000) {
 					const m = Math.round(away / 60_000);
 					const txt = m < 90 ? `${m} min` : m < 2160 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} d`;
-					nature.announce(`🌍 Welcome back — ${txt} passed in the world while you were away`);
+					const change = net > 0 ? ` · the world grew by ${net}` : net < 0 ? ` · ${-net} fewer creatures remain` : '';
+					nature.announce(`🌍 Welcome back — ${txt} passed while you were away${change}`);
 				}
 			}
 		}

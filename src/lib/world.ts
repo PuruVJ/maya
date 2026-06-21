@@ -114,6 +114,84 @@ export function capCreatures<T extends { objects: { kind: string; pos: [number, 
 	return world;
 }
 
+// Per-second relaxation rate toward carrying capacity while you're AWAY (fast breeders climb faster). Tuned so a
+// few minutes away nudges the world, a few hours equilibrates it.
+const FF_RATE: Record<string, number> = { rabbit: 0.0016, kangaroo: 0.0012, person: 0.0009, cat: 0.001, lion: 0.0008, dinosaur: 0.0006 };
+const FF_FLOOR: Record<string, number> = { rabbit: 6, kangaroo: 4, person: 4, cat: 4, lion: 2 }; // a species this low re-seeds (immigration would have)
+const logisticTo = (n0: number, cap: number, r: number): number => {
+	if (cap <= 0) return 0;
+	const n = Math.max(n0, 0.5); // a hair above 0 so a re-seeded species can climb the curve
+	return cap / (1 + (cap / n - 1) * Math.exp(-r));
+};
+
+/** DETERMINISTIC AGGREGATE FAST-FORWARD (big-world.md §3). Given how long the player was away (ms), advance the
+ *  population to "now" WITHOUT replaying every tick (that would freeze the tab). Each species relaxes toward its
+ *  carrying capacity along a closed-form logistic — O(1) per species, so a week away costs the same as a minute.
+ *  Prey advance first; predators then follow the NEW prey count. Materialises by adding/removing creature objects
+ *  to hit the advanced counts (new arrivals carry the evolved average vigour). Returns the net population change. */
+export function fastForward<T extends { objects: WorldObject[] }>(world: T, elapsedMs: number, idPrefix: string): number {
+	const dt = Math.min(elapsedMs / 1000, 86_400); // model at most ~1 day of effect (the logistic saturates anyway)
+	if (dt < 30) return 0; // a blink away → nothing to do
+	const count: Record<string, number> = {};
+	let geneSum = 0;
+	let geneN = 0;
+	let minX = Infinity;
+	let maxX = -Infinity;
+	let minZ = Infinity;
+	let maxZ = -Infinity;
+	for (const o of world.objects) {
+		if (!CREATURE_KINDS.has(o.kind) && !BUILDING_KINDS.has(o.kind)) continue;
+		if (CREATURE_KINDS.has(o.kind)) {
+			count[o.kind] = (count[o.kind] ?? 0) + 1;
+			geneSum += o.gene ?? 1;
+			geneN++;
+		}
+		minX = Math.min(minX, o.pos[0]);
+		maxX = Math.max(maxX, o.pos[0]);
+		minZ = Math.min(minZ, o.pos[2]);
+		maxZ = Math.max(maxZ, o.pos[2]);
+	}
+	if (!Number.isFinite(minX)) return 0; // an empty world → nothing to advance
+	const avgGene = geneN > 0 ? geneSum / geneN : 1;
+	const scale = worldAreaScale(world.objects);
+	const working: Record<string, number> = { ...count };
+	const target: Record<string, number> = {};
+	for (const k of ['rabbit', 'kangaroo', 'person', 'cat', 'lion', 'dinosaur']) {
+		const cap = popCaps(working, scale)[k] ?? 0; // predators read the already-advanced prey in `working`
+		let n0 = working[k] ?? 0;
+		if (n0 <= 0) {
+			if (!FF_FLOOR[k]) continue; // a fully-extinct apex (dino) stays gone — it returns via Mother Nature in play
+			n0 = FF_FLOOR[k]; // a crashed prey/meso species would have been re-seeded by immigration while away
+		} else if (FF_FLOOR[k] && n0 < FF_FLOOR[k]) {
+			n0 = FF_FLOOR[k];
+		}
+		target[k] = Math.round(logisticTo(n0, cap, FF_RATE[k] * dt));
+		working[k] = target[k];
+	}
+	// materialise the deltas — add scattered newcomers (evolved vigour) or remove the surplus
+	let net = 0;
+	let nid = 0;
+	for (const k of Object.keys(target)) {
+		const have = count[k] ?? 0;
+		const want = target[k];
+		if (want > have) {
+			for (let i = 0; i < want - have; i++) {
+				const x = minX + Math.random() * (maxX - minX);
+				const z = minZ + Math.random() * (maxZ - minZ);
+				const gene = Math.max(0.6, Math.min(1.6, avgGene - 0.05 + Math.random() * 0.1));
+				world.objects.push({ id: idPrefix + nid++, kind: k, pos: [x, 0, z], gene });
+				net++;
+			}
+		} else if (want < have) {
+			let drop = have - want;
+			for (let i = world.objects.length - 1; i >= 0 && drop > 0; i--) {
+				if (world.objects[i].kind === k) ((world.objects.splice(i, 1), drop--, net--));
+			}
+		}
+	}
+	return net;
+}
+
 export interface World {
 	v: number;
 	name: string;
