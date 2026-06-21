@@ -251,9 +251,13 @@
 				const gx = Math.round(bd.x / 8) * 8;
 				const gz = Math.round(bd.z / 8) * 8;
 				if (world.objects.some((o) => BUILDING_KINDS.has(o.kind) && Math.abs(o.pos[0] - gx) < 6 && Math.abs(o.pos[2] - gz) < 6)) continue; // plot taken
-				// sit the house ON the ground (terrain height), not y=0 — on raised ground a y=0 house buries into
-				// the hill and only its roof shows (looked "tiny"). heightAt mirrors the renderer's ground.
-				world.objects.push({ id: housePrefix + houseN++, kind: 'house', pos: [gx, heightAt(gx, gz, world.terrain), gz] });
+				// VARIED HOMES — a town shouldn't be identical boxes. Roll a size/kind: cosy cabins, modest houses,
+				// the occasional big manor (scale up). Sit it ON the ground (terrain height), not y=0 (else it buries
+				// into a hill and only the roof shows). heightAt mirrors the renderer's ground.
+				const roll = Math.random();
+				const kind = roll < 0.3 ? 'cabin' : 'house';
+				const s = roll < 0.3 ? 0.85 + Math.random() * 0.25 : roll < 0.8 ? 0.9 + Math.random() * 0.35 : 1.35 + Math.random() * 0.4; // small cabins · modest houses · big manors
+				world.objects.push({ id: housePrefix + houseN++, kind, pos: [gx, heightAt(gx, gz, world.terrain), gz], scale: [s, s, s] });
 				houses++;
 			}
 		}
