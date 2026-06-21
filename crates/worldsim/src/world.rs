@@ -87,6 +87,12 @@ const BREED_COST: f64 = 0.42; // fullness (energy) each parent spends on the bir
 // the two of them"), but that throttled births below the death rate → population decline; relaxed to 5 so a pair
 // in light company can still breed while a true horde (5+ packed) still can't. Gestation + cooldown also brake it.
 const BREED_CROWD: u32 = 5;
+// FEAR vs the whole notice radius: prey FLEE any predator within 40 m (`danger²`), but they shouldn't be
+// STERILIZED by one that's merely on the horizon — that froze ALL breeding in a predator-present world (the
+// telemetry showed 0 births over 8000 ticks: a perpetual stalemate where prey were always "within 40 m of a
+// hunter" so never bred, yet predators never closed the kill). Breeding is interrupted only by a hunter that's
+// genuinely RIGHT THERE (≤14 m); a calm pair grazing with a lion on the skyline can still mate.
+const BREED_FEAR_R2: f64 = 14.0 * 14.0;
 const POP_CAP: usize = 40; // backstop cap on living of one kind (raised so populations have room to recover/grow)
 const JUVENILE_CD: f64 = 28.0; // a newborn carries this breed-cooldown → it must mature before it can breed
 const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
@@ -1266,7 +1272,7 @@ impl World {
             && !m.mobbed
             && m.spooked <= 0.0
             && m.crowd < BREED_CROWD
-            && self.transient[i].threat.is_none()
+            && self.transient[i].threat_d > BREED_FEAR_R2 // a hunter must be RIGHT HERE to interrupt mating, not just within the 40 m flee radius
             && !self.transient[i].near_predator
     }
 
@@ -2040,6 +2046,28 @@ mod tests {
         assert_eq!(w.births()[0], 0.0, "the litter is rabbits (kind code 0)");
         // both parents are on a long breed cooldown → just the one litter this window, not a runaway
         assert!(babies <= 5, "one litter, not a runaway; got {babies}");
+    }
+
+    #[test]
+    fn a_pair_breeds_though_a_predator_is_in_the_distance() {
+        // REGRESSION: a hunter anywhere within the 40 m flee-notice radius used to set `threat`, which the breed
+        // gate treated as "no mating" — so in any predator-present world the WHOLE herd was sterile (telemetry:
+        // 0 births / 0 kills over 8000 ticks, a frozen stalemate). Breeding now only balks at a hunter ≤14 m.
+        let mut w = World::new();
+        w.set_player(1e4, 1e4);
+        w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // seeds 1,2 → an opposite-sex, well-fed pair
+        w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
+        w.spawn(animal(25.0, 0.0, 3), Kind::Cat, 0.35, 3); // a hunter in view (sets threat) but 25 m off, not on top of them
+        // they should conceive almost immediately — before the cat can close the gap
+        let mut conceived = false;
+        for t in 1..=12 {
+            w.tick_once(t);
+            if w.agents.iter().any(|m| m.kind == Kind::Rabbit && m.pregnant > 0.0) {
+                conceived = true;
+                break;
+            }
+        }
+        assert!(conceived, "a calm, well-fed pair breeds with a predator 25 m away (it must be ≤14 m to stop them)");
     }
 
     #[test]
