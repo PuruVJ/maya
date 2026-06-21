@@ -77,15 +77,33 @@ export function drainBuilds(): Build[] {
 const EV_NAME = ['', 'kill', 'starve', 'oldage', 'birth', 'build', 'conceive'] as const; // event code → name (see world.rs)
 let evBatch: { t: string; kind: string; x: number; z: number }[] = [];
 let lastFlush = 0;
+const POP_EVERY = 500; // sim ticks between POPULATION snapshots → a time series of who's alive (births vs deaths,
+let lastPop = 0; // predator/prey ratios) so the agent can SEE a boom/crash, not just infer it from event counts.
+/** Live count by species, straight off the authoritative JS registry (corpses excluded). */
+function popSnapshot(): Record<string, number> {
+	const c: Record<string, number> = {};
+	agentManager.forEach((m) => {
+		if (!m.dead) c[m.kind] = (c[m.kind] ?? 0) + 1;
+	});
+	return c;
+}
 function flushTelemetry(now: number): void {
-	if (evBatch.length === 0) return;
-	// throttle: at most ~1 POST / 4 s, or when the batch gets large, so we never spam the endpoint
-	if (now - lastFlush < 4000 && evBatch.length < 200) return;
-	lastFlush = now;
-	const batch = evBatch;
-	evBatch = [];
-	// fire-and-forget; the endpoint appends to D1. tick `now` is passed so events carry sim-time.
-	fetch('/api/telemetry', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tick: now, events: batch }) }).catch(() => {
+	// throttle events (~1 POST / 4 s, or sooner if the batch is large); population rides a slower fixed cadence.
+	const evDue = evBatch.length > 0 && (now - lastFlush >= 4000 || evBatch.length >= 200);
+	const popDue = now - lastPop >= POP_EVERY;
+	if (!evDue && !popDue) return;
+	const body: { tick: number; events?: typeof evBatch; pop?: Record<string, number> } = { tick: now };
+	if (evDue) {
+		body.events = evBatch;
+		evBatch = [];
+		lastFlush = now;
+	}
+	if (popDue) {
+		body.pop = popSnapshot();
+		lastPop = now;
+	}
+	// fire-and-forget; the endpoint appends to D1. tick `now` carries sim-time for both events + the snapshot.
+	fetch('/api/telemetry', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {
 		/* offline / no DB → telemetry is best-effort, never blocks the sim */
 	});
 }
