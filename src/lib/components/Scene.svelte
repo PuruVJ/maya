@@ -38,7 +38,7 @@
 	import { treeAt, treeRadius, onPath, SCATTER_STEP } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { drainBirths } from '$lib/rustSim';
-	import { agentManager } from '$lib/agents.svelte';
+	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { setRustObstacles } from '$lib/rustSim';
 	import { playerState } from '$lib/playerState.svelte';
 	import { wind } from '$lib/wind';
@@ -149,6 +149,7 @@
 	const REVEAL_FRAMES = 12; // ...but catch a big backlog up within ~this many frames (≈0.2 s) so it's not a slow drip
 	let revealed = $state(0);
 	let babyN = 0; // unique-id counter for Rust-bred newborns (id 'b<n>' → distinct from the engine's 'o<n>')
+	const corpseReap = new Set<string>(); // reused each frame → ids of fully-decayed corpses to remove (no per-frame alloc)
 
 	// LAZY / DISTANCE-CAPPED REVEAL — only realize STATIC builds (houses/trees/props/lamps) NEAR the player; far
 	// ones stay unmounted until you approach (they pop in front of you, emerging from the fog/curve). So reloading
@@ -180,6 +181,19 @@
 		const babies = drainBirths();
 		for (const b of babies) {
 			world.objects.push({ id: 'b' + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true });
+		}
+
+		// CORPSE REAPER: a body that's fully decayed (sunk into the earth, see Critter/Npc) is removed from the
+		// world — unmounting its renderer + despawning it from the Rust sim, and dropping it from the save. Keeps
+		// the now-cyclic world (births ↔ deaths) bounded. Only allocates the id-set on the rare frame one expires.
+		corpseReap.clear();
+		agentManager.forEach((m) => {
+			if (m.dead && m.objId && m.corpseAge > CORPSE_DECAY_SECS) corpseReap.add(m.objId);
+		});
+		if (corpseReap.size > 0) {
+			for (let i = world.objects.length - 1; i >= 0; i--) {
+				if (corpseReap.has(world.objects[i].id)) world.objects.splice(i, 1);
+			}
 		}
 
 		wind.uTime.value += dt; // the ONE shared foliage clock — Tree + AmbientScatter read it (never tick it)

@@ -7,7 +7,7 @@
 	import * as THREE from 'three';
 	import { heightAt } from '$lib/terrain';
 	import { Agent, Spring, type Behavior } from '$lib/steering';
-	import { agentManager, makeManaged, speedFor, LOD2_DIST, type ManagedAgent } from '$lib/agents.svelte';
+	import { agentManager, makeManaged, speedFor, LOD2_DIST, CORPSE_DECAY_SECS, CORPSE_SINK_SECS, type ManagedAgent } from '$lib/agents.svelte';
 	import { seedFrom } from '$lib/rng';
 	import { clock } from '$lib/clock';
 	import { NPC, PRIM, creatureMat, EYE_MAT } from '$lib/sharedAssets';
@@ -124,11 +124,14 @@
 		group.position.set(agent.rx, gy, agent.rz);
 		group.rotation.y = agent.rh;
 
-		// DEAD → collapse flat where it fell, frozen (impostor skips corpses, so always draw it)
+		// DEAD → collapse flat where it fell, frozen (impostor skips corpses, so always draw it). In its final
+		// seconds it SINKS into the earth + shrinks so the reaper (Scene) removing it reads as decay, not a pop.
 		if (managed.dead) {
 			group.visible = true;
+			const sink = Math.max(0, (managed.corpseAge - (CORPSE_DECAY_SECS - CORPSE_SINK_SECS)) / CORPSE_SINK_SECS);
 			core.rotation.x = flop.step(dt, Math.PI / 2);
-			core.position.y = 0;
+			core.position.y = -sink * (1.0 + objScale);
+			if (sink > 0) core.scale.setScalar(objScale * growth * (1 - 0.35 * sink));
 			return;
 		}
 

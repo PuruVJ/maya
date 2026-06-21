@@ -60,6 +60,13 @@ const LOD1_DIST = 26;
 export const LOD2_DIST = 62;
 const SHADOW_AGENTS = 12; // only the nearest few cast shadows (shadows are the dominant cost at scale)
 
+// CORPSE DECAY: now that reproduction makes the world cycle life→death→corpse forever, bodies would pile up
+// without bound (scene graph + the saved share-link both grow). A corpse lingers (you wanted to SEE dead
+// bodies) then, in its final seconds, sinks into the ground and is reaped — its world-object is removed, which
+// unmounts the renderer and despawns it from the Rust sim (see Scene's reaper + rustSim's unregister→despawn).
+export const CORPSE_DECAY_SECS = 62; // a body lingers this long before it's gone
+export const CORPSE_SINK_SECS = 6; // …sinking into the earth over the last few of those seconds
+
 export interface ManagedAgent {
 	agent: Agent;
 	kind: string; // 'rabbit' | 'cat' | 'kangaroo' | 'person' | 'lion' | 'dinosaur'
@@ -84,6 +91,7 @@ export interface ManagedAgent {
 	spooked: number; // seconds left fleeing a recent attacker
 	mobbed: boolean; // being swarmed
 	dead: boolean; // caught → corpse (mirrored from Rust)
+	corpseAge: number; // seconds it's been dead → drives the sink-and-reap decay (0 while alive)
 	asleep: boolean; // resting (mirrored from Rust)
 	hunting: boolean; // this apex is charging YOU right now (mirrored from Rust) → its eyeshine glares red
 	juvenile?: boolean; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown when it spawns into the sim
@@ -122,6 +130,7 @@ export function makeManaged(agent: Agent, kind: string, radius: number, menu: Be
 		spooked: 0,
 		mobbed: false,
 		dead: false,
+		corpseAge: 0,
 		asleep: false,
 		hunting: false,
 		sleepTimer: 0,

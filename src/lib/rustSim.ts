@@ -228,6 +228,7 @@ export function tickRust(dt: number): void {
 		m.health = healths[i];
 		const f = flags[i];
 		m.dead = (f & 1) !== 0;
+		m.corpseAge = m.dead ? m.corpseAge + dt : 0; // age corpses → Scene's reaper sinks + removes the old ones
 		m.asleep = (f & 2) !== 0;
 		m.hunting = (f & 8) !== 0; // bit3 → this apex is charging the player → the view glares its eyes
 		if (m.hunting) {

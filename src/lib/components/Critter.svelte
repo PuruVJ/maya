@@ -11,7 +11,7 @@
 	import { heightAt } from '$lib/terrain';
 	import { playerState } from '$lib/playerState.svelte';
 	import { Agent, Spring, type Behavior } from '$lib/steering';
-	import { agentManager, makeManaged, speedFor, LOD2_DIST, type ManagedAgent } from '$lib/agents.svelte';
+	import { agentManager, makeManaged, speedFor, LOD2_DIST, CORPSE_DECAY_SECS, CORPSE_SINK_SECS, type ManagedAgent } from '$lib/agents.svelte';
 	import { seedFrom } from '$lib/rng';
 	import { clock } from '$lib/clock';
 	import { PRIM, litMat, creatureMat, EYE_PREY_MAT, EYE_PRED_MAT, EYE_HUNT_MAT, type CoatPattern } from '$lib/sharedAssets';
@@ -189,13 +189,17 @@
 			});
 		}
 
-		// DEAD → a corpse on its side, frozen where it fell (impostor skips corpses → always draw it)
+		// DEAD → a corpse on its side, frozen where it fell (impostor skips corpses → always draw it). In its
+		// final seconds it SINKS into the earth and shrinks, so the reaper (Scene) removing it reads as decay,
+		// not a pop. sink 0→1 over CORPSE_SINK_SECS; buried proportional to body size so big corpses fully vanish.
 		if (managed.dead) {
 			group.visible = true;
+			const sink = Math.max(0, (managed.corpseAge - (CORPSE_DECAY_SECS - CORPSE_SINK_SECS)) / CORPSE_SINK_SECS);
 			core.rotation.z = flop.step(dt, Math.PI / 2);
 			core.rotation.x = 0;
-			core.position.y = bodyY.step(dt, -0.05);
-			core.scale.set(eSC, eSC, eSC);
+			core.position.y = bodyY.step(dt, -0.05) - sink * (1.0 + SC);
+			const ds = eSC * (1 - 0.35 * sink);
+			core.scale.set(ds, ds, ds);
 			return;
 		}
 
