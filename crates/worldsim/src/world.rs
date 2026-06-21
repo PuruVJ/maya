@@ -41,6 +41,8 @@ const GIVEUP_ENERGY: f64 = 0.06; // ...or it abandons the chase early when this 
 // mobbing (chunk e) — when prey heavily outnumber one hunter, the herd turns and swarms it
 const MOB_MIN: u32 = 4; // this many prey fleeing ONE hunter flips them flee → swarm
 const MOB_RELEASE: u32 = 3; // hysteresis: a mobbed hunter stays mobbed until the swarm thins BELOW this
+const SURROUND_RALLY: u32 = 10; // a hunter THIS swarmed is deep inside a crowd → no escape, so EVERY adult (women
+// too, not just the guard men) turns and fights a proper brawl; only children still flee. (mob_count, people ×2.)
 const GUARD_RALLY: u32 = 4; // mob_count (people double-weighted) on a hunter at which adult MALE people stop fleeing
 // and CHARGE it instead — village guards rallying to defend the threatened (a female + child). 4 ⇒ ≥1 OTHER person
 // is also under threat, so a lone man doesn't suicide; women + children always flee to safety.
@@ -988,14 +990,14 @@ impl World {
                 // VILLAGE GUARDS: an adult MALE person holds his ground + charges a predator threatening the
                 // community (rally count reached) instead of fleeing — defending the women + children, who flee.
                 let rally = self.transient[i].threat.map_or(0, |t| self.transient[t].mob_count);
-                let is_guard = matches!(self.agents[i].kind, Kind::Person)
-                    && !is_female(self.agents[i].seed_id)
-                    && self.agents[i].age >= self.agents[i].lifespan * 0.15
-                    && rally >= GUARD_RALLY;
-                let (dx, dz, w) = if threat_mobbed || is_guard {
-                    (tx - ax, tz - az, MOB_W) // converge on the hunter (a mob, or a guard standing to defend)
+                let person_adult = matches!(self.agents[i].kind, Kind::Person) && self.agents[i].age >= self.agents[i].lifespan * 0.15;
+                let is_guard = person_adult && !is_female(self.agents[i].seed_id) && rally >= GUARD_RALLY;
+                // CORNERED: a predator deep inside a crowd → every adult (women too) turns and fights, no escape.
+                let cornered = person_adult && rally >= SURROUND_RALLY;
+                let (dx, dz, w) = if threat_mobbed || is_guard || cornered {
+                    (tx - ax, tz - az, MOB_W) // converge on the hunter (mob · guard men · or everyone, cornered)
                 } else {
-                    (ax - tx, az - tz, FLEE_W) // flee the hunter (women, children, prey)
+                    (ax - tx, az - tz, FLEE_W) // flee the hunter (women + children at the edge, prey)
                 };
                 let d = dx.hypot(dz).max(0.1);
                 self.forces[i].0 += (dx / d) * a_max * w;
