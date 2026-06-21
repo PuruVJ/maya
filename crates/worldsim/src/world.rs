@@ -165,7 +165,7 @@ fn gestation(kind: Kind) -> f64 {
         Kind::Kangaroo => 12.0,
         Kind::Lion => 16.0,
         Kind::Dinosaur => 20.0,
-        Kind::Person => 24.0,
+        Kind::Person => 16.0, // shortened (was 24) → families grow at a livelier clip (user: "making one by one")
     }
 }
 
