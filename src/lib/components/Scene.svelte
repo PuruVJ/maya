@@ -175,6 +175,16 @@
 	const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
 	const HOUSE_CAP = 140;
 	const corpseReap = new Set<string>(); // reused each frame → ids of fully-decayed corpses to remove (no per-frame alloc)
+	// IMMIGRATION FLOOR — a living world must not be able to DIE for good. If a key species falls below a critical
+	// count (an over-hunted herd, or a world reloaded after a prior collapse — we found one persisted as a lone
+	// cat), a small wave wanders in from beyond the treeline to re-seed it. Spawned as ADULTS in a pair (so they
+	// can breed back) at the world's edge, gently (a couple per check) so it reads as migration, not a popup. This
+	// is the rescue-effect half of a self-sustaining ecosystem; natural breeding (Rust) carries it from there.
+	const migrantPrefix = 'm' + Math.random().toString(36).slice(2, 8) + '-';
+	let migrantN = 0;
+	const IMMIGRATION: Record<string, number> = { rabbit: 6, kangaroo: 4, person: 4, cat: 2, lion: 1 };
+	const RESTOCK_EVERY = 9; // seconds between restock checks (gradual — a collapsed species trickles back over time)
+	let restockT = RESTOCK_EVERY - 2; // first check soon after load (so a barren reloaded world revives quickly)
 
 	// LAZY / DISTANCE-CAPPED REVEAL — only realize STATIC builds (houses/trees/props/lamps) NEAR the player; far
 	// ones stay unmounted until you approach (they pop in front of you, emerging from the fog/curve). So reloading
@@ -234,6 +244,30 @@
 		if (corpseReap.size > 0) {
 			for (let i = world.objects.length - 1; i >= 0; i--) {
 				if (corpseReap.has(world.objects[i].id)) world.objects.splice(i, 1);
+			}
+		}
+
+		// IMMIGRATION: rescue any species that's dropped below its floor (extinction-proofing). Counts the LIVE
+		// agents, and for each deficient kind walks in a couple of adults from the edge so a wiped-out herd can
+		// rebuild itself (and then breed naturally). Throttled to a slow cadence so it's a trickle, not a flood.
+		restockT += dt;
+		if (restockT >= RESTOCK_EVERY) {
+			restockT = 0;
+			const live: Record<string, number> = {};
+			agentManager.forEach((m) => {
+				if (!m.dead) live[m.kind] = (live[m.kind] ?? 0) + 1;
+			});
+			for (const kind in IMMIGRATION) {
+				const deficit = IMMIGRATION[kind] - (live[kind] ?? 0);
+				if (deficit <= 0) continue;
+				const bring = Math.min(2, deficit); // a pair at a time → both sexes arrive over successive waves
+				for (let k = 0; k < bring; k++) {
+					const a = Math.random() * Math.PI * 2;
+					const r = 55 + Math.random() * 30; // beyond the immediate clearing, within the wander range
+					const x = playerState.pos[0] + Math.cos(a) * r;
+					const z = playerState.pos[2] + Math.sin(a) * r;
+					world.objects.push({ id: migrantPrefix + migrantN++, kind, pos: [x, 0, z] });
+				}
 			}
 		}
 
