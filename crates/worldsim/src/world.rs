@@ -16,8 +16,8 @@ use crate::steering::{Agent, AgentOpts, Behavior};
 
 const NEIGHBOR_RADIUS: f64 = 4.0; // also the grid cell size (flocking only)
 const DENSITY_THRESHOLD: f64 = 0.4; // spread ramps in almost immediately (was 1.0 → small clumps lingered)
-const SEP_WEIGHT: f64 = 1.6;
-const ALI_WEIGHT: f64 = 0.4;
+const SEP_WEIGHT: f64 = 1.8; // push apart a touch harder → divergent fan-out
+const ALI_WEIGHT: f64 = 0.05; // was 0.4 → agents matched velocities + moved as ONE direction; near-off so they FAN OUT
 
 // food-chain targeting (chunk b)
 const SEEK: f64 = 100.0; // a predator notices + stalks prey within this radius; also the seek-grid cell size
@@ -976,9 +976,13 @@ impl World {
         };
 
         let agents = &self.agents;
+        // a hunter must NOT flock-separate from its own prey — the comfort-spread would shove it off before the
+        // chase can close + catch (this regressed predation when the density gate dropped). The chase force
+        // (behaviour pass) drives it to the prey instead; the catch fires on contact.
+        let prey = self.transient[i].prey;
         self.grid.for_each_neighbor(ax, az, |j| {
             let j = j as usize;
-            if j == i || agents[j].dead {
+            if j == i || agents[j].dead || prey == Some(j) {
                 return;
             }
             let o = &agents[j].agent;
@@ -1232,7 +1236,9 @@ mod tests {
             (a.x - b.x).hypot(a.z - b.z)
         };
         assert!(d1 > d0 + 0.2, "expected separation: d0={d0}, d1={d1}");
-        assert_eq!(w.agents[0].crowd, 1); // each sees exactly one neighbour
+        // with the stronger dispersion tune they fan apart fast — often BEYOND the 4m neighbour radius within
+        // 40 ticks (crowd → 0), which is the whole point. So just assert they separated well, not a fixed crowd.
+        assert!(d1 > 1.0, "expected a strong fan-out, not a tight pair: d1={d1}");
     }
 
     #[test]
