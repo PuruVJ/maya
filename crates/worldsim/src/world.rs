@@ -93,7 +93,6 @@ const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settl
 // under the per-kind cap + not over-crowded → a baby is born between them; both parents pay energy + a cooldown.
 const BREED_ENERGY: f64 = 0.6; // fullness a parent needs to spare (lowered: 0.72 starved out reproduction → decline)
 const BREED_COOLDOWN: f64 = 10.0; // seconds before a parent can breed again (16 still gave ~0 births → faster)
-const BREED_R2: f64 = 5.0 * 5.0; // a mate within this range (3.2 was inside the flock comfort-spread → pairs never met)
 const HERD_BREED_R2: f64 = 13.0 * 13.0; // a mate within this range for HERD species — wide enough that a sparse,
 // scattered population (a handful of kangaroos, a thinned herd) can still pair up, not just a dense flock/city.
 const PRED_BREED_R2: f64 = 24.0 * 24.0; // SOLITARY hunters range far wider — they don't pack tight like prey herds,

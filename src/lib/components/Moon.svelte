@@ -27,7 +27,7 @@
 	const moonMat = new THREE.ShaderMaterial({
 		transparent: true,
 		depthWrite: false,
-		depthTest: false, // a sky element — never let the curved/reared far terrain or fog occlude it
+		depthTest: true, // sits at FAR in the sky → closer terrain + the CHARACTER occlude it (was false → it floated in FRONT of the whole world)
 		toneMapped: false, // the night exposure (0.5) was halving it toward invisible against the dark sky
 		uniforms: { uDim: { value: DIM } },
 		vertexShader: VERT,
@@ -74,7 +74,7 @@
 	const haloMat = new THREE.ShaderMaterial({
 		transparent: true,
 		depthWrite: false,
-		depthTest: false,
+		depthTest: true,
 		toneMapped: false,
 		blending: THREE.AdditiveBlending,
 		uniforms: { uDim: { value: DIM } },
