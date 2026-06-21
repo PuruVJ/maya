@@ -69,7 +69,17 @@
 		} else {
 			// normal open → restore from the world store (shared backend → local IndexedDB cache → else the demo)
 			const saved = await loadWorld();
-			if (saved && Array.isArray(saved.objects)) world = capCreatures(dedupeObjects(saved));
+			if (saved && Array.isArray(saved.objects)) {
+				world = capCreatures(dedupeObjects(saved));
+				// how long were you away? (fast-forward seam — for now we just acknowledge the gap; the deterministic
+				// aggregate advance from big-world.md §3 plugs in here next.)
+				const away = saved.savedAt ? Date.now() - saved.savedAt : 0;
+				if (away > 60_000) {
+					const m = Math.round(away / 60_000);
+					const txt = m < 90 ? `${m} min` : m < 2160 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} d`;
+					nature.announce(`🌍 Welcome back — ${txt} passed in the world while you were away`);
+				}
+			}
 		}
 		liveUrl = true; // from here on, edits persist to the world store (see effect below)
 	});
@@ -96,6 +106,7 @@
 			return true;
 		});
 		snap.start = playerPose(); // resume the player where they stood (Player restores world.start on load)
+		snap.savedAt = Date.now(); // stamp the save → on next load we know how long you were away (fast-forward seam)
 		return snap;
 	}
 	// EDITS → debounced save to the world store (local IndexedDB cache + best-effort sync to the shared backend).

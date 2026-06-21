@@ -127,6 +127,9 @@ export interface World {
 	/** Where the player was when the link was made (decoded from the URL) → reopen standing there. Not part
 	 *  of the world proper; set only by share-link decode, read once by Player to place you. */
 	start?: { x: number; z: number; yaw: number };
+	/** Wall-clock ms when this world was last persisted. The seam for the time-based fast-forward (big-world.md
+	 *  §3): on load we know how long you were away, so the world can deterministically advance to "now". */
+	savedAt?: number;
 }
 
 export interface Player {
