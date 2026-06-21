@@ -145,7 +145,7 @@
 	$effect(() => {
 		if (!liveUrl) return;
 		const persist = () => saveWorld(liveWorldSnapshot());
-		const id = setInterval(persist, 15000);
+		const id = setInterval(persist, 1000); // sync to the DB every second (user request) — captures wandering + builds promptly
 		const onHide = () => {
 			if (document.visibilityState === 'hidden') persist();
 		};

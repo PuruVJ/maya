@@ -308,14 +308,20 @@ export function applyOps(
 				// you, not at the world origin
 				const dir = AREA[op.area] ?? [0, 0, 0];
 				const center: Vec3 = [player.pos[0] + dir[0] * 0.6, 0, player.pos[2] + dir[2] * 0.6];
-				const total = Math.max(1, Math.min(Math.floor(op.count), MAX_COUNT));
-				// scale the scatter radius with √count so a big herd spreads over the world instead of piling into
-				// one disc (small counts keep their tuned spread via the max(1,…) floor → density ≈ constant).
-				const spread = (op.area === 'everywhere' ? 28 : 15) * Math.max(1, Math.sqrt(total / 12));
 				const isCreature = CREATURE_KINDS.has(op.kind);
+				// PER-COMMAND CAPS — a flood spawned at once near you froze the page (each is a live agent + a near
+				// mesh). Dinosaurs are the heaviest, so a hard 10; other creatures 50; static props keep the high cap.
+				const cap = op.kind === 'dinosaur' ? 10 : isCreature ? 50 : MAX_COUNT;
+				const total = Math.max(1, Math.min(Math.floor(op.count), cap));
+				// SPREAD CREATURES FAR + WIDE with a clear INNER GAP — the #1 anti-freeze lever (user). Golden-spiral
+				// from an inner radius out to a big outer one → the near field stays open (almost none right in front
+				// of you) and the rest ring out into the distance as cheap LOD impostors, not a dense pile near the
+				// camera. Static props keep their tight, tuned spread.
+				const inner = isCreature ? 40 : 0; // keep this radius around the player clear of the new creatures
+				const spread = isCreature ? inner + 80 * Math.max(1, Math.sqrt(total / 5)) : (op.area === 'everywhere' ? 28 : 15) * Math.max(1, Math.sqrt(total / 12));
 				const GA = Math.PI * (3 - Math.sqrt(5)); // golden angle → even, deterministic spread
 				for (let i = 0; i < total; i++) {
-					const rr = spread * Math.sqrt((i + 0.5) / total);
+					const rr = isCreature ? inner + (spread - inner) * Math.sqrt((i + 0.5) / total) : spread * Math.sqrt((i + 0.5) / total);
 					const a = i * GA;
 					const anchor: Vec3 = [center[0] + Math.cos(a) * rr, 0, center[2] + Math.sin(a) * rr];
 					// CREATURES wander off their spawn immediately AND ponds are now collision obstacles (they're
