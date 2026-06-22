@@ -3,6 +3,12 @@ import * as THREE from 'three';
 let patched = false;
 let curveRadius = 0; // the active fold radius (0 = flat) — needed to INVERT the fold for cursor→ground picking
 
+/** The active world-fold radius (0 = flat). Other shaders (e.g. distant settlement glows) read this to apply the
+ *  SAME inception-fold so their world-space points ride up the curve instead of floating below the reared terrain. */
+export function worldCurveRadius(): number {
+	return curveRadius;
+}
+
 /**
  * INCEPTION-FOLD / valley world curve. Globally patches the standard vertex shader so the ground
  * rears up and curls toward the sky in the FORWARD/BACK direction (world-Z), like the inside of a
