@@ -2517,8 +2517,13 @@ impl World {
                 if d_edge > 0.0 {
                     let d = dx.hypot(dz).max(0.1);
                     let urgency = (1.0 - m.hydration / THIRSTY_AT).clamp(0.0, 1.0); // 0 at the threshold → 1 bone-dry
-                    fx += dx / d * a_max * THIRST_SEEK_W * urgency;
-                    fz += dz / d * a_max * THIRST_SEEK_W * urgency;
+                    // SOCIAL niche, in the WATER channel (orthogonal to boldness's predation channel): a GREGARIOUS
+                    // animal navigates to water decisively via the herd's shared knowledge → reliably reaches the
+                    // bank; a LONER seeks weakly and risks dying of thirst when water is far. The loner's payoff is
+                    // the existing crowd-gate (low crowd → breeds freely). Herd = thirst-survival, loner = fecundity.
+                    let herd_nav = (0.45 + 0.55 * m.weights.social).clamp(0.45, 1.6); // 1.0 at neutral → Manual unchanged
+                    fx += dx / d * a_max * THIRST_SEEK_W * urgency * herd_nav;
+                    fz += dz / d * a_max * THIRST_SEEK_W * urgency * herd_nav;
                 }
             }
         }
@@ -4332,5 +4337,48 @@ mod tests {
         let p1 = alive(&w)[Kind::Rabbit as usize];
         eprintln!("[thirst with-water] rabbits {p0}→{p1}");
         assert!(p1 >= p0 / 3, "a watered herd should NOT collapse to thirst ({p0}→{p1}) — the seek/drink loop is failing");
+    }
+
+    // SCENARIO (emergent · EMERGENCE): TWO niches diversifying at once — boldness (predation channel) AND social
+    // (the WATER channel) — the social axis now decouples from boldness because it spends a DIFFERENT survival
+    // currency (thirst, not predation). Herders navigate to a distant pond reliably (herd knowledge) and survive;
+    // loners seek weakly, risk thirst, but breed freely (low crowd). The SOCIAL polymorphism must persist.
+    //
+    // NOTE on boldness here: with the pond sitting inside the predators' range, the waterhole becomes an AMBUSH —
+    // bold (flee-late) prey are culled while drinking, so boldness leans cautious in THIS arena. That's emergent
+    // (dangerous waterholes), not a regression: the standalone boldness niche (no water / water away from predators)
+    // still coexists — see scenario_emergent_boldness_niches_coexist. Across a real map's varied water/predator
+    // layouts, different niches dominate in different regions (spatial niche variation). We assert the social win
+    // + that boldness still carries VARIANCE (isn't frozen to a single clone), and print both for observability.
+    #[test]
+    fn scenario_emergent_social_niche_via_water() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 120, 0.0, 0.0, 35.0, 1000);
+        cluster(&mut w, Kind::Cat, 8, 0.0, 0.0, 50.0, 6000);
+        w.set_water(&[80.0, 0.0, 8.0]); // a single pond ~70 m from the herd's edge → reaching it is a real errand
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        run_pop(&mut w, 18000);
+        let (mut bold, mut caut, mut herd, mut lone, mut n, mut ss, mut ssq) = (0usize, 0usize, 0usize, 0usize, 0usize, 0.0, 0.0);
+        for m in &w.agents {
+            if m.dead || m.kind != Kind::Rabbit {
+                continue;
+            }
+            n += 1;
+            let s = m.weights.safety;
+            ss += s;
+            ssq += s * s;
+            if s < 0.85 { bold += 1; }
+            if s > 1.15 { caut += 1; }
+            if m.weights.social > 1.15 { herd += 1; }
+            if m.weights.social < 0.85 { lone += 1; }
+        }
+        let bold_sd = if n > 0 { (ssq / n as f64 - (ss / n as f64).powi(2)).max(0.0).sqrt() } else { 0.0 };
+        eprintln!("[emergent social-via-water] rabbits={n} | boldness: bold={bold} cautious={caut} sd={bold_sd:.2} | social: herd={herd} loner={lone}");
+        assert!(n >= 20, "rabbit population crashed to {n} with distant water");
+        assert!(herd >= 2 && lone >= 2, "social niche collapsed (herd={herd}, loner={lone}) — the water channel didn't decouple it");
+        assert!(bold_sd > 0.05, "boldness froze to a single strategy (sd={bold_sd:.2}) — should still vary even if the waterhole leans it cautious");
     }
 }
