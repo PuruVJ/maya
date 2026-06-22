@@ -34,7 +34,10 @@ interface RustSim {
 	set_night(n: number): void;
 	set_pop_scale(s: number): void;
 	set_fish(xz: Float64Array): void;
+	set_refuges(xz: Float64Array): void;
 	set_obstacles(flat: Float64Array): void;
+	set_behavior_mode(code: number): void; // 0 = Manual (hand-coded) · 1 = Emergent (needs+utility, the default)
+	set_lineage(i: number, pfamA: number, pfamB: number): void; // newborn's parent lineage ids → incest avoidance
 	step(dt: number): void;
 	count(): number;
 	danger(): number;
@@ -55,10 +58,12 @@ interface WasmModule {
 }
 
 // the main thread sends one of these; we reply with 'ready' / 'failed' / 'snap'
-type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number };
+type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number };
 type InMsg =
 	| { type: 'init'; base: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
+	| { type: 'refuges'; xz: Float64Array }
+	| { type: 'behaviorMode'; code: number }
 	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 
 let wasm: WasmExports | null = null;
@@ -117,6 +122,16 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 		return;
 	}
 
+	if (d.type === 'refuges') {
+		sim.set_refuges(d.xz);
+		return;
+	}
+
+	if (d.type === 'behaviorMode') {
+		sim.set_behavior_mode(d.code); // 0 Manual · 1 Emergent — live A/B of the decision brain
+		return;
+	}
+
 	// d.type === 'tick' — apply roster changes + inputs, advance one fixed step, post the snapshot back
 	// Retire old occupants before filling slots recycled in this same roster diff.
 	for (const slot of d.despawns) sim.despawn(slot);
@@ -126,6 +141,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 		if (s.companion) sim.set_companion(idx);
 		if (s.juvenile) sim.set_breed_cooldown(idx, sim.juvenile_cd()); // a newborn → must mature before it breeds
 		if (s.gene !== 1) sim.set_gene(idx, s.gene); // a bred baby's inherited vigor (genetics)
+		if (s.pfamA || s.pfamB) sim.set_lineage(idx, s.pfamA, s.pfamB); // a bred baby's parentage → incest avoidance
 	}
 
 	sim.set_player(d.px, d.pz);
@@ -144,7 +160,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 	const sb = behaviors.slice();
 	const sp = progress.slice();
 	const nb = sim.birth_count();
-	const births = nb > 0 ? new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 4).slice() : new Float32Array(0); // [kc,x,z,gene]×nb
+	const births = nb > 0 ? new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 6).slice() : new Float32Array(0); // [kc,x,z,gene,motherFam,fatherFam]×nb
 	const nbd = sim.build_count();
 	const builds = nbd > 0 ? new Float32Array(wasm.memory.buffer, sim.builds_ptr(), nbd * 2).slice() : new Float32Array(0); // [x,z]×nbd
 	const ne = sim.event_count();

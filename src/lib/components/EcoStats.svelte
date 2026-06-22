@@ -6,6 +6,19 @@
 	// living world is glanceable without staring at the numbers.
 	import { onMount } from 'svelte';
 	import { agentManager } from '$lib/agents.svelte';
+	import { rustBehaviorIsEmergent, setRustBehaviorMode } from '$lib/rustSim';
+	import type { World } from '$lib/world';
+
+	// the decision BRAIN driving the agents (docs/emergent-behavior.md): Emergent (needs+primitives+utility, the
+	// default) vs Manual (the hand-coded sim). A dev A/B toggle — flip it live in the same world to compare.
+	let emergent = $state(rustBehaviorIsEmergent());
+	function toggleBrain() {
+		emergent = setRustBehaviorMode(!emergent);
+	}
+
+	// the world — so the readout includes DORMANT region aggregates (streaming-offloaded creatures are still alive,
+	// just not individually simulated). Counting near + dormant gives the TRUE total, so streaming never reads as a crash.
+	let { world }: { world: World } = $props();
 
 	// display order + glyph per species (matches the sim's Kind order)
 	const SPECIES = [
@@ -42,6 +55,20 @@
 				geneSum += m.gene ?? 1; // founders carry no JS gene → baseline 1.0 (matches the Rust founder gene)
 				live++;
 			});
+			// + DORMANT region aggregates — streaming-offloaded creatures are alive too, just not individually
+			// simulated, so the total stays consistent as you roam (no apparent "crash" when a region sleeps).
+			if (world.regions) {
+				for (const key in world.regions) {
+					const agg = world.regions[key];
+					let regN = 0;
+					for (const k in agg.counts) {
+						c[k] = (c[k] ?? 0) + agg.counts[k];
+						regN += agg.counts[k];
+					}
+					live += regN;
+					geneSum += agg.gene * regN;
+				}
+			}
 			if (!first) {
 				for (const { k } of SPECIES) {
 					const cur = c[k] ?? 0;
@@ -84,6 +111,16 @@
 		<span class="ml-1 tabular-nums text-emerald-300/90" title="Average inherited vigor (speed gene) — drifts up as evolution selects faster lineages">
 			⚡{vigor.toFixed(2)}{vigorTrend > 0 ? '↑' : vigorTrend < 0 ? '↓' : ''}
 		</span>
+		<button
+			type="button"
+			onclick={toggleBrain}
+			class="pointer-events-auto ml-1 rounded-full px-1.5 text-[12px] transition-colors"
+			class:text-fuchsia-300={emergent}
+			class:text-sky-300={!emergent}
+			title={emergent ? 'Brain: EMERGENT (needs + utility) — click to switch to Manual' : 'Brain: MANUAL (hand-coded) — click to switch to Emergent'}
+		>
+			{emergent ? '🧠 emergent' : '⚙️ manual'}
+		</button>
 	</div>
 {/if}
 

@@ -21,6 +21,7 @@
 
 mod clock;
 mod eco;
+mod engine;
 mod rng;
 mod simrng;
 mod spatialhash;
@@ -32,7 +33,7 @@ pub use eco::{aggressive, eco, kind_from_code, prize, sleep_secs, slash_max, spe
 pub use rng::{hash, hash_keys, rand, seed_from};
 pub use spatialhash::SpatialHashGrid;
 pub use steering::{Agent, AgentOpts, Behavior};
-pub use world::{make_managed, opts_for, ManagedAgent, Snapshot, World};
+pub use world::{cap_for, ff_targets, make_managed, opts_for, ManagedAgent, Snapshot, World};
 
 // Thin wasm-bindgen surface — only compiled for the wasm target. JS calls in for the parity check now,
 // and (later) for the per-tick sim. Native `cargo test` skips this entirely.
@@ -57,13 +58,68 @@ mod wasm_api {
         crate::rng::seed_from(s)
     }
 
+    /// Carrying caps for the 6 kinds given live counts + world-area scale — the SAME `cap_for` the sim uses, so JS
+    /// (load-trim / scatter) never re-derives the formula. Returns [rabbit, cat, kangaroo, person, lion, dino].
+    #[wasm_bindgen]
+    pub fn pop_caps(rabbit: u32, cat: u32, kangaroo: u32, person: u32, lion: u32, dino: u32, scale: f64) -> Vec<u32> {
+        use crate::eco::Kind;
+        let pop = [rabbit as usize, cat as usize, kangaroo as usize, person as usize, lion as usize, dino as usize];
+        [Kind::Rabbit, Kind::Cat, Kind::Kangaroo, Kind::Person, Kind::Lion, Kind::Dinosaur]
+            .iter()
+            .map(|&k| crate::world::cap_for(k, &pop, scale) as u32)
+            .collect()
+    }
+
+    /// Aggregate fast-forward: advance the 6 populations by `dt` seconds away toward carrying capacity (closed-form
+    /// logistic). Returns target headcounts [rabbit, cat, kangaroo, person, lion, dino] — JS materialises the deltas.
+    #[wasm_bindgen]
+    pub fn ff_targets(rabbit: u32, cat: u32, kangaroo: u32, person: u32, lion: u32, dino: u32, scale: f64, dt: f64) -> Vec<u32> {
+        let pop = [rabbit as usize, cat as usize, kangaroo as usize, person as usize, lion as usize, dino as usize];
+        crate::world::ff_targets(&pop, scale, dt).to_vec()
+    }
+
+    /// Closed-form VIGOR drift for a dormant region over `dt` seconds away — evolves the offloaded population's mean
+    /// gene under predation pressure (no ticking). Lets a dormant region EVOLVE via the clock, not stay frozen.
+    #[wasm_bindgen]
+    pub fn ff_gene(gene: f64, rabbit: u32, cat: u32, kangaroo: u32, person: u32, lion: u32, dino: u32, dt: f64) -> f64 {
+        let pop = [rabbit as usize, cat as usize, kangaroo as usize, person as usize, lion as usize, dino as usize];
+        crate::world::ff_gene(gene, &pop, dt)
+    }
+
+    /// Spawn-spread layout for a big creature batch ("100 humans"): BANDS of up to 10 laid on a golden-spiral
+    /// around the anchor, members loosely clustered within each band, spread wide (~22·√count) so most land BEYOND
+    /// the mesh-reveal radius → cheap LOD impostors, no mount-storm jank. Returns flat [x,z,…] snapped to 0.5 m.
+    /// The deterministic op→placement math lives HERE in Rust, not in the JS engine.
+    #[wasm_bindgen]
+    pub fn band_spread(count: u32, ax: f64, az: f64, r: f64) -> Vec<f64> {
+        crate::world::band_spread(count as usize, ax, az, r)
+    }
+
+    /// THE ENGINE (no JS engine): apply `ops_json` to `world_json` for a player at (px,pz,yaw). Returns a JSON
+    /// string `{"world": <new world>, "conflicts": [...]}`. The world DOM round-trips unknown fields untouched.
+    /// Faithful port of the old engine.ts applyOps — see crate::engine (parity-tested against the JS originals).
+    #[wasm_bindgen]
+    pub fn apply_ops(world_json: &str, ops_json: &str, px: f64, pz: f64, yaw: f64) -> String {
+        let mut world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        let ops = jzon::parse(ops_json).unwrap_or_else(|_| jzon::JsonValue::new_array());
+        let conflicts = crate::engine::apply_ops(&mut world, &ops, px, pz, yaw);
+        let mut out = jzon::JsonValue::new_object();
+        out["world"] = world;
+        let mut c = jzon::JsonValue::new_array();
+        for cf in conflicts {
+            let _ = c.push(cf);
+        }
+        out["conflicts"] = c;
+        out.dump()
+    }
+
     // ───────────────────────── the agent-sim bridge ─────────────────────────
     // One `Sim` per world. JS spawns agents (by kind-code + seedId), drives it with `step(dt)` once per frame
     // (the Rust clock sub-steps to fixed DT internally), and reads transforms back as typed-array VIEWS over
     // WASM memory — NEVER a JS↔WASM call per agent. Pointers are stable between spawns; re-fetch them after any
     // `spawn` (the buffers may grow/reallocate) or if `memory.buffer` detaches on growth.
     use crate::steering::Agent;
-    use crate::world::{opts_for, Snapshot, World};
+    use crate::world::{opts_for, BehaviorMode, Snapshot, World};
 
     #[wasm_bindgen]
     pub struct Sim {
@@ -75,7 +131,29 @@ mod wasm_api {
     impl Sim {
         #[wasm_bindgen(constructor)]
         pub fn new() -> Sim {
-            Sim { world: World::new(), snap: Snapshot::default() }
+            let mut world = World::new();
+            world.set_behavior_mode(BehaviorMode::Emergent); // the GAME runs the emergent brain by default
+            world.set_player_immune(true); // the player is not prey (user: "give me immunity, no animals hunt me")
+            Sim { world, snap: Snapshot::default() }
+        }
+
+        /// Toggle player immunity (1 = no predator hunts/menaces you, danger stays 0 · 0 = you're fair game).
+        pub fn set_player_immune(&mut self, immune: u32) {
+            self.world.set_player_immune(immune != 0);
+        }
+
+        /// Switch the decision brain (0 = Manual, the proven hand-coded sim · 1 = Emergent, needs+utility). The
+        /// chosen mode persists on the world; JS surfaces a dev toggle + serialises it in the world blob.
+        pub fn set_behavior_mode(&mut self, code: u8) {
+            self.world.set_behavior_mode(BehaviorMode::from_code(code));
+        }
+
+        /// The brain currently running (0 = Manual · 1 = Emergent) — for the HUD readout / persistence.
+        pub fn behavior_mode(&self) -> u8 {
+            match self.world.behavior_mode() {
+                BehaviorMode::Emergent => 1,
+                BehaviorMode::Manual => 0,
+            }
         }
 
         /// Spawn an agent from a kind-code (0 rabbit·1 cat·2 kangaroo·3 person·4 lion·5 dinosaur) + a stable
@@ -83,14 +161,18 @@ mod wasm_api {
         pub fn spawn(&mut self, x: f64, z: f64, kind_code: u8, radius: f64, seed_id: i32) -> usize {
             let kind = crate::eco::kind_from_code(kind_code);
             let agent = Agent::new(x, z, seed_id, &opts_for(kind, seed_id));
-            self.world.spawn(agent, kind, radius, seed_id)
+            let idx = self.world.spawn(agent, kind, radius, seed_id);
+            self.world.randomize_start_age(idx, seed_id); // founder age structure (newborns then get set_breed_cooldown → age 0)
+            idx
         }
 
         /// Spawn into a stable read-back slot recycled by the worker proxy's free-list.
         pub fn spawn_at(&mut self, slot: usize, x: f64, z: f64, kind_code: u8, radius: f64, seed_id: i32) -> usize {
             let kind = crate::eco::kind_from_code(kind_code);
             let agent = Agent::new(x, z, seed_id, &opts_for(kind, seed_id));
-            self.world.spawn_at(slot, agent, kind, radius, seed_id)
+            let idx = self.world.spawn_at(slot, agent, kind, radius, seed_id);
+            self.world.randomize_start_age(idx, seed_id); // founder age structure (newborns then get set_breed_cooldown → age 0)
+            idx
         }
 
         pub fn set_player(&mut self, x: f64, z: f64) {
@@ -119,13 +201,18 @@ mod wasm_api {
         pub fn juvenile_cd(&self) -> f64 {
             self.world.juvenile_cd()
         }
-        /// Newborns from the last step(): count of births (each is [kindCode, x, z, gene]).
+        /// Newborns from the last step(): count of births (each is [kindCode, x, z, gene, motherFam, fatherFam]).
         pub fn birth_count(&self) -> usize {
-            self.world.births().len() / 4
+            self.world.births().len() / 6
         }
-        /// Pointer to the flat births buffer [kindCode, x, z, gene, …] (length = birth_count()*4) for a zero-copy read.
+        /// Pointer to the flat births buffer [kindCode, x, z, gene, motherFam, fatherFam, …] (length = birth_count()*6).
         pub fn births_ptr(&self) -> *const f32 {
             self.world.births().as_ptr()
+        }
+        /// Stamp a newborn (by index) with its PARENT lineage ids (mother's fam, father's fam) from the births buffer,
+        /// so the kinship check refuses a future parent/child/sibling pairing (incest avoidance, all kinds).
+        pub fn set_lineage(&mut self, i: usize, pfam_a: u32, pfam_b: u32) {
+            self.world.set_lineage(i, pfam_a, pfam_b);
         }
         /// House-build requests from the last step(): count (each is [x, z]).
         pub fn build_count(&self) -> usize {
@@ -160,6 +247,11 @@ mod wasm_api {
         /// Replace the lake-fish lure points from a flat [x0,z0,x1,z1,…] buffer.
         pub fn set_fish(&mut self, xz: &[f64]) {
             self.world.set_fish(xz);
+        }
+
+        /// Replace the REFUGE points (house centres) a threatened woman/child flees toward, flat [x0,z0,x1,z1,…].
+        pub fn set_refuges(&mut self, xz: &[f64]) {
+            self.world.set_refuges(xz);
         }
 
         /// Replace the solid obstacles from a packed [x,z,r,hx,hz,cos,sin] per obstacle (7 f64s each); a CIRCLE

@@ -38,9 +38,10 @@
 	const managed: ManagedAgent = untrack(() => {
 		const m = makeManaged(agent, 'person', 0.4 * objScale, MENU, obj.id, seedId); // radius scales → collision + far impostor
 		if (obj.dead) m.dead = true; // restore live state from a shared link
-		else if (obj.asleep) ((m.asleep = true), (m.sleepTimer = 6));
+		else if (obj.asleep) m.asleep = true;
 		if (obj.juvenile) m.juvenile = true; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown
 		if (obj.gene != null) m.gene = obj.gene; // inherited vigor → rustSim scales its speed at spawn (genetics)
+		if (obj.pfamA != null) ((m.pfamA = obj.pfamA), (m.pfamB = obj.pfamB)); // parentage → rustSim sets lineage (incest avoidance)
 		return m;
 	});
 	$effect(() => {

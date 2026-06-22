@@ -16,7 +16,7 @@ const CH_SPEED: i32 = 2;
 const CH_AGGRO: i32 = 3;
 const CH_SLASH: i32 = 4;
 
-const AGGRO_PROB: f64 = 0.2; // share of people that turn aggressive (hunt their own kind)
+const AGGRO_PROB: f64 = 0.02; // share of people that turn aggressive (hunt their own kind) — rare flavour, not a population sink
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -64,7 +64,10 @@ pub const fn kind_from_code(code: u8) -> Kind {
 /// The eco profile for a kind (the `ECO` table).
 pub const fn eco(kind: Kind) -> Eco {
     match kind {
-        Kind::Rabbit => Eco { rank: 1, speed_lo: 3.6, speed_hi: 4.8, endurance: 1.0, hunts: Hunts::None, full_after: None, sleep_secs: None, mob_toll: None },
+        // RABBIT: the fastest BOLTER but the worst stamina (user: "higher speed, but tire faster") — it explodes away,
+        // then GASES OUT fast, so a steadier predator runs it down once its sprint is spent. Was top speed + endurance
+        // 1.0 (never tired) → it fled forever, near-uncatchable. Speed up, endurance way down (1.0 → 0.4).
+        Kind::Rabbit => Eco { rank: 1, speed_lo: 4.0, speed_hi: 5.2, endurance: 0.4, hunts: Hunts::None, full_after: None, sleep_secs: None, mob_toll: None },
         // Predators were SLOWER than their prey (cat 3.0–3.9 vs rabbit 3.6–4.8): even with the chase-vs-flee boost
         // the fastest prey outran the fastest hunter, so carnivores starved amid 40 rabbits (telemetry: all starve
         // victims were cats/lions, only 3 kills). Bumped so a committed chase reliably runs down an AVERAGE prey,
@@ -137,7 +140,7 @@ mod tests {
         let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-5, "expected ~{b}, got {a}");
         close(speed_for(Kind::Cat, 100), 3.640601);
         close(speed_for(Kind::Dinosaur, 7), 4.844612);
-        close(speed_for(Kind::Rabbit, 12345), 4.29204);
+        close(speed_for(Kind::Rabbit, 12345), 4.69204); // range bumped [3.6,4.8]→[4.0,5.2] (faster bolter); width 1.2 unchanged → +0.4
         assert!(!aggressive(5));
         assert!(!aggressive(50));
         assert!(!aggressive(3));

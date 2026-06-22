@@ -78,6 +78,8 @@ export class Agent {
 
 	behavior: Behavior = 'wander'; // current idle-FSM behaviour — set each tick by rustSim from the Rust read-back
 	progress = 0; // 0..1 through that behaviour (Rust read-back) → drives groom cycles / pounce arcs / lookAround
+	appeared = false; // false until the FIRST sim snapshot lands → rustSim zeroes that frame's delta so a freshly
+	// spawned agent doesn't show a bogus speed/turn spike (random ctor heading → sim heading) and fall over on spawn.
 
 	readonly maxSpeed: number; // scales gaitRate()
 

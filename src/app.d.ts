@@ -1,28 +1,15 @@
 // See https://svelte.dev/docs/kit/types#app.d.ts
 // for information about these interfaces
-declare global {
-	// Minimal Cloudflare D1 surface (just what /api/world uses) — avoids pulling in @cloudflare/workers-types.
-	interface D1PreparedStatement {
-		bind(...values: unknown[]): D1PreparedStatement;
-		first<T = unknown>(colName?: string): Promise<T | null>;
-		run(): Promise<unknown>;
-		all<T = unknown>(): Promise<{ results: T[] }>;
-	}
-	interface D1Database {
-		prepare(query: string): D1PreparedStatement;
-		batch(statements: D1PreparedStatement[]): Promise<unknown>;
-	}
+/// <reference types="@cloudflare/workers-types" />
 
+declare global {
 	namespace App {
 		// interface Error {}
 		// interface Locals {}
 		// interface PageData {}
 		// interface PageState {}
-		// Cloudflare bindings exposed to endpoints. `DB` is the world D1 database (wrangler.jsonc). Optional
-		// because it's absent in `vite dev` without the platform proxy → endpoints degrade to the client's cache.
-		interface Platform {
-			env?: { DB?: D1Database };
-		}
+		// No Cloudflare bindings — the game is 100% local (single-player, IndexedDB). The only server route left is
+		// the dev-only /api/debug log sink, which uses node:fs, not platform bindings. Deploy is a static SPA.
 	}
 }
 

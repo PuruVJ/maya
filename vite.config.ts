@@ -13,10 +13,9 @@ export default defineConfig({
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
 
-			// Deploy target is Cloudflare (Workers + Static Assets); see wrangler.jsonc. The adapter reads
-			// wrangler.jsonc to emulate platform bindings (KV/D1/Durable Objects — for the future shared
-			// "Mother Nature" world, docs/big-world.md) inside `vite dev`. Heavy model weights are NOT
-			// shipped as CF assets (25 MiB/file limit) — see static/.assetsignore + the R2/HF note below.
+			// Deploy target is Cloudflare Static Assets (the game is a 100% client-side SPA — single-player, IndexedDB;
+			// no server routes beyond the dev-only /api/debug log sink). Heavy model weights are NOT shipped as CF
+			// assets (25 MiB/file limit) — see static/.assetsignore + the R2/HF note in wrangler.jsonc.
 			adapter: adapter()
 		})
 	],

@@ -6,6 +6,11 @@
 // `gate: false` -> exploratory/graceful (open-ended); logged, not gated — we want to SEE the reach.
 import { applyOps, type Op } from '../../src/lib/engine';
 import { emptyWorld, type World } from '../../src/lib/world';
+import { initRustMath } from '../../src/lib/rustMath';
+
+// The engine is Rust/wasm now (no JS engine), so load it before any seed() applies ops. Top-level await resolves
+// during import — before SCENARIOS (which calls seed()) is constructed.
+await initRustMath();
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Ops = any[];

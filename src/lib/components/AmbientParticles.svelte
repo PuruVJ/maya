@@ -10,7 +10,7 @@
 
 	let { sky = 'day' }: { sky?: string } = $props();
 
-	const COUNT = 50; // sparse — 320 then 130 STILL read as "too many fireflies" (distracting); keep it subtle
+	const COUNT = 22; // sparse — 320/130/50 all STILL read as "too many fireflies" (distracting); keep it very subtle
 	const BOX = 72; // particles fill a ±36 m box around the player (spread the small count wider → calmer, less swarmy)
 	const NIGHT: Record<string, number> = { day: 0, sunset: 0.5, fog: 0.3, night: 1, space: 1 };
 

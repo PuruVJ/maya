@@ -28,7 +28,7 @@ const KIND_NAME = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] as
 const BEHAVIORS = ['wander', 'pause', 'lookAround', 'groom', 'sit', 'pounce'] as const;
 
 // ── worker message shapes (mirror worldsim.worker.ts) ───────────────────────────────────────────────
-type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number };
+type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number };
 type Snap = {
 	type: 'snap';
 	seq: number;
@@ -42,17 +42,19 @@ type Snap = {
 	progress: Float32Array;
 	births: Float32Array;
 	builds: Float32Array; // [x,z]×n — house-build requests (Scene places them)
-	events: Float32Array; // [code,kind,x,z]×n — telemetry (posted to /api/telemetry)
+	events: Float32Array; // [code,kind,x,z]×n — sim events from the worker (currently unused client-side)
 	danger: number;
 };
 type OutMsg =
 	| { type: 'init'; base: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
+	| { type: 'refuges'; xz: Float64Array }
+	| { type: 'behaviorMode'; code: number }
 	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 type WorkerMsg = { type: 'ready' } | { type: 'failed'; error: string } | Snap;
 
 // newborns from the Rust breeding pass (kind + position) → Scene drains them into world.objects each frame
-export type Birth = { kind: string; x: number; z: number; gene: number };
+export type Birth = { kind: string; x: number; z: number; gene: number; pfamA: number; pfamB: number };
 let pendingBirths: Birth[] = [];
 /** Pull (and clear) the babies bred since the last call — Scene turns each into a world-object. */
 export function drainBirths(): Birth[] {
@@ -73,41 +75,6 @@ export function drainBuilds(): Build[] {
 	return out;
 }
 
-// ── TELEMETRY: batch sim events and POST them to /api/telemetry so the agent can read what happened ──────────
-const EV_NAME = ['', 'kill', 'starve', 'oldage', 'birth', 'build', 'conceive'] as const; // event code → name (see world.rs)
-let evBatch: { t: string; kind: string; x: number; z: number }[] = [];
-let lastFlush = 0;
-const POP_EVERY = 500; // sim ticks between POPULATION snapshots → a time series of who's alive (births vs deaths,
-let lastPop = 0; // predator/prey ratios) so the agent can SEE a boom/crash, not just infer it from event counts.
-/** Live count by species, straight off the authoritative JS registry (corpses excluded). */
-function popSnapshot(): Record<string, number> {
-	const c: Record<string, number> = {};
-	agentManager.forEach((m) => {
-		if (!m.dead) c[m.kind] = (c[m.kind] ?? 0) + 1;
-	});
-	return c;
-}
-function flushTelemetry(now: number): void {
-	// throttle events (~1 POST / 4 s, or sooner if the batch is large); population rides a slower fixed cadence.
-	const evDue = evBatch.length > 0 && (now - lastFlush >= 4000 || evBatch.length >= 200);
-	const popDue = now - lastPop >= POP_EVERY;
-	if (!evDue && !popDue) return;
-	const body: { tick: number; events?: typeof evBatch; pop?: Record<string, number> } = { tick: now };
-	if (evDue) {
-		body.events = evBatch;
-		evBatch = [];
-		lastFlush = now;
-	}
-	if (popDue) {
-		body.pop = popSnapshot();
-		lastPop = now;
-	}
-	// fire-and-forget; the endpoint appends to D1. tick `now` carries sim-time for both events + the snapshot.
-	fetch('/api/telemetry', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {
-		/* offline / no DB → telemetry is best-effort, never blocks the sim */
-	});
-}
-
 let worker: Worker | null = null;
 let status: 'off' | 'loading' | 'ready' | 'failed' = 'off';
 
@@ -123,7 +90,23 @@ let lastDanger = 0; // most recent danger imminence (0..1) from the worker → t
 let behindTarget = 0; // 1 while a hunter is in your back hemisphere → eased into playerState.dangerBehind
 
 let pendingObstacles: Float64Array | null = null; // survives the async worker load; flushed on 'ready'
+let pendingRefuges: Float64Array | null = null; // house centres (flee-to-safety); survives load, flushed on 'ready'
 let popScale = 1; // world-area multiplier for prey caps (Scene computes it from the world's extent), rides the tick msg
+let behaviorCode = 1; // which decision brain the Rust world runs: 0 Manual · 1 Emergent (the default, see Sim::new)
+
+/** Switch the agent decision brain at runtime (the design's mode toggle — docs/emergent-behavior.md). `emergent`
+ *  true = the needs+primitives+utility scorer (default); false = the hand-coded Manual sim. Survives worker load
+ *  (re-sent on 'ready') so a chosen mode sticks. Returns the new mode for the caller's UI state. */
+export function setRustBehaviorMode(emergent: boolean): boolean {
+	behaviorCode = emergent ? 1 : 0;
+	if (worker && status === 'ready') worker.postMessage({ type: 'behaviorMode', code: behaviorCode } satisfies OutMsg);
+	return emergent;
+}
+
+/** The decision brain the sim is currently running (true = Emergent, false = Manual) — for the HUD readout. */
+export function rustBehaviorIsEmergent(): boolean {
+	return behaviorCode === 1;
+}
 
 /** Set the world-AREA population multiplier — bigger/more-built world → higher prey caps (predators follow prey).
  *  Scene feeds this from the static-object extent; it rides the next tick message to the Rust world. */
@@ -150,10 +133,27 @@ export function setRustObstacles(obs: { x: number; z: number; r: number; hx?: nu
 	if (worker && status === 'ready') worker.postMessage({ type: 'obstacles', flat } satisfies OutMsg); // clone (no transfer — keep pendingObstacles intact)
 }
 
+/** Feed the REFUGE points (house/settlement centres) to the Rust world — a threatened woman/child flees toward the
+ *  nearest one (home is safety, and where the guard men cluster). `pts` is the building centres Scene already has. */
+export function setRustRefuges(pts: { x: number; z: number }[]): void {
+	const xz = new Float64Array(pts.length * 2);
+	for (let i = 0; i < pts.length; i++) {
+		xz[i * 2] = pts[i].x;
+		xz[i * 2 + 1] = pts[i].z;
+	}
+	pendingRefuges = xz;
+	if (worker && status === 'ready') worker.postMessage({ type: 'refuges', xz } satisfies OutMsg); // clone (keep pendingRefuges intact)
+}
+
 /** Lifecycle status — `AgentSystem` only ticks the world once this is `'ready'` (agents idle while loading;
  *  `'failed'` means the worker/wasm didn't load → agents stay put, no main-thread fallback). */
 export function rustStatus(): typeof status {
 	return status;
+}
+
+/** Monotonic sim tick (the applied-snapshot seq) — a cheap clock for region streaming's dormant span + telemetry. */
+export function rustTick(): number {
+	return appliedSeq < 0 ? 0 : appliedSeq;
 }
 
 /** Lazy-spawn the sim worker (it loads the wasm + constructs the `Sim`). Idempotent; resolves true once ready. */
@@ -173,6 +173,8 @@ export async function initRustSim(): Promise<boolean> {
 				if (d.type === 'ready') {
 					status = 'ready';
 					if (pendingObstacles) worker!.postMessage({ type: 'obstacles', flat: pendingObstacles } satisfies OutMsg);
+					if (pendingRefuges) worker!.postMessage({ type: 'refuges', xz: pendingRefuges } satisfies OutMsg);
+					if (behaviorCode !== 1) worker!.postMessage({ type: 'behaviorMode', code: behaviorCode } satisfies OutMsg); // re-assert a non-default (Manual) choice across loads
 					console.info('[rustSim] engine=rust ready (worker)');
 					resolve(true);
 				} else if (d.type === 'failed') {
@@ -229,19 +231,12 @@ export function tickRust(dt: number): void {
 		lastDanger = s!.danger;
 		// drain this snapshot's NEWBORNS (Rust bred them) → Scene turns each into a world-object (which mounts +
 		// spawns back into the sim as a juvenile). Flat [kindCode,x,z,…].
-		const nb = s!.births.length / 4; // [kindCode, x, z, gene] per birth
+		const nb = s!.births.length / 6; // [kindCode, x, z, gene, motherFam, fatherFam] per birth
 		for (let k = 0; k < nb; k++)
-			pendingBirths.push({ kind: KIND_NAME[s!.births[k * 4]] ?? 'rabbit', x: s!.births[k * 4 + 1], z: s!.births[k * 4 + 2], gene: s!.births[k * 4 + 3] });
+			pendingBirths.push({ kind: KIND_NAME[s!.births[k * 6]] ?? 'rabbit', x: s!.births[k * 6 + 1], z: s!.births[k * 6 + 2], gene: s!.births[k * 6 + 3], pfamA: s!.births[k * 6 + 4], pfamB: s!.births[k * 6 + 5] });
 		// drain HOUSE-BUILD requests (settlers) → Scene places each as a house world-object. Flat [x,z,…].
 		const nbd = s!.builds.length / 2;
 		for (let k = 0; k < nbd; k++) pendingBuilds.push({ x: s!.builds[k * 2], z: s!.builds[k * 2 + 1] });
-		// drain TELEMETRY events → batch + (throttled) POST to /api/telemetry. Flat [code,kind,x,z,…].
-		const ne = s!.events.length / 4;
-		for (let k = 0; k < ne; k++) {
-			const code = s!.events[k * 4];
-			evBatch.push({ t: EV_NAME[code] ?? 'ev' + code, kind: KIND_NAME[s!.events[k * 4 + 1]] ?? '?', x: Math.round(s!.events[k * 4 + 2]), z: Math.round(s!.events[k * 4 + 3]) });
-		}
-		flushTelemetry(appliedSeq); // appliedSeq == sim tick seq → a monotonic clock for the events
 	}
 
 	const px = playerState.pos[0];
@@ -276,7 +271,7 @@ export function tickRust(dt: number): void {
 		const slot = freeSlots.pop() ?? nextSlot++;
 		slotOf.set(m, slot);
 		tracked[slot] = m;
-		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile, gene: m.gene ?? 1 });
+		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile, gene: m.gene ?? 1, pfamA: m.pfamA ?? 0, pfamB: m.pfamB ?? 0 });
 	});
 
 	// Mirror a fresh snapshot onto the live roster.
@@ -289,6 +284,14 @@ export function tickRust(dt: number): void {
 		const nx = s!.xs[i];
 		const nz = s!.zs[i];
 		const nh = s!.headings[i];
+		if (!a.appeared) {
+			// first snapshot for a freshly-spawned agent → zero the delta (its ctor heading was random) so it
+			// doesn't show a bogus speed/turn spike and topple over on spawn; it eases into real motion next tick.
+			a.prevX = nx;
+			a.prevZ = nz;
+			a.prevHeading = nh;
+			a.appeared = true;
+		}
 		// derive speed + turnRate from the per-tick delta so the gait (leg swing) + banking animate
 		a.speed = Math.hypot(nx - a.prevX, nz - a.prevZ) / dt;
 		let dh = nh - a.prevHeading;

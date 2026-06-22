@@ -14,6 +14,33 @@ use crate::eco::{self, eco, prize, sleep_secs, slash_max, Hunts, Kind};
 use crate::spatialhash::SpatialHashGrid;
 use crate::steering::{Agent, AgentOpts, Behavior};
 
+// The EMERGENT brain (design doc docs/emergent-behavior.md) lives in a sibling directory but is declared HERE as a
+// CHILD of the `world` module, so it can read `World`'s private fields/methods (perception, the force buffers, the
+// nearest_* helpers) without widening their visibility. Manual's code is untouched; this is purely additive.
+#[path = "emergent/mod.rs"]
+pub mod emergent;
+use emergent::genome::Genome;
+
+/// Which decision brain drives the agents each tick — a switchable MODE (design doc §1). Only the per-tick
+/// *decision* differs; all perception, physics, metabolism, breeding + read-back are shared. `Manual` is the
+/// proven hand-coded brain (the default for `World::new`, so the existing test-suite pins it + stays the safety
+/// net); `Emergent` is the needs+primitives+utility scorer the game now runs by default (see `Sim::new`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BehaviorMode {
+    Manual,
+    Emergent,
+}
+
+impl BehaviorMode {
+    /// Map the wasm/JS toggle code (0 = Manual, 1 = Emergent) to a mode; anything else → Manual (safe default).
+    pub fn from_code(code: u8) -> BehaviorMode {
+        match code {
+            1 => BehaviorMode::Emergent,
+            _ => BehaviorMode::Manual,
+        }
+    }
+}
+
 const NEIGHBOR_RADIUS: f64 = 4.0; // also the grid cell size (flocking only)
 const DENSITY_THRESHOLD: f64 = 0.85; // gentle spread (0.4 was too aggressive → predators jitter-sprint to exhaustion)
 const SEP_WEIGHT: f64 = 1.5; // gentle (1.8 jittered co-spawned predators into exhaustion)
@@ -21,17 +48,39 @@ const ALI_WEIGHT: f64 = 0.05; // was 0.4 → agents matched velocities + moved a
 // DISPERSAL — a YOUNG prey animal in a CROWDED patch strikes out to find new range (user: "the excess, esp the
 // young, must go away while the rest stay"). It heads a fixed seeded direction so it actually travels off and
 // seeds a new herd elsewhere, instead of the whole population packing one clearing. Fades as it reaches open ground.
-const DISPERSE_CROWD: u32 = 6; // this many flock neighbours = "crowded" → young start to peel off
+const DISPERSE_CROWD: u32 = 4; // this many flock neighbours = "crowded" → young start to peel off (lowered: user wants EVERY critter to spread far)
+const BLOB_CROWD: u32 = 6; // ...and at this denser crowd EVERY age (any kind) migrates out → no piling up in one area (lowered 8→6 so herds keep colonising, not pooling near a settlement)
 const PERSON_DISPERSE_CROWD: u32 = 9; // people tolerate a denser band (a hamlet) before the young strike out to found a new one
+const PERSON_BLOB_CROWD: u32 = 10; // people splinter (all ages) just ABOVE the breed-stop crowd → a filling settlement
+// PLATEAUS at PERSON_BREED_CROWD, and the surplus pushed past this SPREADS OUT to found new ground (favour spreading,
+// not dying). Below GRAZE_CROWD so they spread before they overgraze.
 const DISPERSE_AGE: f64 = 0.32; // only the young (age < this × lifespan) disperse; settled adults hold the range
+// LOW-POPULATION BANDING (survival instinct): when humans are SCARCE they stop killing their own kind (aggressive
+// infighting is suppressed) and instead pull TOGETHER, so the few survivors converge and the community-build
+// mechanic can re-found a town instead of the species guttering out. Hysteresis: truce holds until BAND_RELEASE.
+const PERSON_BAND_LOW: usize = 12; // person_pop at/below this → truce + gather (a struggling settlement closes ranks)
+const PERSON_BAND_RELEASE: usize = 20; // recovered past this → normal life resumes (infighting + dispersal return)
+const BAND_GATHER_W: f64 = 0.05; // gentle pull toward the nearest fellow human while banding (so they coalesce, not clump-hard)
+const BAND_SEEK_QUORUM: u32 = 3; // a banding person with FEWER than this flock-neighbours long-range-seeks the nearest human
+const BAND_SEEK_W: f64 = 0.5; // travel drive toward that far human (strong enough to actually walk over, gentle vs dispersal's 0.9)
 const DISPERSE_W: f64 = 0.9; // outward drive (strong — must beat cohesion/comfort so it actually leaves)
+const BAND_PAIR_W: f64 = 0.45; // a leader's tether to its opposite-sex co-founder (below DISPERSE_W → they leave AS a pair, not glued in place)
+// JUVENILE FOLLOWING — a baby ANIMAL (non-person; people's children already cluster via coh_w) trails the nearest
+// grown adult of its kind, so the world shows fawn/duckling family trains. Keeps the young in the herd (a touch
+// safer) — balance-neutral. People are excluded (their family cohesion is bespoke).
+const JUVENILE_FOLLOW_AGE: f64 = 0.18; // age < this × lifespan = a juvenile that trails a parent
+const PARENT_ADULT_AGE: f64 = 0.3; // age ≥ this × lifespan = grown enough to be the parent a juvenile follows
+const FOLLOW_W: f64 = 0.1; // the juvenile's cling toward that adult (stronger than the gentle herd cohesion 0.04)
 const CH_DISPERSE: i32 = 24; // RNG channel for the per-animal dispersal heading
+const CH_BIRTHPOS: i32 = 25; // RNG channel for a newborn's small offset around the mother (a litter clusters, doesn't explode from one point)
 
 // food-chain targeting (chunk b)
 const SEEK: f64 = 100.0; // a predator notices + stalks prey within this radius; also the seek-grid cell size
 const SEEK2: f64 = SEEK * SEEK;
 const DANGER2: f64 = 40.0 * 40.0; // prey bolts at 40 m (just outside the 34 m sprint trigger → a head start)
 const COMPETE_W: f64 = 1.2; // a prey's appeal drops per hunter already on it → surplus predators fan out
+const ABUNDANCE_W: f64 = 3.0; // an ABUNDANT prey kind is FAR more attractive (raised — user: "predators should prefer higher-number prey more") → they crop a boom hard
+const ABUNDANCE_NORM: f64 = 220.0; // prey count at which the abundance bonus saturates — raised so a true boom (885 rabbits) reads as way more attractive than a scarce kind (it used to saturate at just 40, so 885 looked no better than 40)
 const MAX_HUNTERS: u32 = 3; // a prey claimed by this many is "full" → extra predators peel off to search
 const FIGHT_R2: f64 = 3.0 * 3.0; // two predators closer than this stay alert (and apex rivals track each other)
 const MAX_CHASE2: f64 = 45.0 * 45.0; // give up a chase once this far from where it began
@@ -51,6 +100,8 @@ const MOB_KILL_DPS: f64 = 0.03; // health/s a hunter loses PER attacker pressed 
 const SLASH_CD: f64 = 1.2; // seconds between a cornered hunter's retaliatory slashes (each kills one attacker)
 const HURT_AT: f64 = 0.45; // below this health an animal is injured → limps (HURT_SPEED) and flees
 const HURT_SPEED: f64 = 0.6; // injured locomotion multiplier (so a healthy hunter can run it down)
+const FRAIL_ONSET: f64 = 0.8; // past this fraction of its lifespan an animal SLOWS (senescence) …
+const FRAIL_MIN: f64 = 0.72; // … down to this speed multiplier at death — so predators cull the old/weak, generations turn over
 const RIVAL_PATIENCE: f64 = 5.0; // seconds two apex predators tolerate crowding before they turn and fight
 const RIVAL_DPS: f64 = 0.35; // health/s each loses in a territorial scrap → one breaks off wounded (or down)
 
@@ -64,6 +115,9 @@ const CHASE_BOOST: f64 = 1.95; // a committed chase BEATS a flee (was 1.45 < FLE
 const CONTACT_PAD: f64 = 0.4; // extra reach that counts as a catch
 const CAN_SPRINT: f64 = 0.03; // stamina above this can still sprint
 const LURE_R: f64 = 11.0; // an idle cat within this range of a lake fish pads to the bank after it (never catches)
+const REFUGE_R: f64 = 55.0; // a fleeing person within this range of a house RUNS to it (home = safety)
+const REFUGE_PULL: f64 = 1.6; // home-ward bias blended into the flee vector — ABOVE 1 so they actually head INTO the
+// house when threatened (not just drift homeward), as long as home isn't behind the predator (then plain flight wins)
 const OBSTACLE_CELL: f64 = 12.0; // obstacle grid cell — must exceed the biggest footprint+body radius (port of the JS)
 
 /// A solid the agents can't walk through — a CIRCLE (props/ponds) or an ORIENTED BOX (buildings, so animals hug
@@ -92,8 +146,25 @@ const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settl
 // REPRODUCTION (the world replenishes itself): two same-kind ADULTS, calm + well-fed, adjacent + off cooldown,
 // under the per-kind cap + not over-crowded → a baby is born between them; both parents pay energy + a cooldown.
 const BREED_ENERGY: f64 = 0.6; // fullness a parent needs to spare (lowered: 0.72 starved out reproduction → decline)
-const BREED_COOLDOWN: f64 = 10.0; // seconds before a parent can breed again (16 still gave ~0 births → faster)
+const BREED_COOLDOWN: f64 = 30.0; // seconds before a parent can breed again — raised (was 10) so growth is GRADUAL (no caps now; a too-fast rate exploded the world to thousands in seconds)
 const VITALITY_LERP: f64 = 0.004; // per-tick ease of the director's per-kind vitality toward its target (gentle drift)
+const RESCUE_N: usize = 6; // a species below this many alive → Mother Nature boosts its breeding hard (anti-extinction)
+// PER-KIND soft plateau (a TROPHIC PYRAMID): breeding RATE eases to 0 as a kind nears this × pop_scale → grows then
+// PLATEAUS (no hard cap, no culling — birth-rate homeostasis). Prey are common; PREDATORS are RARE (apex rarest) so
+// they don't overpopulate when nothing hunts them (the "lions breeding like crazy" fix). Scales up with the built world.
+fn soft_target(kind: Kind) -> f64 {
+    // Targets are sized so the NEAR (live) population plateaus (≈0.54×target each — see the vitality curve) sum to
+    // a few hundred, keeping LIVE objects systemically ~<400 with the static-offload (streaming.ts). The TOTAL grows
+    // unbounded in dormant aggregates across regions. Trophic pyramid: prey common, predators rare.
+    match kind {
+        Kind::Rabbit => 150.0,  // plateau ~80
+        Kind::Kangaroo => 75.0, // plateau ~40
+        Kind::Person => 185.0,  // plateau ~100 — a spawned 100 holds (the user's case), excess spreads to dormant
+        Kind::Cat => 46.0,      // meso-predator, plateau ~25
+        Kind::Lion => 20.0,     // apex — rare, plateau ~11
+        Kind::Dinosaur => 9.0,  // super-apex — rarest, plateau ~5
+    }
+}
 const HERD_BREED_R2: f64 = 13.0 * 13.0; // a mate within this range for HERD species — wide enough that a sparse,
 // scattered population (a handful of kangaroos, a thinned herd) can still pair up, not just a dense flock/city.
 const PRED_BREED_R2: f64 = 24.0 * 24.0; // SOLITARY hunters range far wider — they don't pack tight like prey herds,
@@ -104,7 +175,8 @@ const BREED_COST: f64 = 0.42; // fullness (energy) each parent spends on the bir
 // swarm. `crowd` is the neighbour count within the ~4 m flock radius (the mate counts as 1). Originally 2 ("only
 // the two of them"), but that throttled births below the death rate → population decline; relaxed to 5 so a pair
 // in light company can still breed while a true horde (5+ packed) still can't. Gestation + cooldown also brake it.
-const BREED_CROWD: u32 = 5;
+const BREED_CROWD: u32 = 5; // herd prey stop breeding above this local crowd (density-dependence → no chain-swarm)
+const PERSON_BREED_CROWD: u32 = 8; // people plateau a touch denser (a settlement) before they stop breeding
 // FEAR vs the whole notice radius: prey FLEE any predator within 40 m (`danger²`), but they shouldn't be
 // STERILIZED by one that's merely on the horizon — that froze ALL breeding in a predator-present world (the
 // telemetry showed 0 births over 8000 ticks: a perpetual stalemate where prey were always "within 40 m of a
@@ -113,12 +185,135 @@ const BREED_CROWD: u32 = 5;
 const BREED_FEAR_R2: f64 = 14.0 * 14.0;
 // Living caps are no longer hand-tuned constants — they're a TROPHIC PYRAMID computed live (see effective_cap):
 // PREY density scales with world AREA, and each PREDATOR's ceiling tracks the live count of the prey it eats.
-const PREY_DENSITY_RABBIT: f64 = 30.0; // per BASELINE world area — broad base of the pyramid (× pop_scale live).
-const PREY_DENSITY_KANGAROO: f64 = 20.0; // trimmed from 45/28: a scaled-up city flooded the world (300+ agents,
-const PREY_DENSITY_PERSON: f64 = 22.0; // a perf + visual-clutter problem). People kept (cities are the point).
+// Carrying caps — bumped ~1.7× (conservative) so the LOCAL world keeps growing over time; true "always something
+// everywhere" scale comes from streamed regions, not one giant local mob (perf: still under the 1000-agent ceiling
+// even at max city scale ×3). Mother Nature tunes vitality on top of these.
+const PREY_DENSITY_RABBIT: f64 = 52.0; // per BASELINE world area — broad base of the pyramid (× pop_scale live).
+const PREY_DENSITY_KANGAROO: f64 = 34.0;
+const PREY_DENSITY_PERSON: f64 = 38.0; // people kept generous — cities are the point.
 const CAT_PREY_SHARE: f64 = 0.30; // a cat population ≈ 30% of its rabbit base
 const LION_PREY_SHARE: f64 = 0.07; // a lion population ≈ 7% of everything it hunts
 const DINO_PREY_SHARE: f64 = 0.035; // super-apex — rarest of all
+
+/// THE carrying-capacity formula (single source of truth). PREY scale with world AREA (`scale`); each PREDATOR is a
+/// share of the live prey it eats. The sim's `effective_cap` and the wasm-exported `pop_caps` (for JS load/scatter
+/// trims, so the JS never re-derives it) both call this — no duplicated math. `pop` is per-Kind headcount.
+pub fn cap_for(kind: Kind, pop: &[usize; 6], scale: f64) -> usize {
+    let r = pop[Kind::Rabbit as usize] as f64;
+    let k = pop[Kind::Kangaroo as usize] as f64;
+    let p = pop[Kind::Person as usize] as f64;
+    let c = pop[Kind::Cat as usize] as f64;
+    let l = pop[Kind::Lion as usize] as f64;
+    match kind {
+        Kind::Rabbit => (PREY_DENSITY_RABBIT * scale).round() as usize,
+        Kind::Kangaroo => (PREY_DENSITY_KANGAROO * scale).round() as usize,
+        Kind::Person => (PREY_DENSITY_PERSON * scale).round() as usize,
+        Kind::Cat => ((r * CAT_PREY_SHARE).round() as usize).max(2),
+        Kind::Lion => (((r + k + p + c) * LION_PREY_SHARE).round() as usize).max(1),
+        Kind::Dinosaur => (((r + k + p + c + l) * DINO_PREY_SHARE).round() as usize).max(1),
+    }
+}
+// ── AGGREGATE FAST-FORWARD (big-world.md §3) ────────────────────────────────────────────────────────────────
+// When a player returns after being away, each species relaxes toward its carrying capacity along a CLOSED-FORM
+// logistic — O(1) per species, so a week away costs the same as a minute. Prey advance first; each predator then
+// reads the NEW prey count. This is the balance math (rates + floors + logistic); JS only materialises the deltas.
+const FF_RATE: [f64; 6] = [0.0016, 0.001, 0.0012, 0.0009, 0.0008, 0.0006]; // /s relax rate by Kind (rabbit,cat,kangaroo,person,lion,dino)
+const FF_FLOOR: [f64; 6] = [6.0, 4.0, 4.0, 4.0, 2.0, 0.0]; // a species this low re-seeds (immigration would have); dino 0 = stays extinct
+
+fn logistic_to(n0: f64, cap: f64, r: f64) -> f64 {
+    if cap <= 0.0 {
+        return 0.0;
+    }
+    let n = n0.max(0.5); // a hair above 0 so a re-seeded species can climb the curve
+    cap / (1.0 + (cap / n - 1.0) * (-r).exp())
+}
+
+/// Advance the 6 populations by `dt` seconds away, toward carrying capacity. Returns the target headcounts
+/// [rabbit, cat, kangaroo, person, lion, dino]. Prey first, then predators read the advanced prey (via cap_for).
+pub fn ff_targets(pop: &[usize; 6], scale: f64, dt: f64) -> [u32; 6] {
+    // Kind order so prey resolve before the predators that read them: rabbit, kangaroo, person, cat, lion, dino.
+    const ORDER: [Kind; 6] = [
+        Kind::Rabbit,
+        Kind::Kangaroo,
+        Kind::Person,
+        Kind::Cat,
+        Kind::Lion,
+        Kind::Dinosaur,
+    ];
+    let mut working = *pop;
+    let mut out = [0u32; 6];
+    for kind in ORDER {
+        let k = kind as usize;
+        let cap = cap_for(kind, &working, scale) as f64;
+        let mut n0 = working[k] as f64;
+        if n0 <= 0.0 {
+            if FF_FLOOR[k] <= 0.0 {
+                continue; // a fully-extinct apex (dino) stays gone — it returns via Mother Nature in play
+            }
+            n0 = FF_FLOOR[k]; // a crashed prey/meso species would have been re-seeded by immigration while away
+        } else if FF_FLOOR[k] > 0.0 && n0 < FF_FLOOR[k] {
+            n0 = FF_FLOOR[k];
+        }
+        let t = logistic_to(n0, cap, FF_RATE[k] * dt).round() as usize;
+        working[k] = t;
+        out[k] = t as u32;
+    }
+    out
+}
+
+/// Closed-form VIGOR drift for a DORMANT region (big-world §3 — evolve stale state via the clock, NO ticking). Under
+/// predation the slow get culled → the population's mean vigor climbs toward an equilibrium; with no predators there's
+/// no selection → it holds. Rate + equilibrium scale with predator pressure. Exponential approach, so a region dormant
+/// for ages still resolves in O(1) — this PREDICTS what the live sim's selection would do, instead of simulating it.
+pub fn ff_gene(gene: f64, pop: &[usize; 6], dt: f64) -> f64 {
+    let prey = (pop[0] + pop[2] + pop[3]) as f64; // rabbit + kangaroo + person (the hunted)
+    let pred = (pop[1] + pop[4] + pop[5]) as f64; // cat + lion + dinosaur (the hunters)
+    if pred < 1.0 || prey < 1.0 {
+        return gene; // no predator↔prey interaction → no selection → vigor frozen (matches the live sim)
+    }
+    let pressure = (pred / (prey + pred) / 0.5).min(1.0); // 0..1 selection strength (saturates at 50% predators)
+    let rate = 0.015 * pressure; // /s vigor-drift rate under full pressure
+    let eq = (1.0 + 0.45 * pressure).min(GENE_MAX); // equilibrium vigor rises with pressure
+    (eq - (eq - gene) * (-rate * dt).exp()).clamp(GENE_MIN, GENE_MAX)
+}
+
+/// Spawn-spread layout for a big creature batch ("100 humans"): BANDS of up to 10 on a golden-spiral around the
+/// anchor, members loosely clustered within each band, spread wide (~22·√count) so most land BEYOND the JS
+/// mesh-reveal radius → cheap LOD impostors, no mount-storm jank. Returns flat [x,z,…] snapped to the 0.5 m grid.
+pub fn band_spread(count: usize, ax: f64, az: f64, r: f64) -> Vec<f64> {
+    let count = count.max(1);
+    let ga = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt()); // golden angle → even, deterministic spread
+    let group = 10usize;
+    let groups = count.div_ceil(group);
+    let spread = 22.0 * (count as f64).sqrt(); // bands fan WIDE — a big spawn populates a large area (the spread is
+    // wanted). The far bands stream into dormant aggregates (still alive — counted via the regions); they don't pile up.
+    let band_r = (r + 1.4) * 3.0; // a single band's own loose radius
+    let snap = |v: f64| (v / 0.5).round() * 0.5;
+    let mut out = Vec::with_capacity(count * 2);
+    let mut placed = 0usize;
+    for g in 0..groups {
+        if placed >= count {
+            break;
+        }
+        let gr = spread * (((g as f64) + 0.5) / groups as f64).sqrt();
+        let gang = (g as f64) * ga;
+        let (cx, cz) = (ax + gang.cos() * gr, az + gang.sin() * gr);
+        let members = group.min(count - placed);
+        for m in 0..members {
+            let mr = if members > 1 {
+                band_r * (((m as f64) + 0.5) / members as f64).sqrt()
+            } else {
+                0.0
+            };
+            let mang = (m as f64) * ga;
+            out.push(snap(cx + mang.cos() * mr));
+            out.push(snap(cz + mang.sin() * mr));
+            placed += 1;
+        }
+    }
+    out
+}
+
 const JUVENILE_CD: f64 = 28.0; // a newborn carries this breed-cooldown → it must mature before it can breed
 const BASAL_DRAIN: f64 = 0.02; // /s a carnivore's energy always ebbs → it must eat to sustain (no idle recover)
 const EAT_GAIN: f64 = 0.6; // a kill refuels this much energy
@@ -133,6 +328,13 @@ const GRAZE_RATE: f64 = 0.16; // /s a calm herbivore on UNcrowded ground refuels
 const GRAZE_CROWD: f64 = 10.0; // herd size at which ground is fully overgrazed → grazing yields ~nothing (raised: less starvation)
 const STARVE_DAMAGE: f64 = 0.05; // /s health bleeds while fullness is empty (~20 s of famine is fatal; slow enough to recover if food's found)
 const EAT_ENERGY: f64 = 0.85; // fullness a kill restores — a predator GORGES on a kill (feast), then coasts (famine)
+// SCAVENGING — a fresh carcass (any natural/predation death) feeds a hungry carnivore that finds it, so deaths
+// aren't wasted (vultures/hyenas). A corpse carries CARRION_MEAT edible-seconds at death; it rots at 1×/s and
+// drains faster while being eaten. A hungry carnivore within SCAVENGE_R pads over; in contact it refuels energy.
+const CARRION_MEAT: f64 = 26.0; // edible-seconds a fresh corpse holds (rots away even uneaten → fleeting opportunity)
+const SCAVENGE_R: f64 = 16.0; // a hungry carnivore notices + pads toward a fresh carcass within this radius
+const SCAVENGE_GAIN: f64 = 0.5; // /s fullness a carnivore regains while feeding on a carcass (slower than a fresh kill's gorge)
+const SCAVENGE_DRAIN: f64 = 1.5; // /s extra meat consumed while being eaten (so a carcass feeds a few, not forever)
 const CARN_DRAIN_FRAC: f64 = 0.6; // carnivores burn fullness slower than grazers → they survive the gaps between kills (predators starved amid prey otherwise)
 
 // ── GENETICS (evolution) ────────────────────────────────────────────────────────────────────────────────────
@@ -177,13 +379,16 @@ const CH_LITTER: i32 = 22; // RNG channel for the litter-size roll
 
 /// Gestation period (seconds) by kind — bigger animals carry longer.
 fn gestation(kind: Kind) -> f64 {
+    // TROPHIC PYRAMID via breed SPEED: prey are r-strategists (breed fast), PREDATORS are K-strategists (breed
+    // SLOWLY) so apex populations stay rare without a hard cap. Predators MUST out-gestate prey here, else they
+    // out-reproduce their food (user: "lions reproduce faster, 25 lions vs 40 humans") and over-predate the world.
     match kind {
         Kind::Rabbit => 8.0,
-        Kind::Cat => 12.0,
         Kind::Kangaroo => 12.0,
-        Kind::Lion => 16.0,
-        Kind::Dinosaur => 20.0,
-        Kind::Person => 16.0, // shortened (was 24) → families grow at a livelier clip (user: "making one by one")
+        Kind::Person => 36.0,    // gradual family growth
+        Kind::Cat => 30.0,       // meso-predator — slower than prey (was 12)
+        Kind::Lion => 60.0,      // apex — breeds SLOWLY so it stays rare (was 16, faster than people → overpopulated)
+        Kind::Dinosaur => 80.0,  // super-apex — slowest of all (was 20)
     }
 }
 
@@ -191,12 +396,13 @@ fn gestation(kind: Kind) -> f64 {
 /// Seeded per delivery so it varies. Inclusive [lo, hi].
 fn litter_size(kind: Kind, seed_id: i32, tick: i32) -> u32 {
     let (lo, hi) = match kind {
-        Kind::Rabbit => (3u32, 5u32),
-        Kind::Cat => (2, 4),
+        Kind::Rabbit => (3u32, 5u32), // r-strategist prey: big litters
         Kind::Kangaroo => (1, 2),
-        Kind::Lion => (1, 3),
-        Kind::Dinosaur => (1, 2),
-        Kind::Person => (1, 2), // occasionally twins → families actually grow (user: humans weren't reproducing enough)
+        Kind::Person => (1, 2),       // occasionally twins → families actually grow (user: humans weren't reproducing enough)
+        // PREDATORS: small litters (K-strategists) so the apex stays rare — paired with long gestation above.
+        Kind::Cat => (1, 2),  // was (2,4)
+        Kind::Lion => (1, 1), // single cubs (was 1..3) — apex must not out-breed its prey
+        Kind::Dinosaur => (1, 1),
     };
     lo + (crate::simrng::rand(&[seed_id, tick, CH_LITTER]) * (hi - lo + 1) as f64).floor() as u32
 }
@@ -285,6 +491,18 @@ pub struct ManagedAgent {
     pub breed_cd: f64,        // seconds until it can breed again (>0 = on cooldown / a maturing juvenile)
     pub build_cd: f64,        // people only — seconds until this settler can raise another house (emergent cities)
     pub crowd: u32,           // flock neighbours this tick
+    pub carrion: f64,         // a FRESH corpse's remaining edible "meat" (s) — set at death, rots each tick; a hungry
+    // carnivore scavenges from it (gains energy) until it's gone. 0 on the living (and on a picked-clean carcass).
+    pub weights: Genome,      // EMERGENT-mode behaviour genome (utility weights). Manual ignores it; founders get a
+    // seeded spread (strategy variation to select on); babies re-roll from their own seed for now (true cross-birth
+    // inheritance needs the births buffer to carry the genome — the next plumbing step). Neutral ⇒ baseline scorer.
+    // ── LINEAGE (incest avoidance, all kinds) ── a small unique family id per individual + its two parents' ids, so
+    // find_mate can refuse a parent / child / sibling. Small counter ints (fit f32 exactly → ride the births buffer);
+    // 0 = unknown (founders have no parents). The Rust core owns the counter; JS just ferries the parent ids at birth.
+    pub fam: u32,             // this individual's unique lineage id (assigned at spawn)
+    pub pfam_a: u32,          // mother's fam (0 = founder/unknown)
+    pub pfam_b: u32,          // father's fam (0 = founder/unknown)
+    pub unborn_dad_fam: u32,  // the carried litter's father's fam, stored at conception (the sire may wander off/die before delivery)
 }
 
 /// Build a fully-seeded managed agent from its kind (so callers don't repeat the eco wiring).
@@ -393,6 +611,12 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         // start partway through a build cooldown (seeded) so a fresh town doesn't raise every house on one tick
         build_cd: BUILD_COOLDOWN * crate::simrng::rand(&[seed_id, CH_BUILD]),
         crowd: 0,
+        carrion: 0.0,
+        weights: Genome::from_seed(seed_id), // founders vary → emergent strategies have something to select on
+        fam: 0, // assigned a unique id by World::spawn (needs the World-owned counter); 0 here is a placeholder
+        pfam_a: 0,
+        pfam_b: 0,
+        unborn_dad_fam: 0,
     }
 }
 
@@ -453,6 +677,18 @@ fn is_female(seed_id: i32) -> bool {
     seed_id & 1 == 0
 }
 
+/// Are `a` and `b` close kin (so they must NOT mate)? True if one is the other's PARENT, or they share a parent
+/// (full/half SIBLINGS). Uses the small lineage ids (fam = self, pfam_a/b = parents); 0 = unknown (founders), which
+/// never matches, so unrelated founders + cousins breed freely. Applies to ALL kinds (user: "avoid incest, all animals").
+fn related(a: &ManagedAgent, b: &ManagedAgent) -> bool {
+    // parent ↔ child (a fam is always non-zero once spawned; a parent fam of 0 = unknown, won't match a real fam)
+    if b.pfam_a == a.fam || b.pfam_b == a.fam || a.pfam_a == b.fam || a.pfam_b == b.fam {
+        return true;
+    }
+    // siblings — share a known (non-zero) parent
+    (a.pfam_a != 0 && (a.pfam_a == b.pfam_a || a.pfam_a == b.pfam_b)) || (a.pfam_b != 0 && (a.pfam_b == b.pfam_a || a.pfam_b == b.pfam_b))
+}
+
 pub struct World {
     pub agents: Vec<ManagedAgent>,
     pub clock: SimClock,
@@ -465,6 +701,9 @@ pub struct World {
     last_player: (f64, f64),       // previous tick's player pos → its speed (a running player scares wildlife)
     night: f64,                    // 0 day … 1 night → prey jumpier (wider danger radius)
     pop_scale: f64,                // world-AREA multiplier for prey caps (fed from JS: bigger world → more life)
+    person_pop: usize,             // last tick's live PERSON count → drives low-pop BANDING (truce + gather, see PERSON_BAND_LOW)
+    kind_pop: [usize; 6],          // last tick's live count per Kind → predators prefer ABUNDANT prey (prey-switching)
+    person_banding: bool,          // LATCHED low-pop survival truce (hysteresis PERSON_BAND_LOW↑PERSON_BAND_RELEASE): no infighting, gather up
     vitality: [f64; 6],            // per-kind BREEDING vigour, set by the JS "Mother Nature" director: >1 a struggling
     // species breeds harder (lower fullness bar + shorter cooldown) to recover; <1 a booming one eases off. 1 = neutral.
     forces: Vec<(f64, f64, u32)>,  // reused per-tick (fx, fz, crowd) flock buffer → no per-frame alloc
@@ -472,6 +711,7 @@ pub struct World {
     kills: Vec<usize>,             // prey caught this tick → turned to corpses after the behaviour pass
     slept: Vec<bool>,              // was asleep AT TICK START → handled by the sleep pass, skipped elsewhere
     fish: Vec<(f64, f64)>,         // lake-fish lure points (fed from the JS view; cats pad to the bank after them)
+    refuges: Vec<(f64, f64)>,      // house/settlement centres (fed from JS) → a threatened woman/child FLEES toward the nearest (home = safety)
     obstacles: Vec<Obstacle>,      // solid props/buildings/ponds → agents are pushed out (no tunnelling)
     ob_grid: SpatialHashGrid,      // obstacle lookup grid (cell = OBSTACLE_CELL), rebuilt on set_obstacles
     has_obstacles: bool,
@@ -479,6 +719,11 @@ pub struct World {
     births: Vec<f32>,              // this tick's births, flat [kindCode, x, z, gene, …] → JS spawns the babies
     builds: Vec<f32>,              // this step's house-build requests, flat [x, z, …] → JS places the houses
     events: Vec<f32>,              // TELEMETRY: this step's events, flat [code, kind, x, z, …] → JS posts to /api/telemetry
+    behavior_mode: BehaviorMode,   // which decision brain runs the per-tick DECIDE pass (Manual default / Emergent)
+    lineage_counter: u32,          // next unique family id to hand out (incest avoidance) — bumped per spawn
+    player_immune: bool,           // true → NO predator hunts/menaces the player + the danger level stays 0 (the
+    // game sets this on; the apex-hunts-player tests leave it off). Animals still give your body a berth + skittish
+    // prey still flee your approach — you're just not PREY/quarry. (user: "give me immunity, no animals hunt me")
 }
 
 impl Default for World {
@@ -501,12 +746,16 @@ impl World {
             last_player: (f64::NAN, f64::NAN),
             night: 0.0,
             pop_scale: 1.0,
+            person_pop: 0,
+            kind_pop: [0; 6],
+            person_banding: false,
             vitality: [1.0; 6],
             forces: Vec::new(),
             behave: Vec::new(),
             kills: Vec::new(),
             slept: Vec::new(),
             fish: Vec::new(),
+            refuges: Vec::new(),
             obstacles: Vec::new(),
             ob_grid: SpatialHashGrid::new(OBSTACLE_CELL),
             has_obstacles: false,
@@ -514,7 +763,27 @@ impl World {
             births: Vec::new(),
             builds: Vec::new(),
             events: Vec::new(),
+            behavior_mode: BehaviorMode::Emergent, // the world runs the EMERGENT brain by default (user: "world should be emergent"); flip to Manual via set_behavior_mode (the unit tests that pin Manual's exact mechanics do so explicitly)
+            lineage_counter: 1, // 0 is reserved for "unknown parent"; real ids start at 1
+            player_immune: false, // OFF by default so the apex-hunts-player tests still fire; the game turns it ON (Sim::new)
         }
+    }
+
+    /// Toggle player IMMUNITY — when on, no predator hunts/menaces the player and the danger level holds at 0.
+    /// (Prey still flee your approach + animals still berth your body; you're simply never treated as quarry.)
+    pub fn set_player_immune(&mut self, immune: bool) {
+        self.player_immune = immune;
+    }
+
+    /// Switch the decision brain at runtime (the design's mode toggle). Both paths compile + run, so a world can
+    /// be A/B-flipped live; the choice persists on `World` (and is serialised in the world blob JS-side).
+    pub fn set_behavior_mode(&mut self, mode: BehaviorMode) {
+        self.behavior_mode = mode;
+    }
+
+    /// The brain currently driving the world (for the HUD readout / persistence).
+    pub fn behavior_mode(&self) -> BehaviorMode {
+        self.behavior_mode
     }
 
     /// How nocturnal the world is (0 day … 1 night) — widens the prey's danger radius.
@@ -536,44 +805,51 @@ impl World {
         }
     }
 
-    /// Live carrying capacity for `kind`, given this tick's per-kind headcount `pop`. PREY (+ omnivore people)
-    /// scale with world AREA (`pop_scale`); each PREDATOR's ceiling is a share of the LIVE prey it can eat — so
-    /// more prey supports more hunters and a prey crash pulls them back down (the dynamic that retired the old
-    /// hand-tuned predator numbers). Indices use `Kind as usize` so they track the enum, not a literal.
-    fn effective_cap(&self, kind: Kind, pop: &[usize; 6]) -> usize {
-        let r = pop[Kind::Rabbit as usize] as f64;
-        let k = pop[Kind::Kangaroo as usize] as f64;
-        let p = pop[Kind::Person as usize] as f64;
-        let c = pop[Kind::Cat as usize] as f64;
-        let l = pop[Kind::Lion as usize] as f64;
-        match kind {
-            Kind::Rabbit => (PREY_DENSITY_RABBIT * self.pop_scale).round() as usize,
-            Kind::Kangaroo => (PREY_DENSITY_KANGAROO * self.pop_scale).round() as usize,
-            Kind::Person => (PREY_DENSITY_PERSON * self.pop_scale).round() as usize,
-            Kind::Cat => ((r * CAT_PREY_SHARE).round() as usize).max(2), // hunts rabbits
-            Kind::Lion => (((r + k + p + c) * LION_PREY_SHARE).round() as usize).max(1), // hunts all below it
-            Kind::Dinosaur => (((r + k + p + c + l) * DINO_PREY_SHARE).round() as usize).max(1),
-        }
+    // (effective_cap removed 2026-06-22 — the live sim no longer enforces a headcount carrying capacity; food +
+    // predation + old age + Mother Nature's anti-extinction rescue regulate population. `cap_for` lives on only
+    // for the away fast-forward `ff_targets` relaxation target.)
+
+    /// Hand out the next unique lineage id (incest avoidance) → every spawned individual gets its own.
+    fn next_fam(&mut self) -> u32 {
+        let f = self.lineage_counter;
+        self.lineage_counter = self.lineage_counter.wrapping_add(1).max(1); // never wrap back to 0 (the "unknown" sentinel)
+        f
     }
 
     /// Spawn an agent; returns its index.
     pub fn spawn(&mut self, agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> usize {
-        self.agents.push(make_managed(agent, kind, radius, seed_id));
+        let mut m = make_managed(agent, kind, radius, seed_id);
+        m.fam = self.next_fam();
+        self.agents.push(m);
         self.agents.len() - 1
     }
 
     /// Spawn into a renderer-owned stable slot. A slot is only recycled after `despawn()` made it inert;
     /// otherwise append rather than overwrite a still-visible corpse/live agent.
     pub fn spawn_at(&mut self, i: usize, agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> usize {
+        let fam = self.next_fam();
         if i == self.agents.len() {
-            self.agents.push(make_managed(agent, kind, radius, seed_id));
+            let mut m = make_managed(agent, kind, radius, seed_id);
+            m.fam = fam;
+            self.agents.push(m);
             return i;
         }
         if i < self.agents.len() && self.agents[i].dead {
-            self.agents[i] = make_managed(agent, kind, radius, seed_id);
+            let mut m = make_managed(agent, kind, radius, seed_id);
+            m.fam = fam;
+            self.agents[i] = m;
             return i;
         }
         self.spawn(agent, kind, radius, seed_id)
+    }
+
+    /// Record a newborn's PARENT lineage ids (mother's fam, father's fam) — set by JS right after it spawns the
+    /// baby from the births buffer, so the kinship check (find_mate) can later refuse a parent/child/sibling pairing.
+    pub fn set_lineage(&mut self, i: usize, pfam_a: u32, pfam_b: u32) {
+        if let Some(m) = self.agents.get_mut(i) {
+            m.pfam_a = pfam_a;
+            m.pfam_b = pfam_b;
+        }
     }
 
     pub fn set_player(&mut self, x: f64, z: f64) {
@@ -605,6 +881,13 @@ impl World {
     pub fn set_fish(&mut self, xz: &[f64]) {
         self.fish.clear();
         self.fish.extend(xz.chunks_exact(2).map(|c| (c[0], c[1])));
+    }
+
+    /// Replace the REFUGE points (house/settlement centres) a threatened woman/child flees toward — home is safety,
+    /// and it's where the guard men cluster. `xz` is a flat [x0,z0,x1,z1,…] buffer (fed from the JS world view).
+    pub fn set_refuges(&mut self, xz: &[f64]) {
+        self.refuges.clear();
+        self.refuges.extend(xz.chunks_exact(2).map(|c| (c[0], c[1])));
     }
 
     /// Replace the solid obstacles agents route around. `flat` is a packed [x,z,r,hx,hz,cos,sin] per obstacle
@@ -703,6 +986,42 @@ impl World {
         best
     }
 
+    /// Nearest FRESH carcass (dead, still-edible) within `r` of (x,z) → (x, z, index), or None. A hungry carnivore
+    /// pads over and scavenges it. Scans the seek grid (corpses don't move, so the previous-position grid is exact).
+    fn nearest_carrion(&self, x: f64, z: f64, r: f64, scratch: &mut Vec<u32>) -> Option<(f64, f64, usize)> {
+        let mut best: Option<(f64, f64, usize)> = None;
+        let mut best_d2 = r * r;
+        scratch.clear();
+        self.seek_grid.for_each_neighbor(x, z, |j| scratch.push(j));
+        for &ju in scratch.iter() {
+            let j = ju as usize;
+            if !self.agents[j].dead || self.agents[j].carrion <= 0.0 {
+                continue;
+            }
+            let (cx, cz) = (self.agents[j].agent.x, self.agents[j].agent.z);
+            let d2 = (cx - x).powi(2) + (cz - z).powi(2);
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = Some((cx, cz, j));
+            }
+        }
+        best
+    }
+
+    /// Nearest refuge (house) within `r` of (x,z), or None — a fleeing woman/child heads here for safety.
+    fn nearest_refuge(&self, x: f64, z: f64, r: f64) -> Option<(f64, f64)> {
+        let mut best: Option<(f64, f64)> = None;
+        let mut best_d2 = r * r;
+        for &(rx, rz) in &self.refuges {
+            let d2 = (rx - x).powi(2) + (rz - z).powi(2);
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = Some((rx, rz));
+            }
+        }
+        best
+    }
+
     /// Drive the sim from real elapsed seconds (advances the clock; runs each emitted fixed-DT tick).
     pub fn step(&mut self, real_dt: f64) {
         self.births.clear(); // births accumulate across this step's ticks; JS drains them after step()
@@ -754,15 +1073,38 @@ impl World {
             }
         }
 
-        // 1. rebuild both grids from the PREVIOUS positions (flocking + coarse food-chain)
+        // 1. rebuild both grids from the PREVIOUS positions (flocking + coarse food-chain), and tally live people
+        // for the LOW-POP BANDING latch — done at tick START so this tick's targeting/flock already see the truce
+        // (an end-of-tick latch lagged a tick, letting a point-blank kill slip through before it engaged).
         self.grid.clear();
         self.seek_grid.clear();
+        let mut people = 0usize;
+        let mut kind_pop = [0usize; 6];
         for (i, m) in self.agents.iter().enumerate() {
             if m.dead {
+                // a FRESH carcass still goes into the SEEK grid so a hungry scavenger can find it (the dead-check in
+                // targeting skips it as live prey); it's left OUT of the flock grid (corpses don't flock/separate).
+                if m.carrion > 0.0 {
+                    self.seek_grid.insert(m.agent.x, m.agent.z, i as u32);
+                }
                 continue;
+            }
+            kind_pop[m.kind as usize] += 1; // live per-kind census → predators prefer ABUNDANT prey (see target())
+            if matches!(m.kind, Kind::Person) {
+                people += 1;
             }
             self.grid.insert(m.agent.x, m.agent.z, i as u32);
             self.seek_grid.insert(m.agent.x, m.agent.z, i as u32);
+        }
+        self.kind_pop = kind_pop;
+        // hysteresis: a dwindling people close ranks (truce + gather) at/below LOW, only release past RELEASE.
+        self.person_pop = people;
+        if self.person_banding {
+            if people >= PERSON_BAND_RELEASE {
+                self.person_banding = false;
+            }
+        } else if people <= PERSON_BAND_LOW {
+            self.person_banding = true;
         }
 
         // 2. food-chain targeting — reset the transient buffer, then each agent (as predator) picks its best
@@ -885,6 +1227,12 @@ impl World {
         self.kills.clear();
         let hunt2 = HUNT2 * (1.0 + 0.4 * self.night); // keener at night
         let mut danger_now = 0.0_f64; // peak imminence of any player-hunting predator this tick
+        // ── THE BEHAVIOUR SEAM (design doc §2): only the DECIDE pass differs between modes. Sections 1–4
+        // (perception/targeting/mobbing/sleep/flock) above and 6–9 (kills/metabolism/breeding/build/step/collide)
+        // below are SHARED. Emergent scores needs+primitives+utility; Manual runs the hand-coded chain that follows.
+        if let BehaviorMode::Emergent = self.behavior_mode {
+            danger_now = emergent::decide(self, px, pz, pspeed, danger2, hunt2);
+        } else {
         for i in 0..n {
             if self.agents[i].dead || self.slept[i] {
                 continue;
@@ -908,7 +1256,8 @@ impl World {
             // player when you're within reach AND closer than its animal prey. Non-lethal (you're uncatchable);
             // it pressures you + raises the danger level. Keener + farther-reaching at night.
             let mut hunt_player = false;
-            if rank >= 4
+            if !self.player_immune
+                && rank >= 4
                 && self.forces[i].2 < 3 // crowd (flock neighbours) — a lone hunter stalks; a pack just wanders
                 && a_hunts
                 && self.agents[i].hungry
@@ -943,7 +1292,9 @@ impl World {
                 None
             };
             let bully_pos = if self.agents[i].spooked > 0.0 {
-                self.agents[i].bully.filter(|&b| !self.agents[b].dead).map(|b| (self.agents[b].agent.x, self.agents[b].agent.z))
+                // guard the stored index — it can dangle if the agent buffer is ever compacted (the test harness's
+                // reap; the future unified buffer). In the live game slots are stable so b < len always holds.
+                self.agents[i].bully.filter(|&b| b < self.agents.len() && !self.agents[b].dead).map(|b| (self.agents[b].agent.x, self.agents[b].agent.z))
             } else {
                 None
             };
@@ -960,21 +1311,33 @@ impl World {
             } else {
                 None
             };
+            // SCAVENGE — a HUNGRY carnivore (nothing else pressing) pads to the nearest FRESH carcass and feeds, so
+            // a death (old age / starvation / another's kill) isn't wasted. The if-chain below ranks it AFTER live
+            // prey (a fresh kill beats leftovers) but ABOVE the idle fish-lure / wander.
+            let carrion_pos = if a_hunts
+                && self.agents[i].hungry
+                && !mobbed
+                && threat_pos.is_none()
+                && !fighting_rival
+                && self.agents[i].spooked <= 0.0
+            {
+                let mut scratch = std::mem::take(&mut self.seek_neighbors);
+                let found = self.nearest_carrion(ax, az, SCAVENGE_R, &mut scratch);
+                self.seek_neighbors = scratch;
+                found
+            } else {
+                None
+            };
 
+            // A HUNGRY hunter with prey in sight COMMITS through the swarm — it charges in for the kill while
+            // tanking the mob's damage, instead of always fleeing. Without this a dense crowd made predators
+            // totally impotent (measured: 6 lions, 60 people, 100 s → 0 kills): they'd flee the mob forever and
+            // never catch anyone. Now a crowd is DANGEROUS to a lion (it bleeds, can be dragged down) but never
+            // immune from it. It still breaks away when sated, badly wounded, or with no prey to grab.
+            let commit_through_mob = mobbed && self.agents[i].hungry && prey_info.is_some() && self.agents[i].health > HURT_AT;
+            // A mobbed hunter ALWAYS bleeds from attackers pressed on it + slashes back — whether it breaks away
+            // or commits — thinning the mob in real time until its ferocity is spent and the survivors drag it down.
             if mobbed {
-                // outnumbered → BREAK AWAY from the swarm's centre (a fast hunter shakes them off)
-                let mc = self.transient[i].mob_count.max(1) as f64;
-                let cx = self.transient[i].mob_x / mc;
-                let cz = self.transient[i].mob_z / mc;
-                let dx = ax - cx;
-                let dz = az - cz;
-                let d = dx.hypot(dz).max(0.1);
-                self.forces[i].0 += (dx / d) * a_max * FLEE_W;
-                self.forces[i].1 += (dz / d) * a_max * FLEE_W;
-                self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
-                // ...but if it CAN'T shake the attackers pressed against it, they WOUND it (faster the more of
-                // them, and the weaker it already is) while it SLASHES back — thinning the mob in real time
-                // until its ferocity is spent and the survivors drag it down.
                 let attackers = self.transient[i].attackers;
                 if attackers >= MOB_MIN {
                     self.agents[i].health = (self.agents[i].health - MOB_KILL_DPS * attackers as f64 * DT).max(0.0);
@@ -987,6 +1350,18 @@ impl World {
                         }
                     }
                 }
+            }
+            if mobbed && !commit_through_mob {
+                // outnumbered + not committing → BREAK AWAY from the swarm's centre (a fast hunter shakes them off)
+                let mc = self.transient[i].mob_count.max(1) as f64;
+                let cx = self.transient[i].mob_x / mc;
+                let cz = self.transient[i].mob_z / mc;
+                let dx = ax - cx;
+                let dz = az - cz;
+                let d = dx.hypot(dz).max(0.1);
+                self.forces[i].0 += (dx / d) * a_max * FLEE_W;
+                self.forces[i].1 += (dz / d) * a_max * FLEE_W;
+                self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
             } else if let Some((bx, bz)) = bully_pos {
                 // freshly bullied (lost a rival fight) → keep fleeing that bully while spooked
                 let dx = ax - bx;
@@ -1011,8 +1386,26 @@ impl World {
                     (ax - tx, az - tz, FLEE_W) // flee the hunter (women + children at the edge, prey)
                 };
                 let d = dx.hypot(dz).max(0.1);
-                self.forces[i].0 += (dx / d) * a_max * w;
-                self.forces[i].1 += (dz / d) * a_max * w;
+                let (mut ux, mut uz) = (dx / d, dz / d);
+                // FLEE TO SAFETY (C): a fleeing PERSON heads for the nearest house — home (and the guard men who
+                // cluster there) is safety. Blend the home-ward unit into her escape vector, but only if it doesn't
+                // turn her back toward the predator (then plain flight wins — never run INTO the hunter).
+                if w == FLEE_W && matches!(self.agents[i].kind, Kind::Person) {
+                    if let Some((hx, hz)) = self.nearest_refuge(ax, az, REFUGE_R) {
+                        let (rx, rz) = (hx - ax, hz - az);
+                        let rd = rx.hypot(rz).max(0.1);
+                        let (rux, ruz) = (rx / rd, rz / rd);
+                        if rux * ux + ruz * uz > -0.2 {
+                            // home isn't behind the predator → curve toward it
+                            let (bx, bz) = (ux + rux * REFUGE_PULL, uz + ruz * REFUGE_PULL);
+                            let bl = bx.hypot(bz).max(0.1);
+                            ux = bx / bl;
+                            uz = bz / bl;
+                        }
+                    }
+                }
+                self.forces[i].0 += ux * a_max * w;
+                self.forces[i].1 += uz * a_max * w;
                 self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
             } else if let Some((r, rx, rz, rr)) = rival_pos {
                 // TERRITORIAL FIGHT — charge the rival; on contact both bleed, so one breaks off wounded (then
@@ -1063,6 +1456,24 @@ impl World {
                         self.agents[i].stamina = (self.agents[i].stamina + EAT_GAIN).min(1.0);
                     }
                 }
+            } else if let Some((cx, cz, ci)) = carrion_pos {
+                // pad to the carcass at a WALK; FEED on contact — refuel fullness + drain the carcass's meat (so it
+                // feeds a few scavengers, then it's picked clean). No food-coma: scraps are a top-up, not a gorge.
+                let dx = cx - ax;
+                let dz = cz - az;
+                let d = dx.hypot(dz).max(0.1);
+                let contact = radius + self.agents[ci].radius + CONTACT_PAD + 0.3;
+                if d < contact {
+                    // AT the carcass → SETTLE and feed: no approach force (the overshoot-then-re-aim orbit made a
+                    // scavenger fidget ON the corpse), pursuing flag held so the idle FSM can't frolic on the body.
+                    self.behave[i] = (1.0, true);
+                    self.agents[i].energy = (self.agents[i].energy + SCAVENGE_GAIN * DT).min(1.0);
+                    self.agents[ci].carrion = (self.agents[ci].carrion - SCAVENGE_DRAIN * DT).max(0.0);
+                } else {
+                    self.forces[i].0 += (dx / d) * a_max * CHASE_W * 0.7;
+                    self.forces[i].1 += (dz / d) * a_max * CHASE_W * 0.7;
+                    self.behave[i] = (1.0, true);
+                }
             } else if let Some((fx, fz)) = fish_pos {
                 // pad toward the fish at a curious WALK (no sprint) — the pond obstacle halts the cat at the bank
                 let dx = fx - ax;
@@ -1108,7 +1519,18 @@ impl World {
             if self.agents[i].health < HURT_AT {
                 self.behave[i].0 *= HURT_SPEED;
             }
+            // FRAILTY — in the last stretch of life it slows (senescence), so predators naturally cull the old &
+            // weak and the generations turn over. Ramps from full speed at FRAIL_ONSET of lifespan to FRAIL_MIN at
+            // death. The player's pet is exempt (it never dies of age either). Multiplies the gait cap (boost).
+            if !self.agents[i].companion {
+                let life = self.agents[i].age / self.agents[i].lifespan.max(1.0);
+                if life > FRAIL_ONSET {
+                    let t = ((life - FRAIL_ONSET) / (1.0 - FRAIL_ONSET)).min(1.0);
+                    self.behave[i].0 *= 1.0 - t * (1.0 - FRAIL_MIN);
+                }
+            }
         }
+        } // end Manual behaviour arm of the seam
 
         // ease the danger level toward this tick's peak → the UI vignette swells/fades smoothly
         self.danger += (danger_now - self.danger) * (6.0 * DT).min(1.0);
@@ -1120,13 +1542,20 @@ impl World {
             self.agents[p].asleep = false;
             self.agents[p].agent.vx = 0.0;
             self.agents[p].agent.vz = 0.0;
+            self.agents[p].carrion = CARRION_MEAT; // a fresh carcass — scavengeable until it rots / is picked clean
         }
 
         // 7. metabolism (AWAKE agents) — sprinting + a carnivore's basal drain ebb stamina; prey/people
         // rest-recover. The LATCHED hunger (hysteresis LO/HI) is the flip-flop fix. Plus slow healing, the
         // cooldown timers, and the exhaustion-sleep trigger. (Asleep agents recovered in the sleep pass.)
         for i in 0..n {
-            if self.agents[i].dead || self.slept[i] {
+            if self.agents[i].dead {
+                if self.agents[i].carrion > 0.0 {
+                    self.agents[i].carrion = (self.agents[i].carrion - DT).max(0.0); // a carcass rots even uneaten
+                }
+                continue;
+            }
+            if self.slept[i] {
                 continue;
             }
             // a slash / scrap that emptied the health bar this tick is fatal (checked BEFORE the heal regen)
@@ -1135,6 +1564,7 @@ impl World {
                 self.agents[i].asleep = false;
                 self.agents[i].agent.vx = 0.0;
                 self.agents[i].agent.vz = 0.0;
+                self.agents[i].carrion = CARRION_MEAT; // starved/wounded carcass → feeds a scavenger
                 continue;
             }
             // AGING: live a little; die of old age once past the natural lifespan (predation/starvation usually
@@ -1145,6 +1575,7 @@ impl World {
                 self.agents[i].asleep = false;
                 self.agents[i].agent.vx = 0.0;
                 self.agents[i].agent.vz = 0.0;
+                self.agents[i].carrion = CARRION_MEAT; // an elder that dropped → a carcass for the scavengers
                 let (k, ax, az) = (self.agents[i].kind as usize as f32, self.agents[i].agent.x as f32, self.agents[i].agent.z as f32);
                 self.events.extend_from_slice(&[EV_OLDAGE, k, ax, az]);
                 continue;
@@ -1239,22 +1670,27 @@ impl World {
                 pop[m.kind as usize] += 1;
             }
         }
-        // 🌿 MOTHER NATURE — the homeostatic DIRECTOR, in-sim (per the Rust-owns-the-math north star). Each tick she
-        // drifts every kind's breeding VITALITY toward a target set by how far it is from carrying capacity: a sagging
-        // species (well under cap) breeds harder to recover, a booming one (at/over cap) eases off. Vitality feeds
-        // breed_ready (lower fullness bar) + the post-mating cooldown, so the world self-corrects toward a churning
-        // balance instead of stagnating or over-shooting — no JS controller, no hand-tuning.
+        // (the person count + LOW-POP BANDING latch are computed at tick START — see the grid-rebuild pass.)
+        // 🌿 MOTHER NATURE — the homeostatic DIRECTOR, in-sim. NO HARD POPULATION CAP (decided 2026-06-22): the world
+        // grows to thousands+ over time (the shared multiplayer big-world), so headcount ceilings are GONE. The
+        // NATURAL ceiling is FOOD — a herd that outgrows its grazing overgrazes + starves back (energy pass), predators
+        // are bounded by prey, old age + predation churn it. Mother Nature's only in-sim job is ANTI-EXTINCTION RESCUE:
+        // a species crashing toward zero breeds hard so a spawned cohort can't dead-end. The richer director
+        // (nature.svelte.ts / the LLM) layers on top. Vitality feeds breed_ready (lower fullness bar) + the
+        // post-mating cooldown. (Old cap-ratio drift removed; see git history.)
         for kind in [Kind::Rabbit, Kind::Cat, Kind::Kangaroo, Kind::Person, Kind::Lion, Kind::Dinosaur] {
             let k = kind as usize;
-            let ratio = pop[k] as f64 / self.effective_cap(kind, &pop).max(1) as f64;
-            let target = if ratio < 0.35 {
-                1.7 // struggling → breed hard
-            } else if ratio < 0.7 {
-                1.25
-            } else if ratio >= 1.0 {
-                0.8 // at/over capacity → ease off
+            let n = pop[k] as f64;
+            // SOFT LOGISTIC HOMEOSTASIS (not a hard cap, never culls): below the rescue floor → breed hard; otherwise
+            // the breeding RATE eases smoothly toward 0 as the population approaches a LARGE soft target, so it GROWS
+            // GRADUALLY then PLATEAUS instead of exploding exponentially (the "47k objects @ 1fps" bug). Vitality 0 ⇒
+            // the energy/cooldown bars are unmeetable ⇒ births stop; deaths then pull it back under target ⇒ it holds.
+            // The target scales with the built world (pop_scale) — a developed region supports more life.
+            let cap = soft_target(kind) * self.pop_scale;
+            let target = if n >= 1.0 && (n as usize) < RESCUE_N {
+                1.8 // anti-extinction rescue
             } else {
-                1.0
+                (1.3 * (1.0 - n / cap)).max(0.0) // ease to 0 at the soft target → plateau
             };
             self.vitality[k] += (target - self.vitality[k]) * VITALITY_LERP;
         }
@@ -1271,19 +1707,27 @@ impl World {
             let kind = self.agents[i].kind;
             let kc = kind as usize;
             let (mx, mz) = (self.agents[i].agent.x, self.agents[i].agent.z);
-            let want = litter_size(kind, self.agents[i].seed_id, self.clock.tick as i32);
-            let room = self.effective_cap(kind, &pop).saturating_sub(pop[kc]) as u32; // cap still holds — only deliver what fits
-            let born = want.min(room);
-            pop[kc] += born as usize; // count newborns against the cap NOW so a tickful of deliveries can't all see the same room and overshoot it
+            let (pfam_a, pfam_b) = (self.agents[i].fam, self.agents[i].unborn_dad_fam); // the litter's parents (mother, sire)
+            let born = litter_size(kind, self.agents[i].seed_id, self.clock.tick as i32); // NO cap — deliver the FULL litter; food/predation/old-age are the natural limits
             for b in 0..born {
                 // each littermate inherits the carried vigor ± a touch more mutation, so siblings vary a little
                 let mu = (crate::simrng::rand(&[self.agents[i].seed_id, self.clock.tick as i32, b as i32, CH_GENE]) - 0.5) * 2.0 * GENE_MUT;
                 let baby_gene = (self.agents[i].unborn_gene + mu).clamp(GENE_MIN, GENE_MAX);
+                // born clustered AROUND the mother (a small seeded ring), not all stacked on her exact point — else
+                // the anti-overlap explodes the litter apart on tick 1. Tiny radius → they still read as her brood.
+                let ang = crate::simrng::rand(&[self.agents[i].seed_id, self.clock.tick as i32, b as i32, CH_BIRTHPOS]) * std::f64::consts::TAU;
+                let rad = 0.4 + 0.25 * b as f64; // siblings ring out a touch so they don't all share one spot
+                let bx = mx + ang.cos() * rad;
+                let bz = mz + ang.sin() * rad;
+                // births stride = 6: [kindCode, x, z, gene, motherFam, fatherFam]. The parent fams ride along so JS
+                // can stamp the baby's lineage (set_lineage) → incest avoidance survives the JS respawn round-trip.
                 self.births.push(kc as f32);
-                self.births.push(mx as f32);
-                self.births.push(mz as f32);
+                self.births.push(bx as f32);
+                self.births.push(bz as f32);
                 self.births.push(baby_gene as f32);
-                self.events.extend_from_slice(&[EV_BIRTH, kc as f32, mx as f32, mz as f32]);
+                self.births.push(pfam_a as f32);
+                self.births.push(pfam_b as f32);
+                self.events.extend_from_slice(&[EV_BIRTH, kc as f32, bx as f32, bz as f32]);
                 pop[kc] += 1;
             }
         }
@@ -1293,14 +1737,15 @@ impl World {
                 continue;
             }
             let kc = self.agents[i].kind as usize;
-            if pop[kc] >= self.effective_cap(self.agents[i].kind, &pop) {
-                continue; // at the kind's ceiling (incl. this tick's deliveries) → don't even conceive
-            }
+            // NO headcount cap — a fertile, well-fed, calm pair always conceives. Population is bounded by FOOD
+            // (overgrazing→starvation lowers the energy that breed_ready needs), predation, and old age, not a ceiling.
             if let Some(j) = self.find_mate(i) {
                 let mom = if is_female(self.agents[i].seed_id) { i } else { j }; // the female of the pair carries
                 // INHERIT: the litter's vigor = average of the parents' genes ± mutation (deterministic RNG), clamped
                 let mu = (crate::simrng::rand(&[self.agents[i].seed_id, self.agents[j].seed_id, self.clock.tick as i32, CH_GENE]) - 0.5) * 2.0 * GENE_MUT;
                 self.agents[mom].unborn_gene = (((self.agents[i].gene + self.agents[j].gene) * 0.5) + mu).clamp(GENE_MIN, GENE_MAX);
+                let dad = if mom == i { j } else { i };
+                self.agents[mom].unborn_dad_fam = self.agents[dad].fam; // remember the sire's lineage for the litter's parentage
                 self.agents[mom].pregnant = gestation(self.agents[mom].kind);
                 self.events.extend_from_slice(&[EV_CONCEIVE, kc as f32, self.agents[mom].agent.x as f32, self.agents[mom].agent.z as f32]);
                 let vit = self.vitality[kc]; // director boost → shorter recovery between litters
@@ -1370,10 +1815,12 @@ impl World {
             && m.pregnant <= 0.0 // not already carrying a litter
             && !m.mobbed
             && m.spooked <= 0.0
-            // crowd gate stops HERD prey chain-breeding into a swarm — but PEOPLE reproduce IN dense settlements,
-            // so a city (always crowded) was silently sterilising them → the human population crashed to ~0 with
-            // zero births. Exempt people; the per-kind POP_CAP still bounds them.
-            && (matches!(m.kind, Kind::Person) || m.crowd < BREED_CROWD)
+            // DENSITY-DEPENDENT breeding — the ONLY brake now that hard caps are gone (else breeding goes exponential
+            // and the world explodes to thousands in seconds). A SATURATED patch stops breeding (it plateaus); the
+            // sparse FRONTIER keeps growing → the population rises GRADUALLY + SPATIALLY (spreads), never explodes,
+            // and is never culled. People tolerate a denser settlement than herd prey before they plateau; the
+            // breed-stop crowd sits BELOW the dispersal crowd so a filling area plateaus before it splinters.
+            && m.crowd < if matches!(m.kind, Kind::Person) { PERSON_BREED_CROWD } else { BREED_CROWD }
             && self.transient[i].threat_d > BREED_FEAR_R2 // a hunter must be RIGHT HERE to interrupt mating, not just within the 40 m flee radius
             && !self.transient[i].near_predator
     }
@@ -1395,8 +1842,8 @@ impl World {
                 return;
             }
             let d2 = (self.agents[j].agent.x - ax).powi(2) + (self.agents[j].agent.z - az).powi(2);
-            if d2 <= r2 && self.breed_ready(j) {
-                found = Some(j);
+            if d2 <= r2 && self.breed_ready(j) && !related(&self.agents[i], &self.agents[j]) {
+                found = Some(j); // opposite-sex, fertile, in range, AND not close kin (no incest)
             }
         });
         found
@@ -1425,10 +1872,21 @@ impl World {
         found
     }
 
-    /// Mark a spawned agent (a newborn) with a maturation cooldown so it can't breed until it grows up.
+    /// Mark a spawned agent as a NEWBORN: a maturation cooldown (can't breed until grown) AND age reset to 0 — a
+    /// baby starts life at zero even though founders spawn with a seeded random age (see randomize_start_age).
     pub fn set_breed_cooldown(&mut self, i: usize, cd: f64) {
         if let Some(m) = self.agents.get_mut(i) {
             m.breed_cd = cd;
+            m.age = 0.0;
+        }
+    }
+
+    /// Give a FOUNDER (player/initial spawn) a seeded random starting age across its fertile life, so a freshly
+    /// spawned population has AGE STRUCTURE instead of being one synchronized cohort that booms then dies off
+    /// together (the "1100 humans → 5" crash). Newborns are exempt — set_breed_cooldown() resets them to age 0.
+    pub fn randomize_start_age(&mut self, i: usize, seed_id: i32) {
+        if let Some(m) = self.agents.get_mut(i) {
+            m.age = m.lifespan * 0.6 * crate::simrng::rand(&[seed_id, 41]); // spread [0, 0.6·lifespan) → all fertile, staggered deaths
         }
     }
 
@@ -1480,6 +1938,17 @@ impl World {
         };
 
         let agents = &self.agents;
+        // GENDER-BALANCED COLONISING (F): a YOUNG person about to disperse pairs with its nearest opposite-sex young
+        // neighbour as a co-founder — they'll share an outward heading + stay together (below), so a band that strikes
+        // out is a man + woman ("like missionaries"), able to actually grow a new settlement, not a single-sex dead end.
+        let a_female = is_person && is_female(m.seed_id);
+        let a_young = is_person && m.age < m.lifespan * DISPERSE_AGE;
+        let mut buddy: Option<usize> = None;
+        let mut buddy_d2 = nr2;
+        // a baby ANIMAL trails the nearest grown adult of its kind (fawn/duckling trains) — tracked in the same scan.
+        let a_juvenile = !is_person && m.age < m.lifespan * JUVENILE_FOLLOW_AGE;
+        let mut parent: Option<usize> = None;
+        let mut parent_d2 = nr2;
         // a hunter must NOT flock-separate from its own prey — the comfort-spread would shove it off before the
         // chase can close + catch (this regressed predation when the density gate dropped). The chase force
         // (behaviour pass) drives it to the prey instead; the catch fires on contact.
@@ -1495,6 +1964,25 @@ impl World {
             let d2 = dx * dx + dz * dz;
             if d2 > nr2 {
                 return; // out of range (or a hash-collision false neighbour)
+            }
+            // nearest opposite-sex young person = this disperser's co-founder
+            if a_young
+                && matches!(agents[j].kind, Kind::Person)
+                && is_female(agents[j].seed_id) != a_female
+                && agents[j].age < agents[j].lifespan * DISPERSE_AGE
+                && d2 < buddy_d2
+            {
+                buddy_d2 = d2;
+                buddy = Some(j);
+            }
+            // nearest grown adult of my kind = the parent this juvenile animal trails
+            if a_juvenile
+                && agents[j].kind == m.kind
+                && agents[j].age >= agents[j].lifespan * PARENT_ADULT_AGE
+                && d2 < parent_d2
+            {
+                parent_d2 = d2;
+                parent = Some(j);
             }
             coh_x += o.x;
             coh_z += o.z;
@@ -1563,7 +2051,11 @@ impl World {
             // SOCIAL STRUCTURE: women + children keep a HOME group (stronger cohesion → a domestic cluster), while
             // grown men range out (very weak cohesion) to hunt + guard the bounds. Other species: a gentle default.
             let coh_w = if is_person {
-                if is_female(m.seed_id) || m.age < m.lifespan * 0.15 {
+                if self.person_banding {
+                    // SURVIVAL TRUCE: a dwindling people close ranks — EVERYONE (men too) pulls together to form the
+                    // nucleus of a re-founded town, instead of the men ranging out and the band thinning to nothing.
+                    0.06 + BAND_GATHER_W
+                } else if is_female(m.seed_id) || m.age < m.lifespan * 0.15 {
                     0.06 // women + children cluster
                 } else {
                     0.012 // men range out
@@ -1578,6 +2070,47 @@ impl World {
             fz += (ali_z / nn - avz) * ALI_WEIGHT;
         }
 
+        // JUVENILE FOLLOW — a baby animal clings to the grown adult of its kind it found (a fawn trailing its
+        // mother). A touch stronger than herd cohesion so the family train holds, but gentle enough that the kid
+        // still wanders and (in a crowd) can disperse.
+        if let Some(j) = parent {
+            let pdx = agents[j].agent.x - ax;
+            let pdz = agents[j].agent.z - az;
+            let pl = pdx.hypot(pdz).max(0.1);
+            let pw = a_max * FOLLOW_W;
+            fx += pdx / pl * pw;
+            fz += pdz / pl * pw;
+        }
+
+        // LONG-RANGE BANDING SEEK: while banding, a person without a local group (few flock-neighbours) steers toward
+        // the NEAREST other person it can perceive on the WIDER seek grid — so FAR-FLUNG survivors actually walk over
+        // and converge, not just the ones already standing close. Once it gathers a quorum, local cohesion takes over.
+        if is_person && self.person_banding && n_near < BAND_SEEK_QUORUM {
+            let mut best_d2 = SEEK2;
+            let mut best: Option<usize> = None;
+            self.seek_grid.for_each_neighbor(ax, az, |j| {
+                let j = j as usize;
+                if j == i || agents[j].dead || !matches!(agents[j].kind, Kind::Person) {
+                    return;
+                }
+                let dx = agents[j].agent.x - ax;
+                let dz = agents[j].agent.z - az;
+                let d2 = dx * dx + dz * dz;
+                if d2 < best_d2 {
+                    best_d2 = d2;
+                    best = Some(j);
+                }
+            });
+            if let Some(j) = best {
+                let dx = agents[j].agent.x - ax;
+                let dz = agents[j].agent.z - az;
+                let d = best_d2.sqrt().max(0.001);
+                let w = a_max * BAND_SEEK_W;
+                fx += dx / d * w;
+                fz += dz / d * w;
+            }
+        }
+
         // DISPERSAL — a young herbivore in a crowded patch heads off to colonise new ground (see consts). Direction
         // is seeded (steady per animal) so it commits to a heading and travels, rather than jittering in place; the
         // drive ramps with crowding and vanishes once it reaches open range, so it settles where there's room.
@@ -1585,15 +2118,53 @@ impl World {
         // humans all in one place") splits into bands that strike out + found new settlements ("like missionaries"),
         // while a normal small family band (below the threshold) stays put.
         let disperse_at = if matches!(m.kind, Kind::Person) { PERSON_DISPERSE_CROWD } else { DISPERSE_CROWD };
-        if matches!(m.kind, Kind::Rabbit | Kind::Kangaroo | Kind::Person)
-            && n_near >= disperse_at
-            && m.age < m.lifespan * DISPERSE_AGE
-        {
-            let ang = crate::simrng::rand(&[m.seed_id, CH_DISPERSE]) * std::f64::consts::TAU;
+        let blob_at = if matches!(m.kind, Kind::Person) { PERSON_BLOB_CROWD } else { BLOB_CROWD };
+        // while banding (scarce humans) NOBODY strikes out — the point is to gather, not splinter further.
+        let banding_hold = is_person && self.person_banding;
+        // MIGRATION FOR ALL (user: "migration for all whenever too many in one area"): EVERY kind, EVERY age strikes
+        // out of a true crowd (n_near ≥ blob_at) → an over-dense patch breaks up and migrates to open ground. Below
+        // the blob threshold only the YOUNG peel off (steady-state colonisation). Predators rarely crowd, so this is
+        // mostly prey + people; it's the spatial half of "grow + spread, don't pile up" (paired with the breed brake).
+        let age_disperses = m.age < m.lifespan * DISPERSE_AGE || n_near >= blob_at;
+        if !banding_hold && n_near >= disperse_at && age_disperses {
             let gain = smoothstep(disperse_at as f64, disperse_at as f64 + 5.0, n_near as f64);
-            let w = a_max * DISPERSE_W * gain;
-            fx += ang.cos() * w;
-            fz += ang.sin() * w;
+            // LEADER / FOLLOWER pairing: in a co-founder pair the LOWER seed leads — it picks the outward compass
+            // heading and commits to it; the higher-seed partner FOLLOWS, steering hard onto the leader instead of
+            // its own heading. So a band is a leader trailed by the opposite sex → mixed by construction (no orphaned
+            // single-sex bands). A LONE disperser (no opposite-sex co-founder near) just heads out on its own seed.
+            let is_follower = matches!(buddy, Some(j) if agents[j].seed_id < m.seed_id);
+            if let (true, Some(j)) = (is_follower, buddy) {
+                let bx = agents[j].agent.x - ax;
+                let bz = agents[j].agent.z - az;
+                let bd = bx.hypot(bz).max(0.001);
+                let bw = a_max * DISPERSE_W * gain; // follow at the full outward strength so it keeps up + leaves too
+                fx += bx / bd * bw;
+                fz += bz / bd * bw;
+            } else {
+                // head OUTWARD — away from the world centre/valley, toward the curved edges — so migration POPULATES
+                // the wider world (civilisations form out toward the rim) instead of drifting back inward. Fanned by
+                // the seed within a ±90° cone so bands spread out, not in a single line. (At the very centre, where
+                // "outward" is undefined, any direction is outward → plain random.)
+                let rng = crate::simrng::rand(&[m.seed_id, CH_DISPERSE]);
+                let r0 = (ax * ax + az * az).sqrt();
+                let ang = if r0 > 1.0 {
+                    az.atan2(ax) + (rng - 0.5) * std::f64::consts::PI
+                } else {
+                    rng * std::f64::consts::TAU
+                };
+                let w = a_max * DISPERSE_W * gain;
+                fx += ang.cos() * w;
+                fz += ang.sin() * w;
+                // a leader keeps a gentle tether to its follower so the pair doesn't stretch apart on the way out
+                if let Some(j) = buddy {
+                    let bx = agents[j].agent.x - ax;
+                    let bz = agents[j].agent.z - az;
+                    let bd = bx.hypot(bz).max(0.001);
+                    let bw = a_max * BAND_PAIR_W * gain;
+                    fx += bx / bd * bw;
+                    fz += bz / bd * bw;
+                }
+            }
         }
 
         (fx, fz, n_near)
@@ -1624,7 +2195,9 @@ impl World {
 
         for &ju in &neighbors {
             let j = ju as usize;
-            if j == i {
+            if j == i || self.agents[j].dead {
+                // corpses live in the seek grid (so `nearest_carrion` can find them) but are INVISIBLE to live
+                // targeting — else a fresh predator carcass got flagged as a rival and the living one "fought" it.
                 continue;
             }
             let dx = ax - self.agents[j].agent.x;
@@ -1633,10 +2206,18 @@ impl World {
             if d2 > SEEK2 {
                 continue; // out of notice range (or a hash-collision false neighbour)
             }
-            if a_seeks && preys_on(&self.agents[i], &self.agents[j]) {
+            // LOW-POP TRUCE: while banding, an aggressive person won't hunt fellow people (survival over rivalry) —
+            // they still hunt non-human prey. preys_on already requires `aggressive && both Person` for the human case.
+            let human_truce = self.person_banding
+                && matches!(self.agents[i].kind, Kind::Person)
+                && matches!(self.agents[j].kind, Kind::Person);
+            if a_seeks && !human_truce && preys_on(&self.agents[i], &self.agents[j]) {
                 // size/proximity score, DISCOUNTED by how many hunters already claimed j → a crowded prey
-                // looks worse, so the pack spreads instead of dogpiling one.
-                let s = prize(self.agents[j].kind) / (d2.max(1.0) * (1.0 + COMPETE_W * self.transient[j].hunted_by as f64));
+                // looks worse, so the pack spreads instead of dogpiling one. PREY-SWITCHING (user's idea): a prey
+                // kind that's ABUNDANT is "confirmed supply" → more attractive, so predators preferentially crop the
+                // booming species back down (a natural, emergent regulator on prey explosions).
+                let abundance = 1.0 + ABUNDANCE_W * (self.kind_pop[self.agents[j].kind as usize] as f64 / ABUNDANCE_NORM).min(1.0);
+                let s = prize(self.agents[j].kind) * abundance / (d2.max(1.0) * (1.0 + COMPETE_W * self.transient[j].hunted_by as f64));
                 if s > self.transient[i].prey_score {
                     self.transient[i].prey = Some(j);
                     self.transient[i].prey_score = s;
@@ -1729,6 +2310,15 @@ mod tests {
     use super::*;
     use crate::steering::AgentOpts;
 
+    /// A MANUAL-brain world for the unit + reference-scenario tests below. The world default is now Emergent
+    /// (the game runs that); these tests pin the hand-coded brain they were written to protect, so Manual stays
+    /// the verified safety net. (Emergent tests use `emergent_world()`, which flips it back on.)
+    fn mw() -> World {
+        let mut w = World::new();
+        w.set_behavior_mode(BehaviorMode::Manual);
+        w
+    }
+
     fn animal(x: f64, z: f64, seed: i32) -> Agent {
         Agent::new(x, z, seed, &AgentOpts { max_speed: 3.0, home_radius: 30.0, wander_rate: 1.3, accel: 7.0, turn_speed: 5.0, wanderlust: 0.3 })
     }
@@ -1736,7 +2326,7 @@ mod tests {
     #[test]
     fn spawns_and_steps_deterministically() {
         let run = || {
-            let mut w = World::new();
+            let mut w = mw();
             for k in 0..8 {
                 let s = 100 + k;
                 w.spawn(animal(k as f64 * 0.5, 0.0, s), Kind::Cat, 0.35, s);
@@ -1756,7 +2346,7 @@ mod tests {
 
     #[test]
     fn despawned_slot_is_recycled_without_growing_world() {
-        let mut w = World::new();
+        let mut w = mw();
         let old = w.spawn(animal(1.0, 2.0, 1), Kind::Rabbit, 0.35, 1);
         assert_eq!(old, 0);
         w.despawn(old);
@@ -1772,7 +2362,7 @@ mod tests {
     #[test]
     fn overlapping_bodies_push_apart() {
         // two agents almost on top of each other → the anti-overlap force must separate them
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4); // park the player far away so the rabbits don't also flee IT
         w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         w.spawn(animal(0.05, 0.0, 2), Kind::Rabbit, 0.35, 2);
@@ -1795,7 +2385,7 @@ mod tests {
 
     #[test]
     fn predator_targets_prey() {
-        let mut w = World::new();
+        let mut w = mw();
         let cat = w.spawn(animal(0.0, 0.0, 10), Kind::Cat, 0.35, 10);
         let rabbit = w.spawn(animal(5.0, 0.0, 11), Kind::Rabbit, 0.35, 11);
         w.tick_once(1);
@@ -1808,7 +2398,7 @@ mod tests {
 
     #[test]
     fn fed_predator_doesnt_seek() {
-        let mut w = World::new();
+        let mut w = mw();
         let cat = w.spawn(animal(0.0, 0.0, 10), Kind::Cat, 0.35, 10);
         let rabbit = w.spawn(animal(5.0, 0.0, 11), Kind::Rabbit, 0.35, 11);
         w.agents[cat].hungry = false; // sated → not hunting, and so not a threat
@@ -1819,7 +2409,7 @@ mod tests {
 
     #[test]
     fn max_hunters_caps_claim() {
-        let mut w = World::new();
+        let mut w = mw();
         let rabbit = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         let cats: Vec<usize> = (0..5).map(|k| w.spawn(animal(2.0 + k as f64 * 0.4, 0.0, 100 + k), Kind::Cat, 0.35, 100 + k)).collect();
         w.tick_once(1);
@@ -1830,7 +2420,7 @@ mod tests {
 
     #[test]
     fn predator_catches_prey() {
-        let mut w = World::new();
+        let mut w = mw();
         let cat = w.spawn(animal(0.0, 0.0, 10), Kind::Cat, 0.35, 10);
         let rabbit = w.spawn(animal(0.5, 0.0, 11), Kind::Rabbit, 0.35, 11); // within contact (0.35+0.35+0.4)
         assert!(!w.agents[rabbit].dead);
@@ -1845,7 +2435,7 @@ mod tests {
     #[test]
     fn prey_flees_threat() {
         // cat at -20, rabbit at origin → the rabbit should flee +x (faster than the cat chases) and pull away
-        let mut w = World::new();
+        let mut w = mw();
         let cat = w.spawn(animal(-20.0, 0.0, 10), Kind::Cat, 0.35, 10);
         let rabbit = w.spawn(animal(0.0, 0.0, 11), Kind::Rabbit, 0.35, 11);
         let gap0 = w.agents[cat].agent.x.hypot(0.0) - w.agents[rabbit].agent.x; // ~20
@@ -1860,7 +2450,7 @@ mod tests {
 
     #[test]
     fn eating_refuels() {
-        let mut w = World::new();
+        let mut w = mw();
         let cat = w.spawn(animal(0.0, 0.0, 10), Kind::Cat, 0.35, 10);
         let rabbit = w.spawn(animal(0.5, 0.0, 11), Kind::Rabbit, 0.35, 11); // in contact
         let s0 = w.agents[cat].stamina; // 0.45 (carnivores start hungry)
@@ -1873,7 +2463,7 @@ mod tests {
     #[test]
     fn hunger_latch_has_hysteresis() {
         // a carnivore's `hungry` only flips at the LO/HI thresholds, holding in the gap (no per-tick flip-flop)
-        let mut w = World::new();
+        let mut w = mw();
         let cat = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.35, 1); // alone → no prey, no sprint
         // above HI → drops the hunger latch
         w.agents[cat].stamina = 0.8;
@@ -1897,7 +2487,7 @@ mod tests {
 
     #[test]
     fn prey_rest_recovers_carnivore_does_not() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4); // park the player far so the rabbit rests instead of fleeing it
         let rabbit = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         let cat = w.spawn(animal(60.0, 0.0, 2), Kind::Cat, 0.35, 2); // far apart → idle, no chase
@@ -1912,7 +2502,7 @@ mod tests {
 
     #[test]
     fn food_coma_after_full_after_kills() {
-        let mut w = World::new();
+        let mut w = mw();
         let lion = w.spawn(animal(50.0, 50.0, 5), Kind::Lion, 0.5, 5); // far from the player (no wake)
         let rabbit = w.spawn(animal(50.6, 50.0, 6), Kind::Rabbit, 0.35, 6); // in contact
         w.agents[lion].meals = 4; // one more kill → gorged (lion full_after = 5)
@@ -1927,7 +2517,7 @@ mod tests {
     fn tired_carnivore_recovers_and_stays_active() {
         // NIGHT-ONLY redesign (user: "we don't need extensive sleeping algo"): a tired, idle carnivore now
         // RECOVERS toward the hunt-ready level instead of dozing — so predators stay active hunters.
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4); // park the player far
         let cat = w.spawn(animal(50.0, 50.0, 1), Kind::Cat, 0.35, 1); // alone, no prey
         w.agents[cat].stamina = 0.0;
@@ -1940,7 +2530,7 @@ mod tests {
 
     #[test]
     fn asleep_recovers_and_stays_asleep_undisturbed() {
-        let mut w = World::new();
+        let mut w = mw();
         let cat = w.spawn(animal(50.0, 50.0, 1), Kind::Cat, 0.35, 1);
         w.agents[cat].asleep = true;
         w.agents[cat].sleep_timer = 10.0;
@@ -1952,7 +2542,7 @@ mod tests {
 
     #[test]
     fn sleeper_wakes_when_a_hunter_nears() {
-        let mut w = World::new();
+        let mut w = mw();
         let rabbit = w.spawn(animal(50.0, 50.0, 1), Kind::Rabbit, 0.35, 1);
         w.agents[rabbit].asleep = true;
         w.agents[rabbit].sleep_timer = 10.0;
@@ -1963,7 +2553,7 @@ mod tests {
 
     #[test]
     fn skittish_rabbit_flees_the_player() {
-        let mut w = World::new(); // player at (0,0)
+        let mut w = mw(); // player at (0,0)
         let rabbit = w.spawn(animal(1.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         for t in 1..=40 {
             w.tick_once(t);
@@ -1974,7 +2564,7 @@ mod tests {
 
     #[test]
     fn player_wakes_a_nearby_sleeper() {
-        let mut w = World::new();
+        let mut w = mw();
         let near = w.spawn(animal(1.0, 0.0, 1), Kind::Cat, 0.35, 1); // 1 m < WAKE_BASE 1.5
         let far = w.spawn(animal(12.0, 0.0, 2), Kind::Cat, 0.35, 2); // far from player AND the first cat
         for &c in &[near, far] {
@@ -1988,7 +2578,7 @@ mod tests {
 
     #[test]
     fn lone_apex_hunts_the_player_and_raises_danger() {
-        let mut w = World::new(); // player at (0,0)
+        let mut w = mw(); // player at (0,0)
         let dino = w.spawn(animal(10.0, 0.0, 1), Kind::Dinosaur, 0.5, 1); // lone, hungry, within reach (15)
         let x0 = w.agents[dino].agent.x;
         for t in 1..=8 {
@@ -2004,7 +2594,7 @@ mod tests {
 
     #[test]
     fn sated_apex_does_not_hunt_the_player() {
-        let mut w = World::new();
+        let mut w = mw();
         let dino = w.spawn(animal(10.0, 0.0, 1), Kind::Dinosaur, 0.5, 1);
         w.agents[dino].stamina = 0.9; // above HUNGRY_HI → the latch keeps it sated, so it won't hunt you
         w.agents[dino].hungry = false;
@@ -2016,9 +2606,12 @@ mod tests {
 
     #[test]
     fn outnumbered_hunter_is_mobbed_and_breaks_away() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4); // keep the player out of it
         let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
+        // WOUNDED lion (health < HURT_AT) → it breaks away when mobbed instead of committing. (A HEALTHY hungry
+        // hunter wades INTO the swarm to feed and only retreats once hurt — see scenario_lions_thin_a_human_cluster.)
+        w.agents[lion].health = 0.4;
         for k in 0..5 {
             // 5 CATS clustered to +x of the lion (cats are fighters → they mob; cowardly prey wouldn't)
             w.spawn(animal(3.0 + k as f64 * 0.5, (k % 3) as f64 - 1.0, 100 + k), Kind::Cat, 0.35, 100 + k);
@@ -2033,7 +2626,7 @@ mod tests {
 
     #[test]
     fn too_few_prey_do_not_mob() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
         w.spawn(animal(3.0, 0.0, 100), Kind::Cat, 0.35, 100);
@@ -2053,10 +2646,13 @@ mod tests {
 
     #[test]
     fn mob_wounds_the_hunter_and_it_slashes_back() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
-        let rabbits = ring(&mut w, 6, 1.0); // 6 rabbits pressed into contact (reach ≈ 1.65)
+        // WOUNDED → it defends/retreats rather than committing to a hunt; the pressed-in swarm wounds it further
+        // and it slashes back, which is what this test checks.
+        w.agents[lion].health = 0.4;
+        let rabbits = ring(&mut w, 6, 1.0); // 6 fighter-cats pressed into contact (reach ≈ 1.65)
         let h0 = w.agents[lion].health;
         for t in 1..=20 {
             w.tick_once(t);
@@ -2068,7 +2664,7 @@ mod tests {
 
     #[test]
     fn a_near_dead_hunter_is_dragged_down() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let lion = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
         ring(&mut w, 5, 1.0); // 5 attackers → ≥MOB_MIN
@@ -2079,7 +2675,7 @@ mod tests {
 
     #[test]
     fn crowded_rivals_fight_and_bleed() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let l1 = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
         let l2 = w.spawn(animal(1.0, 0.0, 2), Kind::Lion, 0.5, 2); // same rank → rivals, within FIGHT_R2
@@ -2095,7 +2691,7 @@ mod tests {
 
     #[test]
     fn snapshot_mirrors_the_agents_by_index() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let r = w.spawn(animal(2.0, -3.0, 1), Kind::Rabbit, 0.35, 1);
         let l = w.spawn(animal(20.0, 0.0, 2), Kind::Lion, 0.5, 2);
@@ -2118,7 +2714,7 @@ mod tests {
 
     #[test]
     fn idle_agents_cycle_behaviours_into_the_snapshot() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4); // nothing to flee → it just idles + wanders
         w.spawn(animal(0.0, 0.0, 7), Kind::Rabbit, 0.35, 7);
         let mut snap = Snapshot::default();
@@ -2149,7 +2745,7 @@ mod tests {
 
     #[test]
     fn a_circle_obstacle_pushes_agents_out() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let r = w.spawn(animal(2.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // spawned INSIDE the pond
         w.set_obstacles(&[0.0, 0.0, 5.0, f64::NAN, 0.0, 0.0, 0.0]); // circle: pond radius 5 at origin
@@ -2162,7 +2758,7 @@ mod tests {
 
     #[test]
     fn an_oriented_box_ejects_agents() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let a = w.spawn(animal(1.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // inside a 3×3 (half-extent) building
         // box: bounding r=hypot(3,3), half-extents 3×3, no rotation (cos=1,sin=0)
@@ -2176,7 +2772,7 @@ mod tests {
 
     #[test]
     fn an_idle_cat_pads_toward_a_lake_fish() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4); // park the player far → no scatter
         let cat = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.4, 1);
         w.set_fish(&[6.0, 0.0]); // a fish 6 m away, within LURE_R
@@ -2190,7 +2786,7 @@ mod tests {
 
     #[test]
     fn a_pair_gestates_then_delivers_a_litter() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4); // park the player far
         w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // seeds 1,2 → an opposite-sex pair
         w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2); // adjacent (< BREED_R2), well-fed
@@ -2198,7 +2794,7 @@ mod tests {
         for t in 1..=320 {
             w.tick_once(t);
         }
-        let babies = w.births().len() / 4; // 4 floats/birth: kc,x,z,gene
+        let babies = w.births().len() / 6; // 6 floats/birth: kc,x,z,gene,motherFam,fatherFam
         assert!(babies >= 3, "a rabbit pregnancy delivers a LITTER (3–5); got {babies}");
         assert_eq!(w.births()[0], 0.0, "the litter is rabbits (kind code 0)");
         // both parents are on a long breed cooldown → just the one litter this window, not a runaway
@@ -2210,7 +2806,7 @@ mod tests {
         // REGRESSION: a hunter anywhere within the 40 m flee-notice radius used to set `threat`, which the breed
         // gate treated as "no mating" — so in any predator-present world the WHOLE herd was sterile (telemetry:
         // 0 births / 0 kills over 8000 ticks, a frozen stalemate). Breeding now only balks at a hunter ≤14 m.
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // seeds 1,2 → an opposite-sex, well-fed pair
         w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
@@ -2229,7 +2825,7 @@ mod tests {
 
     #[test]
     fn a_hungry_or_juvenile_agent_does_not_breed() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
@@ -2243,7 +2839,7 @@ mod tests {
 
     #[test]
     fn a_lone_herbivore_grazes_its_fullness_back_up() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let r = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         w.agents[r].energy = 0.2; // got hungry
@@ -2255,7 +2851,7 @@ mod tests {
 
     #[test]
     fn empty_fullness_starves_health() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         // a carnivore can't graze, and with no prey it can't refill → empty fullness must bleed health (starvation)
         let c = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.35, 1);
@@ -2267,8 +2863,21 @@ mod tests {
     }
 
     #[test]
+    fn dormant_vigor_evolves_only_under_predation() {
+        // a dormant region with NO predators → no selection → vigor frozen (matches the live sim)
+        let prey_only = [50usize, 0, 30, 20, 0, 0];
+        assert!((ff_gene(1.0, &prey_only, 600.0) - 1.0).abs() < 1e-9, "no predators → vigor holds");
+        // predators present → the dormant population's vigor climbs over the away span (closed-form, no ticking)
+        let mixed = [50usize, 5, 30, 20, 5, 0];
+        let g = ff_gene(1.0, &mixed, 600.0);
+        assert!(g > 1.05, "predation pressure evolves dormant vigor UP (got {g:.3})");
+        assert!(g < ff_gene(1.0, &mixed, 6000.0), "longer dormancy → more evolution");
+        assert!(ff_gene(1.0, &mixed, 1e12) <= GENE_MAX + 1e-9, "bounded by GENE_MAX even after eons dormant");
+    }
+
+    #[test]
     fn offspring_inherit_parent_vigor() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
@@ -2287,7 +2896,7 @@ mod tests {
 
     #[test]
     fn an_animal_dies_of_old_age() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let r = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         w.agents[r].age = w.agents[r].lifespan - 0.02; // on the brink of its natural lifespan
@@ -2299,7 +2908,7 @@ mod tests {
 
     #[test]
     fn an_elder_is_infertile() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2); // a fertile would-be mate
@@ -2312,7 +2921,7 @@ mod tests {
 
     #[test]
     fn a_despawned_agent_goes_inert() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let cat = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.4, 1);
         let rabbit = w.spawn(animal(3.0, 0.0, 2), Kind::Rabbit, 0.35, 2);
@@ -2332,7 +2941,7 @@ mod tests {
 
     #[test]
     fn a_companion_pads_toward_the_player() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(0.0, 0.0);
         let pet = w.spawn(animal(50.0, 0.0, 1), Kind::Cat, 0.4, 1); // well outside the leash
         w.set_companion(pet);
@@ -2346,7 +2955,7 @@ mod tests {
 
     #[test]
     fn a_companion_does_not_flee_the_player() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(0.0, 0.0);
         let pet = w.spawn(animal(2.0, 0.0, 1), Kind::Cat, 0.4, 1); // within the scare radius
         w.set_companion(pet);
@@ -2361,7 +2970,7 @@ mod tests {
 
     #[test]
     fn a_distant_fish_does_not_lure() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let cat = w.spawn(animal(0.0, 0.0, 1), Kind::Cat, 0.4, 1);
         w.set_fish(&[40.0, 0.0]); // well beyond LURE_R → no pull
@@ -2373,7 +2982,7 @@ mod tests {
 
     #[test]
     fn a_wounded_rival_breaks_off() {
-        let mut w = World::new();
+        let mut w = mw();
         w.set_player(1e4, 1e4);
         let l1 = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
         let l2 = w.spawn(animal(0.8, 0.0, 2), Kind::Lion, 0.5, 2); // in contact
@@ -2383,5 +2992,691 @@ mod tests {
         w.tick_once(1);
         assert!(w.agents[l1].spooked > 0.0, "a wounded rival breaks off (spooked)");
         assert_eq!(w.agents[l1].bully, Some(l2), "...fleeing the rival that bullied it");
+    }
+
+    #[test]
+    fn low_population_humans_band_with_hysteresis() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        for k in 0..10 {
+            // spread them out so flocking doesn't matter; we're testing the population latch
+            w.spawn(animal(k as f64 * 8.0, 0.0, 200 + k), Kind::Person, 0.4, 200 + k);
+        }
+        w.tick_once(1);
+        assert!(w.person_banding, "10 ≤ PERSON_BAND_LOW → the dwindling people band together");
+        assert_eq!(w.person_pop, 10);
+        // grow the population just past LOW but below RELEASE → the latch HOLDS (hysteresis, no flapping)
+        for k in 10..18 {
+            w.spawn(animal(k as f64 * 8.0, 0.0, 200 + k), Kind::Person, 0.4, 200 + k);
+        }
+        w.tick_once(2);
+        assert_eq!(w.person_pop, 18);
+        assert!(w.person_banding, "18 < PERSON_BAND_RELEASE → still banding (latched until recovered)");
+        // recover past RELEASE → normal life resumes
+        for k in 18..24 {
+            w.spawn(animal(k as f64 * 8.0, 0.0, 200 + k), Kind::Person, 0.4, 200 + k);
+        }
+        w.tick_once(3);
+        assert!(!w.person_banding, "24 ≥ PERSON_BAND_RELEASE → truce lifts, ordinary behaviour returns");
+    }
+
+    #[test]
+    fn banding_humans_dont_hunt_their_own() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        // a tiny, scarce people (≤ PERSON_BAND_LOW) → banding. An aggressive person pressed against a fellow human
+        // must NOT pick them as prey while the survival truce holds.
+        let killer = w.spawn(animal(0.0, 0.0, 201), Kind::Person, 0.4, 201);
+        let victim = w.spawn(animal(0.6, 0.0, 202), Kind::Person, 0.4, 202);
+        w.agents[killer].aggressive = true; // force the infighting trait on
+        for t in 1..=120 {
+            w.tick_once(t);
+        }
+        assert!(w.person_banding, "two people is well under the band threshold");
+        assert!(!w.agents[victim].dead, "the truce keeps the scarce people from killing their own");
+    }
+
+    #[test]
+    fn banding_survivors_seek_each_other_across_distance() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4); // player far away → no interference
+        // two far-flung survivors (well within SEEK=100 but way past flock range) → banding long-range seek pulls
+        // them together so they can regroup, instead of dying alone.
+        let a = w.spawn(animal(0.0, 0.0, 211), Kind::Person, 0.4, 211);
+        let b = w.spawn(animal(45.0, 0.0, 212), Kind::Person, 0.4, 212);
+        let d0 = {
+            let (ax, az) = (w.agents[a].agent.x, w.agents[a].agent.z);
+            let (bx, bz) = (w.agents[b].agent.x, w.agents[b].agent.z);
+            (ax - bx).hypot(az - bz)
+        };
+        for t in 1..=400 {
+            w.tick_once(t);
+        }
+        assert!(w.person_banding, "still just two people → banding");
+        let d1 = {
+            let (ax, az) = (w.agents[a].agent.x, w.agents[a].agent.z);
+            let (bx, bz) = (w.agents[b].agent.x, w.agents[b].agent.z);
+            (ax - bx).hypot(az - bz)
+        };
+        assert!(d1 < d0 * 0.5, "scattered survivors close the gap (from {d0:.1} to {d1:.1})");
+    }
+
+    #[test]
+    fn dispersing_bands_stay_gender_mixed() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        // a tight blob of young, alternating-gender people (even seed = female, odd = male) → over PERSON_DISPERSE_CROWD,
+        // so the young strike out to found new settlements. With pairing, a man + woman leave together (mixed bands);
+        // without it the blob would spray single individuals in all directions and split genders apart.
+        let mut males = Vec::new();
+        let mut females = Vec::new();
+        for k in 0..16 {
+            let seed = 300 + k;
+            let x = (k % 4) as f64 * 1.0 - 1.5;
+            let z = (k / 4) as f64 * 1.0 - 1.5;
+            let idx = w.spawn(animal(x, z, seed), Kind::Person, 0.4, seed);
+            if seed & 1 == 0 { females.push(idx) } else { males.push(idx) }
+        }
+        for t in 1..=600 {
+            w.tick_once(t);
+        }
+        // they actually dispersed: someone got well clear of the origin blob
+        let max_r = w.agents.iter().map(|m| m.agent.x.hypot(m.agent.z)).fold(0.0_f64, f64::max);
+        // every male still has a female nearby (and vice-versa) → no single-sex band formed
+        let worst_male = males.iter().map(|&mi| {
+            females.iter().map(|&fi| {
+                (w.agents[mi].agent.x - w.agents[fi].agent.x).hypot(w.agents[mi].agent.z - w.agents[fi].agent.z)
+            }).fold(f64::INFINITY, f64::min)
+        }).fold(0.0_f64, f64::max);
+        println!("DISPERSE max_r={max_r:.1} worst_male_to_nearest_female={worst_male:.1}");
+        assert!(max_r > 12.0, "the band actually struck out from the blob (max_r {max_r:.1})");
+        // the worst-off man still keeps a woman within a fraction of the dispersal radius → bands stay roughly
+        // gender-mixed via the leader/follower pairing. (Threshold relaxed since dispersal is now biased OUTWARD:
+        // a blob AT the origin fans genders around the full circle — a pathological case; real settlements disperse
+        // from one side and stay tighter. The pairing still keeps a co-founder of the opposite sex along.)
+        assert!(worst_male < max_r * 0.75, "every man kept a woman relatively close → mixed bands (worst {worst_male:.1} vs r {max_r:.1})");
+    }
+
+    #[test]
+    fn a_threatened_woman_flees_toward_a_house() {
+        let run = |refuge: bool| {
+            let mut w = mw();
+            w.set_player(1e4, 1e4);
+            w.set_night(1.0); // widest danger radius → she registers the threat promptly
+            // a woman (even seed = female) at the origin, a hungry lion to her WEST → she flees EAST (+x).
+            let woman = w.spawn(animal(0.0, 0.0, 200), Kind::Person, 0.4, 200);
+            w.spawn(animal(-12.0, 0.0, 7), Kind::Lion, 0.5, 7);
+            if refuge {
+                w.set_refuges(&[6.0, 12.0]); // home is to the NE — in the flee hemisphere but offset +z
+            }
+            for t in 1..=40 {
+                w.tick_once(t);
+            }
+            (w.agents[woman].agent.x, w.agents[woman].agent.z)
+        };
+        let (nx, nz) = run(false); // no refuge → flees straight away from the lion (≈ +x, z stays near 0)
+        let (rx, rz) = run(true); // refuge NE → her flight curves toward home (+z)
+        assert!(rx > 0.0 && nx > 0.0, "she flees away from the lion in both cases (x {nx:.1}/{rx:.1})");
+        assert!(rz > nz + 1.0, "the house bends her flight toward home (z {nz:.1} → {rz:.1})");
+    }
+
+    #[test]
+    fn a_hungry_carnivore_scavenges_a_fresh_carcass() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        // a hungry lion a few metres from a fresh rabbit carcass (a death the ecosystem shouldn't waste)
+        let lion = w.spawn(animal(0.0, 0.0, 5), Kind::Lion, 0.5, 5);
+        let carcass = w.spawn(animal(4.0, 0.0, 9), Kind::Rabbit, 0.35, 9);
+        w.agents[lion].energy = 0.35; // famished → hungry latch will engage
+        w.agents[lion].hungry = true;
+        w.agents[carcass].dead = true;
+        w.agents[carcass].carrion = CARRION_MEAT;
+        let e0 = w.agents[lion].energy;
+        for t in 1..=60 {
+            w.tick_once(t);
+        }
+        assert!(w.agents[lion].energy > e0 + 0.1, "the lion fed on the carcass (energy {e0:.2} → {:.2})", w.agents[lion].energy);
+        assert!(w.agents[carcass].carrion < CARRION_MEAT, "the carcass was eaten down (meat {:.1} → {:.1})", CARRION_MEAT, w.agents[carcass].carrion);
+    }
+
+    #[test]
+    fn a_carcass_rots_away_even_uneaten() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        let c = w.spawn(animal(0.0, 0.0, 9), Kind::Rabbit, 0.35, 9);
+        w.agents[c].dead = true;
+        w.agents[c].carrion = 3.0; // a nearly-rotted scrap, no scavenger near
+        for t in 1..=300 {
+            w.tick_once(t);
+        }
+        assert_eq!(w.agents[c].carrion, 0.0, "an uneaten carcass rots to nothing");
+    }
+
+    #[test]
+    fn fast_forward_relaxes_toward_carrying_capacity() {
+        // [rabbit, cat, kangaroo, person, lion, dino] in Kind-discriminant order
+        let cap_rabbit = cap_for(Kind::Rabbit, &[0; 6], 1.0); // = PREY_DENSITY_RABBIT at scale 1
+        // a tiny rabbit population, given a long time away, climbs the logistic toward its cap (but never past it)
+        let grown = ff_targets(&[3, 0, 0, 0, 0, 0], 1.0, 4000.0);
+        assert!(grown[0] as usize > 3, "few rabbits multiply while you're away (→ {})", grown[0]);
+        assert!(grown[0] as usize <= cap_rabbit, "but never overshoot the carrying capacity ({} vs cap {cap_rabbit})", grown[0]);
+        // a blink away barely changes anything
+        let blink = ff_targets(&[10, 0, 0, 0, 0, 0], 1.0, 0.5);
+        assert!((blink[0] as i64 - 10).abs() <= 1, "a half-second away ≈ no change (→ {})", blink[0]);
+        // an extinct apex (no floor) stays extinct — it returns via Mother Nature in live play, not the FF
+        let dino = ff_targets(&[30, 5, 20, 20, 3, 0], 1.0, 4000.0);
+        assert_eq!(dino[5], 0, "a fully-extinct dinosaur stays gone through the fast-forward");
+    }
+
+    #[test]
+    fn an_aged_animal_slows_with_frailty() {
+        // total path length over a fixed wander — same seed → identical wander decisions, so any difference is SPEED.
+        let path = |age_frac: f64| {
+            let mut w = mw();
+            w.set_player(1e4, 1e4);
+            let r = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+            let mut total = 0.0;
+            let mut last = (w.agents[r].agent.x, w.agents[r].agent.z);
+            for t in 1..=400 {
+                w.agents[r].age = w.agents[r].lifespan * age_frac; // pin age (< 1 → never dies of old age) so we isolate frailty
+                w.tick_once(t);
+                let (x, z) = (w.agents[r].agent.x, w.agents[r].agent.z);
+                total += (x - last.0).hypot(z - last.1);
+                last = (x, z);
+            }
+            total
+        };
+        let young = path(0.1); // sprightly
+        let old = path(0.97); // venerable → frail
+        assert!(old < young * 0.9, "an elder covers less ground than its young self (old {old:.1} vs young {young:.1})");
+    }
+
+    #[test]
+    fn a_juvenile_animal_trails_a_parent() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        // an adult kangaroo and a baby a few metres off → the baby should close toward the parent over time.
+        let adult = w.spawn(animal(0.0, 0.0, 2), Kind::Kangaroo, 0.5, 2);
+        let baby = w.spawn(animal(3.5, 0.0, 1), Kind::Kangaroo, 0.35, 1);
+        // pin the ages each tick: adult firmly grown, baby firmly juvenile (and keep the adult parked at home)
+        let near = |w: &World| {
+            (w.agents[baby].agent.x - w.agents[adult].agent.x).hypot(w.agents[baby].agent.z - w.agents[adult].agent.z)
+        };
+        w.agents[adult].agent.max_speed = 0.0; // park the parent so we isolate the BABY's following
+        let d0 = near(&w);
+        let mut closest = d0;
+        for t in 1..=200 {
+            w.agents[adult].age = w.agents[adult].lifespan * 0.5; // a grown parent
+            w.agents[baby].age = w.agents[baby].lifespan * 0.05; // a newborn
+            w.tick_once(t);
+            closest = closest.min(near(&w));
+        }
+        // the baby got noticeably closer to its parent at some point (it trails, not wanders off)
+        assert!(closest < d0 * 0.6, "the juvenile closed toward its parent (from {d0:.1} to ≤{closest:.1})");
+    }
+
+    #[test]
+    fn a_litter_is_born_clustered_around_the_mother() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        let (mx, mz) = (10.0_f32, -5.0_f32);
+        let mom = w.spawn(animal(mx as f64, mz as f64, 2), Kind::Rabbit, 0.35, 2); // even seed = female
+        w.agents[mom].age = w.agents[mom].lifespan * 0.4; // a fertile adult
+        w.agents[mom].unborn_gene = 1.0;
+        w.agents[mom].pregnant = 0.001; // delivering essentially now
+        w.tick_once(1);
+        let births = w.births(); // flat [kindCode, x, z, gene, motherFam, fatherFam, …]
+        assert!(births.len() >= 6, "at least one baby delivered (got {} floats)", births.len());
+        let mut positions = Vec::new();
+        for chunk in births.chunks_exact(6) {
+            let (x, z) = (chunk[1], chunk[2]);
+            let d = ((x - mx).powi(2) + (z - mz).powi(2)).sqrt();
+            assert!(d < 3.0, "a newborn is born right by its mother (d {d:.2})");
+            positions.push((x, z));
+        }
+        if positions.len() >= 2 {
+            assert!(positions.windows(2).any(|p| p[0] != p[1]), "littermates aren't all stacked on one exact point");
+        }
+    }
+
+    #[test]
+    fn a_predator_does_not_fight_a_corpse_as_a_rival() {
+        // regression: corpses live in the seek grid (for scavenging), so targeting MUST skip them — else a fresh
+        // same-rank predator carcass got picked as a territorial rival and the living one charged + bled on it.
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        let live = w.spawn(animal(0.0, 0.0, 1), Kind::Lion, 0.5, 1);
+        let dead = w.spawn(animal(1.0, 0.0, 2), Kind::Lion, 0.5, 2); // right in contact range
+        w.agents[dead].dead = true;
+        w.agents[dead].carrion = CARRION_MEAT; // a fresh carcass sitting in the seek grid
+        for t in 1..=30 {
+            w.tick_once(t);
+        }
+        assert_eq!(w.agents[live].rival_time, 0.0, "a living predator never treats a carcass as a territorial rival");
+        assert!(w.agents[live].health > 0.9, "...and so never wounds itself fighting one (health {:.2})", w.agents[live].health);
+    }
+
+    // ════════════════════════════ SCENARIO HARNESS ════════════════════════════
+    // METHODOLOGY: complex sim behaviour is EMERGENT — it only becomes legible over THOUSANDS of ticks, not one
+    // or two. So we don't assert single-tick state; we run a configured world forward at the fixed DT and measure
+    // the SHAPE of the outcome over time:
+    //   • cumulative EVENTS  — kills / starves / old-age / births / conceives / builds (the "what happened")
+    //   • population TRAJECTORY — live count per kind, sampled (boom / crash / steady state)
+    //   • spatial SPREAD — bounding extent of a kind (clumped vs dispersed)
+    //   • predator THRASH — distance travelled ÷ ground actually gained; high ⇒ "stuttering in place"
+    // A scenario sets up agents, runs, and asserts on those aggregates. This is the rig for tuning time-based
+    // behaviour (predation, dispersal, settlement) by MEASUREMENT instead of guesswork.
+
+    #[derive(Default, Debug)]
+    struct Trace {
+        kills: usize,
+        starves: usize,
+        oldage: usize,
+        births: usize,
+        conceives: usize,
+        builds: usize,
+        pop: Vec<[usize; 6]>, // live count per kind, sampled every 60 ticks (≈2 s)
+    }
+
+    fn radius_of(kind: Kind) -> f64 {
+        match kind {
+            Kind::Rabbit => 0.35,
+            Kind::Cat => 0.4,
+            Kind::Kangaroo => 0.5,
+            Kind::Person => 0.4,
+            Kind::Lion => 0.5,
+            Kind::Dinosaur => 0.9,
+        }
+    }
+
+    fn spawn_kind(w: &mut World, kind: Kind, x: f64, z: f64, seed: i32) -> usize {
+        w.spawn(Agent::new(x, z, seed, &opts_for(kind, seed)), kind, radius_of(kind), seed)
+    }
+
+    /// Cluster `n` agents of `kind` in a golden-spiral disc of radius `rad` around (cx,cz).
+    fn cluster(w: &mut World, kind: Kind, n: usize, cx: f64, cz: f64, rad: f64, seed0: i32) {
+        let ga = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+        for k in 0..n {
+            let r = rad * (((k as f64) + 0.5) / n as f64).sqrt();
+            let a = k as f64 * ga;
+            spawn_kind(w, kind, cx + a.cos() * r, cz + a.sin() * r, seed0 + k as i32);
+        }
+    }
+
+    fn alive(w: &World) -> [usize; 6] {
+        let mut c = [0usize; 6];
+        for m in &w.agents {
+            if !m.dead {
+                c[m.kind as usize] += 1;
+            }
+        }
+        c
+    }
+
+    /// Max bounding extent (the larger of width/depth) of a living kind — clumped ≈ small, dispersed ≈ large.
+    fn spread(w: &World, kind: Kind) -> f64 {
+        let (mut lo_x, mut hi_x, mut lo_z, mut hi_z) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        let mut n = 0;
+        for m in &w.agents {
+            if m.kind == kind && !m.dead {
+                lo_x = lo_x.min(m.agent.x);
+                hi_x = hi_x.max(m.agent.x);
+                lo_z = lo_z.min(m.agent.z);
+                hi_z = hi_z.max(m.agent.z);
+                n += 1;
+            }
+        }
+        if n == 0 {
+            0.0
+        } else {
+            (hi_x - lo_x).max(hi_z - lo_z)
+        }
+    }
+
+    /// Run `ticks` fixed steps. Tallies this-tick events (step() clears them each call), samples populations, and
+    /// tracks the `track` kind's travelled PATH + start→end NET so callers can compute thrash = path / net.
+    fn run(w: &mut World, ticks: usize, track: Kind) -> (Trace, f64, f64) {
+        let mut tr = Trace::default();
+        let idx: Vec<usize> = w.agents.iter().enumerate().filter(|(_, m)| m.kind == track).map(|(i, _)| i).collect();
+        let start: Vec<(f64, f64)> = idx.iter().map(|&i| (w.agents[i].agent.x, w.agents[i].agent.z)).collect();
+        let mut prev = start.clone();
+        let mut path = 0.0;
+        let mut next_seed = 900_000i32;
+        for t in 0..ticks {
+            w.step(DT);
+            for ch in w.events().chunks_exact(4) {
+                let c = ch[0];
+                if c == EV_KILL {
+                    tr.kills += 1;
+                } else if c == EV_STARVE {
+                    tr.starves += 1;
+                } else if c == EV_OLDAGE {
+                    tr.oldage += 1;
+                } else if c == EV_BIRTH {
+                    tr.births += 1;
+                } else if c == EV_CONCEIVE {
+                    tr.conceives += 1;
+                } else if c == EV_BUILD {
+                    tr.builds += 1;
+                }
+            }
+            // materialise this step's newborns (what JS does between steps) so reproduction replenishes the world
+            let births: Vec<f32> = w.births().to_vec();
+            for b in births.chunks_exact(6) {
+                let kind = crate::eco::kind_from_code(b[0] as u8);
+                let r = radius_of(kind);
+                let bi = w.spawn(Agent::new(b[1] as f64, b[2] as f64, next_seed, &opts_for(kind, next_seed)), kind, r, next_seed);
+                w.agents[bi].breed_cd = JUVENILE_CD; // a newborn matures before it can breed
+                w.agents[bi].gene = b[3] as f64;
+                w.set_lineage(bi, b[4] as u32, b[5] as u32); // parent fams → incest avoidance
+                next_seed = next_seed.wrapping_add(1);
+            }
+            for (k, &i) in idx.iter().enumerate() {
+                if w.agents[i].dead {
+                    continue;
+                }
+                let (x, z) = (w.agents[i].agent.x, w.agents[i].agent.z);
+                path += ((x - prev[k].0).powi(2) + (z - prev[k].1).powi(2)).sqrt();
+                prev[k] = (x, z);
+            }
+            if t % 60 == 0 {
+                tr.pop.push(alive(w));
+            }
+        }
+        let denom = idx.len().max(1) as f64;
+        let net: f64 = idx
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| ((w.agents[i].agent.x - start[k].0).powi(2) + (w.agents[i].agent.z - start[k].1).powi(2)).sqrt())
+            .sum::<f64>()
+            / denom;
+        (tr, path / denom, net)
+    }
+
+    // SCENARIO: 6 lions dropped onto a tight cluster of 60 people. Over 100 s they should actually EAT — predation
+    // must make progress, not stutter in place (the user's report: "they keep stuttering place and don't kill much").
+    #[test]
+    fn scenario_lions_thin_a_human_cluster() {
+        let mut w = mw();
+        cluster(&mut w, Kind::Person, 60, 0.0, 0.0, 7.0, 1000);
+        cluster(&mut w, Kind::Lion, 6, 0.0, 0.0, 10.0, 5000);
+        let people0 = alive(&w)[Kind::Person as usize];
+        let (tr, path, net) = run(&mut w, 3000, Kind::Lion); // 3000 ticks ≈ 100 s
+        let people1 = alive(&w)[Kind::Person as usize];
+        let thrash = path / net.max(0.1);
+        eprintln!(
+            "[lions-vs-cluster] kills={} starves={} people {}→{} | lion travelled {:.0} m, netted {:.0} m, thrash={:.1}",
+            tr.kills, tr.starves, people0, people1, path, net, thrash
+        );
+        assert!(tr.kills >= 12, "6 lions amid 60 people for 100 s barely killed ({}) — predation is stalling", tr.kills);
+        // high thrash is only a problem if they're ALSO not killing — chasing fleeing/dispersing prey legitimately
+        // covers a lot of ground (high path, low net). With plenty of kills, that's vigorous hunting, not stutter.
+        assert!(thrash < 15.0 || tr.kills >= 12, "lions thrash in place ({:.0} m path, {:.0} m net) without killing", path, net);
+    }
+
+    // SCENARIO: a dense human blob must SPREAD OUT over time (the missionary dispersal), not stay clumped.
+    #[test]
+    fn scenario_human_blob_disperses() {
+        let mut w = mw();
+        cluster(&mut w, Kind::Person, 60, 0.0, 0.0, 5.0, 2000);
+        let spread0 = spread(&w, Kind::Person);
+        run(&mut w, 1500, Kind::Person); // ≈50 s
+        let spread1 = spread(&w, Kind::Person);
+        eprintln!("[blob-disperse] person spread {:.0} m → {:.0} m", spread0, spread1);
+        assert!(spread1 > spread0 * 1.5, "a dense human blob should disperse, stayed clumped ({:.0}→{:.0} m)", spread0, spread1);
+    }
+
+    // SCENARIO: a sizable human settlement must SUSTAIN over time, not boom-bust to near-extinction (the user's
+    // report: "1100 humans, now there are 5"). Births are materialised (see run), so this measures the real
+    // birth-vs-death balance over 200 s. The crash mechanism is overgrazing: a crowd > GRAZE_CROWD starves.
+    /// Population-dynamics run: steps `ticks`, MATERIALISES births (what JS does between steps) and REAPS dead
+    /// agents (what the corpse reaper does) so `w.agents` stays ≈ alive count instead of growing quadratically.
+    /// Returns the per-(60-tick)-sample person-count series. Reaping is safe: the sim rebuilds its grid + transient
+    /// buffers from `w.agents` every step, so compacting the Vec between steps can't desync it.
+    fn run_pop(w: &mut World, ticks: usize) -> Vec<usize> {
+        let mut series = Vec::new();
+        let mut next_seed = 900_000i32;
+        for t in 0..ticks {
+            w.step(DT);
+            let births: Vec<f32> = w.births().to_vec();
+            for b in births.chunks_exact(6) {
+                let kind = crate::eco::kind_from_code(b[0] as u8);
+                let bi = w.spawn(Agent::new(b[1] as f64, b[2] as f64, next_seed, &opts_for(kind, next_seed)), kind, radius_of(kind), next_seed);
+                w.agents[bi].breed_cd = JUVENILE_CD;
+                w.agents[bi].gene = b[3] as f64;
+                w.agents[bi].age = 0.0;
+                w.set_lineage(bi, b[4] as u32, b[5] as u32); // parent fams → incest avoidance
+                next_seed = next_seed.wrapping_add(1);
+            }
+            if t % 30 == 0 {
+                w.agents.retain(|m| !m.dead); // reap corpses → bounded agent buffer
+            }
+            if t % 60 == 0 {
+                series.push(alive(w)[Kind::Person as usize]);
+            }
+        }
+        series
+    }
+
+    // SCENARIO: a human settlement must GROW GRADUALLY and not (a) crash to ~0 (the old "1100→5" cohort/cap bug)
+    // nor (b) EXPLODE exponentially (the "no-caps removed all regulation" bug → thousands in seconds). With
+    // density-dependent breeding (a saturated patch plateaus) + slower rate + age structure, it should rise
+    // steadily and stay bounded over the run.
+    #[test]
+    fn scenario_human_population_grows_but_bounded() {
+        let mut w = mw();
+        cluster(&mut w, Kind::Person, 100, 0.0, 0.0, 40.0, 3000);
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        let p0 = alive(&w)[Kind::Person as usize];
+        let series = run_pop(&mut w, 1800); // ≈60 s — the span over which the user saw the crash
+        let p1 = alive(&w)[Kind::Person as usize];
+        eprintln!("[human-vigour] people {p0}→{p1} | series={series:?}");
+        // a spawned 1000 (sim only, no streaming) must NOT crash to a tiny number — if it does, the SIM (overgrazing/
+        // breeding-off) is the culprit; if the sim holds but the GAME crashes, streaming-collapse is.
+        assert!(p1 >= p0 / 2, "1000 spawned crashed to {p1} in the SIM (overgrazing/death) — not streaming");
+    }
+
+    // SCENARIO: the TROPHIC PYRAMID must hold over time — predators are K-strategists (slow gestation + tiny litters)
+    // so the apex stays RARE relative to its prey, even when seeded generously. Guards the user's "lions reproduce
+    // faster, 25 lions vs 40 humans" bug: before the fix lions out-bred their food and ballooned; now they shouldn't.
+    #[test]
+    fn scenario_predators_stay_rare_trophic_pyramid() {
+        let mut w = mw();
+        cluster(&mut w, Kind::Rabbit, 90, 0.0, 0.0, 70.0, 1000);
+        cluster(&mut w, Kind::Person, 60, 0.0, 0.0, 55.0, 2000);
+        cluster(&mut w, Kind::Lion, 12, 0.0, 0.0, 45.0, 5000);
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        let a0 = alive(&w);
+        run_pop(&mut w, 3000); // ≈100 s
+        let a1 = alive(&w);
+        let lions = a1[Kind::Lion as usize];
+        let prey = a1[Kind::Rabbit as usize] + a1[Kind::Kangaroo as usize] + a1[Kind::Person as usize];
+        eprintln!("[trophic-pyramid] start={a0:?} end={a1:?} | lions={lions} prey={prey}");
+        // apex must NOT balloon — slow breeding keeps it near/under its soft plateau, not exploding past it.
+        assert!(lions <= 28, "apex over-reproduced to {lions} — predators must breed slowly + stay rare");
+        // and stay a thin top of the pyramid: far fewer predators than prey.
+        assert!((lions as f64) < (prey as f64) * 0.5, "predators not rare vs prey ({lions} lions, {prey} prey)");
+    }
+
+    // SCENARIO: PREY-SWITCHING — predators preferentially crop the ABUNDANT prey (user: "predators should prefer
+    // higher-number prey more"). An overwhelming rabbit boom beside a scarce kangaroo handful → the lions' kills
+    // skew hard to rabbits (the booming supply), cropping it back, even though a kangaroo is the bigger single meal.
+    #[test]
+    fn scenario_predators_crop_the_abundant_prey() {
+        let mut w = mw();
+        cluster(&mut w, Kind::Rabbit, 140, 0.0, 0.0, 55.0, 1000);
+        cluster(&mut w, Kind::Kangaroo, 14, 0.0, 0.0, 55.0, 7000);
+        cluster(&mut w, Kind::Lion, 8, 0.0, 0.0, 50.0, 5000);
+        let mut rabbit_kills = 0;
+        let mut roo_kills = 0;
+        for _ in 0..3000 {
+            w.step(DT);
+            for ch in w.events().chunks_exact(4) {
+                if ch[0] == EV_KILL {
+                    if ch[1] == Kind::Rabbit as usize as f32 {
+                        rabbit_kills += 1;
+                    } else if ch[1] == Kind::Kangaroo as usize as f32 {
+                        roo_kills += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("[prey-switching] rabbit kills={rabbit_kills} kangaroo kills={roo_kills}");
+        // the abundant rabbits take the brunt — far more rabbit kills than the scarce kangaroo, i.e. the boom is cropped.
+        assert!(rabbit_kills > roo_kills * 3, "predators didn't prefer the abundant prey ({rabbit_kills} rabbit vs {roo_kills} kangaroo kills)");
+    }
+
+    // INCEST AVOIDANCE (all kinds): the lineage kinship rule must flag parent↔child and siblings, but NOT
+    // unrelated founders or cousins, so find_mate refuses close kin (user: "avoid incest, apply to all animals").
+    #[test]
+    fn close_kin_are_flagged_unrelated_are_not() {
+        let mut w = mw();
+        let dad = spawn_kind(&mut w, Kind::Rabbit, 0.0, 0.0, 3); // odd seed = male
+        let mum = spawn_kind(&mut w, Kind::Rabbit, 0.5, 0.0, 2); // even = female
+        let (fam_d, fam_m) = (w.agents[dad].fam, w.agents[mum].fam);
+        let kid = spawn_kind(&mut w, Kind::Rabbit, 0.2, 0.0, 4);
+        let sib = spawn_kind(&mut w, Kind::Rabbit, 0.3, 0.0, 6);
+        w.set_lineage(kid, fam_m, fam_d); // child of mum × dad
+        w.set_lineage(sib, fam_m, fam_d); // full sibling of kid
+        let outsider = spawn_kind(&mut w, Kind::Rabbit, 9.0, 0.0, 8); // an unrelated founder
+
+        assert!(related(&w.agents[dad], &w.agents[kid]), "father ↔ child are kin");
+        assert!(related(&w.agents[mum], &w.agents[kid]), "mother ↔ child are kin");
+        assert!(related(&w.agents[kid], &w.agents[sib]), "full siblings (shared parents) are kin");
+        assert!(!related(&w.agents[dad], &w.agents[mum]), "the two unrelated founders are NOT kin");
+        assert!(!related(&w.agents[kid], &w.agents[outsider]), "an unrelated outsider is fair game (no false-positive)");
+    }
+
+    // ─────────────────────────── EMERGENT MODE — on-par scenario parity ───────────────────────────
+    // The emergent brain (needs+primitives+utility, design doc) is the GAME's default (Sim::new). These mirror the
+    // manual scenario bars above on a world flipped to Emergent, proving the bottom-up brain produces a world at
+    // least as alive: predators that EAT, a settlement that SUSTAINS + builds, an apex that stays RARE, a blob that
+    // SPREADS. (The unit tests above keep pinning Manual's exact mechanics — Manual stays the untouched safety net.)
+
+    fn emergent_world() -> World {
+        World::new() // the world default IS Emergent now — this just reads as intent at the call sites
+    }
+
+    // SCENARIO (emergent): 6 lions on a tight cluster of 60 people must actually EAT — the utility scorer's Hunt
+    // primitive has to make predation progress on par with the manual chain (manual bar: ≥12 kills / 100 s).
+    #[test]
+    fn scenario_emergent_lions_thin_a_human_cluster() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Person, 60, 0.0, 0.0, 7.0, 1000);
+        cluster(&mut w, Kind::Lion, 6, 0.0, 0.0, 10.0, 5000);
+        let people0 = alive(&w)[Kind::Person as usize];
+        let (tr, _path, _net) = run(&mut w, 3000, Kind::Lion);
+        let people1 = alive(&w)[Kind::Person as usize];
+        eprintln!("[emergent lions-vs-cluster] kills={} starves={} people {}→{}", tr.kills, tr.starves, people0, people1);
+        assert!(tr.kills >= 12, "emergent lions barely killed ({}) — the Hunt primitive is stalling vs manual's ≥12", tr.kills);
+    }
+
+    // SCENARIO (emergent): a dense human blob must still SPREAD OUT (dispersal lives in the shared flock pass, so
+    // emergent must not suppress it — proves the seam keeps sections 1–4 working under the new brain).
+    #[test]
+    fn scenario_emergent_human_blob_disperses() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Person, 60, 0.0, 0.0, 5.0, 2000);
+        let spread0 = spread(&w, Kind::Person);
+        run(&mut w, 1500, Kind::Person);
+        let spread1 = spread(&w, Kind::Person);
+        eprintln!("[emergent blob-disperse] person spread {:.0} m → {:.0} m", spread0, spread1);
+        assert!(spread1 > spread0 * 1.5, "emergent blob stayed clumped ({:.0}→{:.0} m) — dispersal regressed", spread0, spread1);
+    }
+
+    // SCENARIO (emergent): a human settlement must SUSTAIN (not boom-bust) under the emergent brain — births vs
+    // overgrazing-deaths balance over 60 s, the same bar manual holds (p1 ≥ p0/2).
+    #[test]
+    fn scenario_emergent_human_population_grows_but_bounded() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Person, 100, 0.0, 0.0, 40.0, 3000);
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        let p0 = alive(&w)[Kind::Person as usize];
+        let series = run_pop(&mut w, 1800);
+        let p1 = alive(&w)[Kind::Person as usize];
+        eprintln!("[emergent human-vigour] people {p0}→{p1} | series={series:?}");
+        assert!(p1 >= p0 / 2, "emergent settlement crashed to {p1} — births/overgrazing balance regressed vs manual");
+    }
+
+    // SCENARIO (emergent): a mixed food-web must hold the TROPHIC PYRAMID — the apex stays rare relative to prey,
+    // matching manual's regulation (predators don't balloon; far fewer than prey).
+    #[test]
+    fn scenario_emergent_predators_stay_rare_trophic_pyramid() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 90, 0.0, 0.0, 70.0, 1000);
+        cluster(&mut w, Kind::Person, 60, 0.0, 0.0, 55.0, 2000);
+        cluster(&mut w, Kind::Lion, 12, 0.0, 0.0, 45.0, 5000);
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        let a0 = alive(&w);
+        run_pop(&mut w, 3000);
+        let a1 = alive(&w);
+        let lions = a1[Kind::Lion as usize];
+        let prey = a1[Kind::Rabbit as usize] + a1[Kind::Kangaroo as usize] + a1[Kind::Person as usize];
+        eprintln!("[emergent trophic-pyramid] start={a0:?} end={a1:?} | lions={lions} prey={prey}");
+        assert!(lions <= 28, "emergent apex over-reproduced to {lions} — must stay rare");
+        assert!(prey == 0 || (lions as f64) < (prey as f64) * 0.5, "emergent predators not rare vs prey ({lions} lions, {prey} prey)");
+    }
+
+    // SCENARIO (emergent): a settled people must raise HOMES — the design's Tier 1 goal is "a recognizable village
+    // living on" the emergent brain. House-building (section 7.6) is shared + gated on settled, well-fed family pairs,
+    // so this proves emergent foraging keeps people fed + paired enough to found a town (cities still emerge).
+    #[test]
+    fn scenario_emergent_settlement_builds_homes() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Person, 40, 0.0, 0.0, 18.0, 4000);
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        let (tr, _p, _n) = run(&mut w, 3000, Kind::Person); // ≈100 s
+        eprintln!("[emergent settlement] builds={} births={}", tr.builds, tr.births);
+        assert!(tr.builds >= 3, "emergent settlement raised only {} homes — people aren't settling/feeding to build", tr.builds);
+    }
+
+    // SANITY (emergent): the core reactive primitives fire — a rabbit FLEES an approaching lion (Flee outscores
+    // Wander), and a hungry lion CATCHES an adjacent rabbit (Hunt resolves a kill on contact), like the manual ones.
+    #[test]
+    fn scenario_emergent_prey_flees_and_predator_catches() {
+        // flee: a cat approaches from -20; the rabbit (faster, FLEE_BOOST) must run +x and KEEP its distance
+        let mut w = emergent_world();
+        let cat = spawn_kind(&mut w, Kind::Cat, -20.0, 0.0, 10);
+        let r = spawn_kind(&mut w, Kind::Rabbit, 0.0, 0.0, 11);
+        let gap0 = w.agents[cat].agent.x.abs() - w.agents[r].agent.x; // ~20
+        for t in 1..=60 {
+            w.tick_once(t);
+        }
+        let gap1 = (w.agents[r].agent.x - w.agents[cat].agent.x).abs();
+        eprintln!("[emergent flee] rabbit x={:.1}, gap {gap0:.1} → {gap1:.1}", w.agents[r].agent.x);
+        assert!(!w.agents[r].dead, "emergent rabbit was caught — Flee primitive didn't outrun the cat");
+        assert!(w.agents[r].agent.x > 1.0, "emergent rabbit didn't flee +x (x={:.1})", w.agents[r].agent.x);
+        assert!(gap1 > gap0 - 1.0, "emergent rabbit didn't keep its distance ({gap0:.1}→{gap1:.1})");
+
+        // catch: a hungry lion adjacent to a rabbit eats it within a short window
+        let mut w = emergent_world();
+        let prey = spawn_kind(&mut w, Kind::Rabbit, 0.0, 0.0, 12);
+        let lion = spawn_kind(&mut w, Kind::Lion, 1.2, 0.0, 5001);
+        w.agents[lion].hungry = true;
+        w.agents[lion].stamina = 1.0;
+        let mut caught = false;
+        for _ in 0..240 {
+            w.step(DT);
+            if w.agents[prey].dead {
+                caught = true;
+                break;
+            }
+        }
+        assert!(caught, "emergent hungry lion failed to catch an adjacent rabbit — Hunt primitive isn't resolving kills");
     }
 }

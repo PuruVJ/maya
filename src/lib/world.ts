@@ -1,5 +1,7 @@
 // Canonical world-state types + builders. This is what gets gzip+base64'd into the URL.
-import { applyOps, type Op } from './engine';
+import { rustFfTargets } from './rustMath';
+import { inWater } from './water';
+import DEMO_SNAPSHOT from './demoWorld.json';
 
 export interface WorldObject {
 	id: string;
@@ -14,6 +16,8 @@ export interface WorldObject {
 	asleep?: boolean;
 	juvenile?: boolean; // a Rust-bred newborn → spawns into the sim on a maturation cooldown (can't breed yet)
 	gene?: number; // inherited vigor (≈1.0) from its parents → scales its speed in the sim (genetics/evolution)
+	pfamA?: number; // mother's lineage id (from the Rust birth) → set on the sim agent at spawn for incest avoidance
+	pfamB?: number; // father's lineage id
 	keep?: boolean; // PLAYER/LLM-placed → never reclaimed by habitation decay (only emergent NPC homes can rot away)
 }
 
@@ -72,65 +76,29 @@ const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
 // DEVELOPMENT → a population multiplier. Keyed on the size of the BUILT settlement (houses), NOT the scattered
 // ambient trees (which span the whole wilderness → a huge spurious footprint that ballooned the caps). A growing
 // city is what should lift the world's carrying capacity: build out → more people/animals → more building (the
-// emergent-city feedback). A fresh, cityless world sits at 1. Clamped [1, 3.5]. Fed to the Rust sim AND used by
-// capCreatures so the load-trim and the live breeding cap agree.
+// emergent-city feedback). A fresh, cityless world sits at 1. Clamped [1, 3.5]. Fed to the Rust sim's live
+// breeding cap (cap_for).
 export function worldAreaScale(objects: { kind: string }[]): number {
 	let builds = 0;
 	for (const o of objects) if (BUILDING_KINDS.has(o.kind)) builds++;
 	return Math.max(1, Math.min(3, 1 + builds / 40)); // ~+1 capacity per 40 buildings (softened: a big city hit 300+ agents)
 }
 
-// Live per-kind ceiling — MIRRORS crates/worldsim/src/world.rs effective_cap(): PREY scale with world AREA, each
-// PREDATOR tracks a share of the live prey it eats. (Constants must match the Rust ones.)
-export function popCaps(count: Record<string, number>, scale: number): Record<string, number> {
-	const r = count.rabbit ?? 0;
-	const k = count.kangaroo ?? 0;
-	const p = count.person ?? 0;
-	const c = count.cat ?? 0;
-	const l = count.lion ?? 0;
-	return {
-		rabbit: Math.round(30 * scale), // MIRRORS world.rs PREY_DENSITY_* (trimmed to keep the agent count sane)
-		kangaroo: Math.round(20 * scale),
-		person: Math.round(22 * scale),
-		cat: Math.max(2, Math.round(r * 0.3)),
-		lion: Math.max(1, Math.round((r + k + p + c) * 0.07)),
-		dinosaur: Math.max(1, Math.round((r + k + p + c + l) * 0.035))
-	};
-}
+// NOTE: there is deliberately NO load-time population trim. A world's population is DURABLE — it accumulates as
+// the player + the sim grow it, and reloading must never snap it back (the old `capCreatures` carrying-cap trim
+// caused "140 humans → 56 on reload"). VITALITY is Mother Nature's job: the director (nature.svelte.ts) tunes the
+// living population over time, and the Rust sim's `cap_for` governs live BREEDING. Persistence just round-trips
+// whatever exists.
 
-// Trim each creature kind to its live ceiling AT LOAD — the Rust cap only gates BREEDING, so it can't shrink a
-// roster that's ALREADY over (a world saved before the caps, or before the sim starved an apex bloom down). Keeps
-// the first `cap` of each kind (established founders sort ahead of later babies/immigrants), drops the surplus.
-export function capCreatures<T extends { objects: { kind: string; pos: [number, number, number] }[] }>(world: T): T {
-	const scale = worldAreaScale(world.objects);
-	const count: Record<string, number> = {};
-	for (const o of world.objects) if (CREATURE_KINDS.has(o.kind)) count[o.kind] = (count[o.kind] ?? 0) + 1;
-	const cap = popCaps(count, scale);
-	const seen: Record<string, number> = {};
-	world.objects = world.objects.filter((o) => {
-		if (!CREATURE_KINDS.has(o.kind)) return true; // a tree / house / prop — always keep
-		seen[o.kind] = (seen[o.kind] ?? 0) + 1;
-		return seen[o.kind] <= (cap[o.kind] ?? Infinity);
-	});
-	return world;
-}
-
-// Per-second relaxation rate toward carrying capacity while you're AWAY (fast breeders climb faster). Tuned so a
-// few minutes away nudges the world, a few hours equilibrates it.
-const FF_RATE: Record<string, number> = { rabbit: 0.0016, kangaroo: 0.0012, person: 0.0009, cat: 0.001, lion: 0.0008, dinosaur: 0.0006 };
-const FF_FLOOR: Record<string, number> = { rabbit: 6, kangaroo: 4, person: 4, cat: 4, lion: 2 }; // a species this low re-seeds (immigration would have)
-const logisticTo = (n0: number, cap: number, r: number): number => {
-	if (cap <= 0) return 0;
-	const n = Math.max(n0, 0.5); // a hair above 0 so a re-seeded species can climb the curve
-	return cap / (1 + (cap / n - 1) * Math.exp(-r));
-};
+// Kind index order the Rust `ff_targets` returns: [rabbit, cat, kangaroo, person, lion, dino].
+const FF_KINDS = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] as const;
 
 /** DETERMINISTIC AGGREGATE FAST-FORWARD (big-world.md §3). Given how long the player was away (ms), advance the
- *  population to "now" WITHOUT replaying every tick (that would freeze the tab). Each species relaxes toward its
- *  carrying capacity along a closed-form logistic — O(1) per species, so a week away costs the same as a minute.
- *  Prey advance first; predators then follow the NEW prey count. Materialises by adding/removing creature objects
- *  to hit the advanced counts (new arrivals carry the evolved average vigour). Returns the net population change. */
-export function fastForward<T extends { objects: WorldObject[] }>(
+ *  population to "now" WITHOUT replaying every tick (that would freeze the tab). The relaxation toward carrying
+ *  capacity is the closed-form logistic in RUST (`ff_targets`, single source of truth) — O(1) per species, so a
+ *  week away costs the same as a minute. JS only materialises the deltas: add/remove creature objects to hit the
+ *  advanced counts (new arrivals carry the evolved average vigour). Returns the net population change. */
+export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }>(
 	world: T,
 	elapsedMs: number,
 	idPrefix: string,
@@ -160,20 +128,13 @@ export function fastForward<T extends { objects: WorldObject[] }>(
 	if (!Number.isFinite(minX)) return { creatures: 0, houses: 0 }; // an empty world → nothing to advance
 	const avgGene = geneN > 0 ? geneSum / geneN : 1;
 	const scale = worldAreaScale(world.objects);
-	const working: Record<string, number> = { ...count };
+	// The whole relaxation (rates + floors + logistic, prey-before-predators) is one Rust call — single source of truth.
+	const adv = rustFfTargets(count.rabbit ?? 0, count.cat ?? 0, count.kangaroo ?? 0, count.person ?? 0, count.lion ?? 0, count.dinosaur ?? 0, scale, dt);
+	if (!adv) return { creatures: 0, houses: 0 }; // wasm not loaded → don't guess, leave the world as-is
 	const target: Record<string, number> = {};
-	for (const k of ['rabbit', 'kangaroo', 'person', 'cat', 'lion', 'dinosaur']) {
-		const cap = popCaps(working, scale)[k] ?? 0; // predators read the already-advanced prey in `working`
-		let n0 = working[k] ?? 0;
-		if (n0 <= 0) {
-			if (!FF_FLOOR[k]) continue; // a fully-extinct apex (dino) stays gone — it returns via Mother Nature in play
-			n0 = FF_FLOOR[k]; // a crashed prey/meso species would have been re-seeded by immigration while away
-		} else if (FF_FLOOR[k] && n0 < FF_FLOOR[k]) {
-			n0 = FF_FLOOR[k];
-		}
-		target[k] = Math.round(logisticTo(n0, cap, FF_RATE[k] * dt));
-		working[k] = target[k];
-	}
+	FF_KINDS.forEach((k, i) => {
+		target[k] = adv[i];
+	});
 	// materialise the deltas — add scattered newcomers (evolved vigour) or remove the surplus
 	let net = 0;
 	let nid = 0;
@@ -210,6 +171,7 @@ export function fastForward<T extends { objects: WorldObject[] }>(
 			const gx = Math.round((b.pos[0] + (Math.random() - 0.5) * 26) / 8) * 8; // 8 m grid → aligned blocks
 			const gz = Math.round((b.pos[2] + (Math.random() - 0.5) * 26) / 8) * 8;
 			if (world.objects.some((o) => BUILDING_KINDS.has(o.kind) && Math.abs(o.pos[0] - gx) < 6 && Math.abs(o.pos[2] - gz) < 6)) continue; // plot taken
+			if (inWater(world.zones, gx, gz)) continue; // don't grow a home into a lake while you were away
 			const h: WorldObject = { id: idPrefix + 'h' + houses, kind: 'house', pos: [gx, groundY(gx, gz), gz] };
 			world.objects.push(h);
 			blds.push(h);
@@ -252,6 +214,21 @@ export interface World {
 	/** Wall-clock ms when this world was last persisted. The seam for the time-based fast-forward (big-world.md
 	 *  §3): on load we know how long you were away, so the world can deterministically advance to "now". */
 	savedAt?: number;
+	/** DORMANT-region aggregates (big-world.md §3 streaming, see streaming.ts): a far region's creatures collapse to
+	 *  a cheap per-kind headcount + lastTick instead of being individually simulated. Keyed by region cell "cx,cz".
+	 *  Absent → the world has never streamed (everything is live objects). */
+	regions?: Record<string, RegionAggregate>;
+}
+
+/** A dormant region's collapsed content — what `streaming.ts` stores instead of LIVE objects, so a far region costs
+ *  ~nothing (and isn't in `world.objects`) until the player returns. Creatures collapse to a lossy aggregate (counts
+ *  + avg gene, fast-forwarded on wake); STATIC structures are kept verbatim (durable delta, restored exactly). This
+ *  is what bounds the LIVE object count to the near regions, systemically (no hard cap). */
+export interface RegionAggregate {
+	counts: Record<string, number>; // live count per creature kind at sleep time
+	gene: number; // average vigour of the collapsed creatures (re-seeded into materialised ones)
+	statics: WorldObject[]; // the region's non-creature objects (houses/trees/…), kept verbatim → restored on wake
+	lastTick: number; // sim tick when it went dormant → fast-forward span on wake
 }
 
 export interface Player {
@@ -273,31 +250,10 @@ export function emptyWorld(name = 'Untitled'): World {
 	};
 }
 
-// A populated scene to walk around in before the LLM is wired up. Also dogfoods the engine.
+// A populated scene to walk around in before the LLM is wired up. PRE-GENERATED snapshot (src/lib/demoWorld.json,
+// produced once from the now-Rust engine's ops) so building the demo needs NO engine call at init — the engine is
+// wasm (loaded async) and `demoWorld()` runs at component construction, before the wasm is ready. structuredClone
+// → a fresh, independently-mutable world each call. To regenerate after changing the recipe, see scripts.
 export function demoWorld(): World {
-	const w = emptyWorld('Hello World');
-	w.sky = 'night';
-	const ops: Op[] = [
-		{ op: 'add', kind: 'house', pos: [0, 0, -6] },
-		{ op: 'add', kind: 'cabin', pos: [-11, 0, -13] },
-		{ op: 'add', kind: 'tower', pos: [10, 0, -13] },
-		{ op: 'add', kind: 'well', pos: [-5, 0, -3] },
-		{ op: 'add', kind: 'lamp', pos: [2.5, 0, -2] },
-		{ op: 'add', kind: 'lamp', pos: [-2.5, 0, -2] },
-		{ op: 'scatter', kind: 'tree', count: 20, area: 'north' },
-		{ op: 'scatter', kind: 'flower', count: 16, area: 'center' },
-		{ op: 'scatter', kind: 'rock', count: 6, area: 'west' },
-		{ op: 'addZone', material: 'water', shape: 'blob', at: 'east', size: 20 },
-		// a LIVING world on load — wildlife + villagers (the game's core, absent from the old demo): a couple of
-		// cats and rabbits wander the hamlet, a kangaroo hops by the lake (it'll come down to drink), two
-		// villagers mill about, and a lone dinosaur roams the far treeline → the food chain emerges as you watch.
-		{ op: 'scatter', kind: 'cat', count: 2, area: 'center' },
-		{ op: 'scatter', kind: 'rabbit', count: 3, area: 'center' },
-		{ op: 'add', kind: 'kangaroo', pos: [9, 0, 5] },
-		{ op: 'add', kind: 'person', pos: [-4, 0, -5] },
-		{ op: 'add', kind: 'person', pos: [5, 0, -8] },
-		{ op: 'add', kind: 'dinosaur', pos: [-16, 0, -34] }
-	];
-	applyOps(w, ops, { pos: [0, 0, 6], yaw: 0 });
-	return w;
+	return structuredClone(DEMO_SNAPSHOT as unknown as World);
 }

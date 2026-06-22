@@ -11,8 +11,6 @@
 	import Path from './Path.svelte';
 	import Terrain from './Terrain.svelte';
 	import AmbientScatter from './AmbientScatter.svelte';
-	import Skyline from './Skyline.svelte';
-	import BuildingImpostors from './BuildingImpostors.svelte';
 	import SettlementGlows from './SettlementGlows.svelte';
 	import Chimneys from './Chimneys.svelte';
 	import DustPuffs from './DustPuffs.svelte';
@@ -38,12 +36,14 @@
 	import { SKY_FOG, kindDef } from '$lib/kinds';
 	import { treeAt, treeRadius, onPath, SCATTER_STEP } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
-	import { drainBirths, drainBuilds } from '$lib/rustSim';
+	import { drainBirths, drainBuilds, rustTick } from '$lib/rustSim';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
-	import { setRustObstacles, setRustPopScale } from '$lib/rustSim';
+	import { setRustObstacles, setRustPopScale, setRustRefuges } from '$lib/rustSim';
 	import { worldAreaScale } from '$lib/world';
+	import { streamRegions, regionOf } from '$lib/streaming';
 	import { playerState } from '$lib/playerState.svelte';
 	import { heightAt } from '$lib/terrain';
+	import { inWater } from '$lib/water';
 	import { nature } from '$lib/nature.svelte';
 	import { wind } from '$lib/wind';
 	import { weather } from '$lib/weather';
@@ -158,6 +158,9 @@
 			.map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
 		baseObstacles = [...props, ...ponds];
 		feedObstacles(playerState.pos[0], playerState.pos[2]); // re-feed with the current near-forest
+		// REFUGES (flee-to-safety): the houses are where a threatened woman/child runs for cover (and where the
+		// guard men cluster). Feed their centres to the Rust sim; it changes only when a building is raised/removed.
+		setRustRefuges(world.objects.filter((o) => BUILDING_KINDS.has(o.kind)).map((o) => ({ x: o.pos[0], z: o.pos[2] })));
 	});
 
 	// Reveal objects a few per frame so a big batch ("add 120 cats") mounts gradually instead of all at once
@@ -231,6 +234,7 @@
 	let lastRevealX = NaN;
 	let lastRevealZ = NaN;
 	let lastObjLen = -1;
+	let lastRegion = ''; // player's region cell last frame → only stream when it changes (crossed a tile)
 	// LIGHTNING — the rainy 'fog' sky flickers with distant sheet lightning: a bright transient added to the
 	// ambient so the whole overcast scene lifts for a beat, then decays fast. No bolt geometry / no sound; the
 	// sudden brighten alone reads as a far storm. Gated to fog → other skies are untouched (flash stays 0).
@@ -243,7 +247,7 @@
 		// its renderer + spawns into the sim (as a maturing juvenile). The per-kind cap keeps this bounded.
 		const babies = drainBirths();
 		for (const b of babies) {
-			world.objects.push({ id: babyPrefix + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene });
+			world.objects.push({ id: babyPrefix + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene, pfamA: b.pfamA, pfamB: b.pfamB });
 		}
 
 		// EMERGENT CITIES: place the houses settlers raised this frame. Snap to an 8 m grid (→ aligned blocks),
@@ -256,7 +260,30 @@
 				if (houses >= HOUSE_CAP) break;
 				const gx = Math.round(bd.x / 8) * 8;
 				const gz = Math.round(bd.z / 8) * 8;
-				if (world.objects.some((o) => BUILDING_KINDS.has(o.kind) && Math.abs(o.pos[0] - gx) < 6 && Math.abs(o.pos[2] - gz) < 6)) continue; // plot taken
+				// COLONY RULES (perf + "they build their own distinct cities"): a colony holds ≤ COLONY_MAX structures,
+				// and a NEW colony must be ≥ NEW_COLONY_GAP from any existing building — so settlers can't pile a dense
+				// sprawl on top of spawn (which nuked the frame rate); they grow a hamlet to 10 then must MIGRATE far
+				// to found the next. One scan finds the plot's colony size + the nearest building.
+				const COLONY_R2 = 75 * 75; // buildings within this of the plot = the same colony
+				const COLONY_MAX = 10; // structures per colony
+				const NEW_COLONY_GAP2 = 500 * 500; // a brand-new colony must be this far from any other building
+				let nearInColony = 0;
+				let nearest2 = Infinity;
+				let taken = false;
+				for (const o of world.objects) {
+					if (!BUILDING_KINDS.has(o.kind)) continue;
+					const d2 = (o.pos[0] - gx) ** 2 + (o.pos[2] - gz) ** 2;
+					if (d2 < 36) {
+						taken = true;
+						break;
+					} // plot occupied (≤6 m)
+					if (d2 < COLONY_R2) nearInColony++;
+					if (d2 < nearest2) nearest2 = d2;
+				}
+				if (taken) continue; // plot taken
+				if (nearInColony >= COLONY_MAX) continue; // this colony is full → settle elsewhere (keep walking)
+				if (nearInColony === 0 && nearest2 < NEW_COLONY_GAP2) continue; // a NEW colony too close to another → walk farther first
+				if (inWater(world.zones, gx, gz)) continue; // never raise a home in a lake (a settler picks dry ground)
 				// VARIED HOMES — a town shouldn't be identical boxes. Roll a size/kind: cosy cabins, modest houses,
 				// the occasional big manor (scale up). Sit it ON the ground (terrain height), not y=0 (else it buries
 				// into a hill and only the roof shows). heightAt mirrors the renderer's ground.
@@ -374,10 +401,12 @@
 				const tr = 4.5 + Math.random() * 6;
 				const tx = h.pos[0] + Math.cos(ta) * tr;
 				const tz = h.pos[2] + Math.sin(ta) * tr;
-				// don't plant on a building plot or right on top of another tree
-				const blocked = world.objects.some(
-					(o) => (BUILDING_KINDS.has(o.kind) || o.kind === 'tree' || o.kind === 'pine') && Math.abs(o.pos[0] - tx) < 2.6 && Math.abs(o.pos[2] - tz) < 2.6
-				);
+				// don't plant on a building plot, right on top of another tree, or in a lake
+				const blocked =
+					inWater(world.zones, tx, tz) ||
+					world.objects.some(
+						(o) => (BUILDING_KINDS.has(o.kind) || o.kind === 'tree' || o.kind === 'pine') && Math.abs(o.pos[0] - tx) < 2.6 && Math.abs(o.pos[2] - tz) < 2.6
+					);
 				if (!blocked) {
 					const s = 0.7 + Math.random() * 0.5;
 					world.objects.push({ id: treePrefix + treeN++, kind: 'tree', pos: [tx, heightAt(tx, tz, world.terrain), tz], scale: [s, s, s] });
@@ -471,6 +500,15 @@
 		// recompute the NEAR set only after moving far enough or the world changed (not every frame)
 		const px = playerState.pos[0];
 		const pz = playerState.pos[2];
+		// REGION STREAMING: when the player crosses a region tile, SLEEP the far regions (creatures → cheap aggregate,
+		// leave the sim) and WAKE the near ones (fast-forward + re-materialise). This keeps the sim bounded to the near
+		// area instead of ticking every creature in the world — a pure PERF mechanism (single-player, all in-memory).
+		const [rcx, rcz] = regionOf(px, pz);
+		const rkey = rcx + ',' + rcz;
+		if (rkey !== lastRegion) {
+			lastRegion = rkey;
+			streamRegions(world, px, pz, rustTick());
+		}
 		const objLen = world.objects.length;
 		if (objLen !== lastObjLen || Number.isNaN(lastRevealX) || (px - lastRevealX) ** 2 + (pz - lastRevealZ) ** 2 > RECHECK_MOVE2) {
 			lastRevealX = px;
@@ -529,8 +567,6 @@
 
 <Terrain {world} />
 <AmbientScatter {world} />
-<Skyline {world} />
-<BuildingImpostors {world} />
 <SettlementGlows {world} />
 <Chimneys {world} />
 <DustPuffs {world} />

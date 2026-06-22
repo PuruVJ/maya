@@ -99,9 +99,10 @@
 		const m = makeManaged(agent, species, 0.35 * SC, MENU, obj?.id, seedId);
 		if (companion) m.companion = true; // manager won't scare it off, and it can't be your own pet's prey-panic
 		if (obj?.dead) m.dead = true; // restore live state from a shared link (a corpse stays a corpse)
-		else if (obj?.asleep) ((m.asleep = true), (m.sleepTimer = 6));
+		else if (obj?.asleep) m.asleep = true;
 		if (obj?.juvenile) m.juvenile = true; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown
 		if (obj?.gene != null) m.gene = obj.gene; // inherited vigor → rustSim scales its speed at spawn (genetics)
+		if (obj?.pfamA != null) ((m.pfamA = obj.pfamA), (m.pfamB = obj.pfamB)); // parentage → rustSim sets lineage (incest avoidance)
 		return m;
 	});
 	$effect(() => {

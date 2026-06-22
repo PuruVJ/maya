@@ -143,7 +143,10 @@
 			vec2 local = (vec2(float(gx), float(gz)) - ${(G / 2).toFixed(1)}) * ${t.step.toFixed(4)};
 			vec2 cell = floor((uPlayer + local) / ${t.step.toFixed(4)});      // ABSOLUTE world cell → stays put
 			vec2 jit = vec2(h21(cell), h21(cell + 13.7)) - 0.5;
-			vec2 wxz = (cell + 0.5 + jit * 0.9) * ${t.step.toFixed(4)};        // blade world XZ
+			// jitter > 1 cell so blades stray into neighbours → natural clumps + gaps that BREAK the per-cell lattice
+			// (≤0.9 left a visible "paddy field" grid). A second hashed offset decorrelates X from Z.
+			jit += (vec2(h21(cell + 41.3), h21(cell + 67.9)) - 0.5) * 0.8;
+			vec2 wxz = (cell + 0.5 + jit * 1.7) * ${t.step.toFixed(4)};        // blade world XZ
 			float dist = distance(wxz, uPlayer);
 			float fin = ${fin};                                               // fade IN at the inner edge
 			float fout = 1.0 - smoothstep(${(t.rOut - t.band).toFixed(1)}, ${t.rOut.toFixed(1)}, dist); // dissolve OUT

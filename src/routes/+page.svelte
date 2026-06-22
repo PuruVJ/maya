@@ -15,7 +15,8 @@
 	import { nature } from '$lib/nature.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
-	import { demoWorld, emptyWorld, capCreatures, fastForward, type World as WorldData } from '$lib/world';
+	import { demoWorld, emptyWorld, fastForward, type World as WorldData } from '$lib/world';
+	import { initRustMath } from '$lib/rustMath';
 	import { heightAt } from '$lib/terrain';
 	import { encodeWorld, decodeWorld } from '$lib/share';
 	import { loadWorld, saveWorld } from '$lib/worldStore';
@@ -33,8 +34,13 @@
 	// if the URL carries a shared world (#w=…), start blank and fill it in onMount; else the demo
 	const fromLink = typeof location !== 'undefined' && /[#&]w=/.test(location.hash);
 	let world = $state(fromLink ? emptyWorld('Shared world') : demoWorld());
+	// total DORMANT (streaming-offloaded) creatures across region aggregates — alive, just not simulated near you.
+	const dormantCount = $derived(
+		world.regions ? Object.values(world.regions).reduce((s, r) => s + Object.values(r.counts).reduce((a, b) => a + b, 0), 0) : 0
+	);
 	let shareMsg = $state('');
 	let liveUrl = $state(false); // gate the live-URL updater until the initial (maybe shared) world has settled
+	let resetting = false; // when true, all persistence is suppressed so a reset isn't re-saved on the way out
 
 	// Render pixel-ratio. Two drivers, in priority: (1) while a build is GENERATING, the model saturates the
 	// shared GPU → pin to a low 0.6 for those ~2s (soft but smooth), then release. (2) otherwise, DYNAMIC
@@ -55,12 +61,15 @@
 	};
 
 	onMount(async () => {
+		// Load the main-thread Rust math BEFORE fastForward, so the away-growth uses the real Rust numbers, not the
+		// permissive fallback. Same .wasm the worker uses — browser-cached.
+		await initRustMath();
 		const m = location.hash.match(/[#&]w=([^&]+)/);
 		if (m) {
 			// opened a SHARED link → load that world, persist it (store + local cache), then SCRUB the hash from
 			// the address bar so it's not stuck there forever.
 			try {
-				world = capCreatures(dedupeObjects(await decodeWorld(m[1])));
+				world = dedupeObjects(await decodeWorld(m[1]));
 				replaceState(location.pathname + location.search, {});
 				saveWorld($state.snapshot(world));
 			} catch {
@@ -71,7 +80,7 @@
 			// normal open → restore from the world store (shared backend → local IndexedDB cache → else the demo)
 			const saved = await loadWorld();
 			if (saved && Array.isArray(saved.objects)) {
-				const w = capCreatures(dedupeObjects(saved));
+				const w = dedupeObjects(saved);
 				// DETERMINISTIC AGGREGATE FAST-FORWARD (big-world.md §3): advance the population to "now" by however
 				// long you were away — closed-form, so even a week away is instant (no tick-replay hang).
 				const away = saved.savedAt ? Date.now() - saved.savedAt : 0;
@@ -133,7 +142,7 @@
 		JSON.stringify(world);
 		if (!liveUrl) return;
 		clearTimeout(editTimer);
-		editTimer = setTimeout(() => saveWorld(liveWorldSnapshot()), 500);
+		editTimer = setTimeout(() => !resetting && saveWorld(liveWorldSnapshot()), 500);
 		return () => clearTimeout(editTimer);
 	});
 
@@ -144,7 +153,7 @@
 	// tab is hidden / unloaded captures the freshest pose right before you leave. Result: the world resumes mid-life.
 	$effect(() => {
 		if (!liveUrl) return;
-		const persist = () => saveWorld(liveWorldSnapshot());
+		const persist = () => !resetting && saveWorld(liveWorldSnapshot());
 		const id = setInterval(persist, 1000); // sync to the DB every second (user request) — captures wandering + builds promptly
 		const onHide = () => {
 			if (document.visibilityState === 'hidden') persist();
@@ -162,11 +171,35 @@
 	// brings them back the RIGHT way (big-world.md): an async DB snapshot at 15 s / on-hide, no URL, no per-frame
 	// cost. See docs/sim-decisions.md C2.
 
-	function reset() {
+	// A TRUE reset. Just swapping `world = demoWorld()` isn't enough: the autosave + unload-save re-persist it, and
+	// the Rust sim worker keeps its own (growing) population independent of world.objects. So: suppress all saving,
+	// wipe the local cache (IndexedDB), then RELOAD so the sim worker restarts fresh. (100% local — no server wipe.)
+	async function reset() {
 		if (!confirm('Reset to the demo world? This clears everything you’ve built here.')) return;
-		world = demoWorld();
-		shareMsg = 'Reset to the demo world';
-		setTimeout(() => (shareMsg = ''), 2200);
+		resetting = true; // stop the 500ms edit-save, the 1s autosave, and the pagehide/visibilitychange save
+		shareMsg = 'Resetting…';
+		await new Promise<void>((resolve) => {
+			const open = indexedDB.open('worldgen', 1);
+			open.onsuccess = () => {
+				const db = open.result;
+				if (!db.objectStoreNames.contains('worlds')) {
+					db.close();
+					return resolve();
+				}
+				const tx = db.transaction('worlds', 'readwrite');
+				tx.objectStore('worlds').delete('current');
+				tx.oncomplete = () => {
+					db.close();
+					resolve();
+				};
+				tx.onerror = () => {
+					db.close();
+					resolve();
+				};
+			};
+			open.onerror = () => resolve();
+		});
+		location.reload(); // fresh load: empty cache → demo world, and a brand-new sim worker
 	}
 
 	async function share() {
@@ -233,7 +266,7 @@
 
 <!-- live FPS / frame-time meter, top-centre -->
 <FpsPanel />
-<EcoStats />
+<EcoStats {world} />
 
 <!-- MOTHER NATURE wildcard announcement — a dramatic banner when she sends in a pack/herd/boom -->
 {#if nature.banner}
@@ -288,13 +321,14 @@
 			🔗 Share
 		</button>
 	</div>
-	<!-- object-count readout (the world now persists to the store, not the URL — no size-wall to warn about) -->
+	<!-- object-count readout. LIVE = world.objects (static + near creatures, what's simulated/rendered — streaming
+	     keeps this bounded). DORMANT = streaming-offloaded creatures, still alive in region aggregates. -->
 	{#if liveUrl && world.objects.length}
 		<div
 			class="pointer-events-none rounded-full bg-black/35 px-2.5 py-0.5 text-[11px] font-medium text-white/55 backdrop-blur"
-			title="Your world auto-saves locally (and to the shared backend when deployed)."
+			title="LIVE = simulated/rendered near you (streaming bounds this for perf). DORMANT = offloaded far creatures, still alive in region aggregates — they wake as you approach."
 		>
-			{world.objects.length} objects
+			{world.objects.length} live{#if dormantCount > 0}&nbsp;· {dormantCount} dormant{/if}
 		</div>
 	{/if}
 	{#if shareMsg}

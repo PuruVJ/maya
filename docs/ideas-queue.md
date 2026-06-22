@@ -10,6 +10,51 @@ Newest ideas added at the top of "Queued". Move items to "Shipped" with the comm
 
 ## 🟢 Queued (priority order — top = next)
 
+### 🌊 2026-06-22 idea-flood (emergent-world session) — captured, awaiting priority
+Done this session: **emergent brain is the world default + on par with Manual** (scenario-tested), **genome spread
+widened** (0.3‥1.7), **player IMMUNITY** (Sim sets it on — no predator hunts/menaces you, danger stays 0). The rest,
+to build one at a time:
+
+- **EF1. World "wall" visibility (curved horizon).** The curved-up terrain (the gravity-fold) fades into sky/fog and
+  is fully sky at the top; user wants the wall CLEARLY VISIBLE with clarity when looking up. Root cause (explored):
+  `curveWorld.ts` (radius 800) lifts far ground overhead only at ~2.5 km, but `FogExp2` (kinds.ts `SKY_FOG`) + the
+  grass dissolve-to-ground (Grass.svelte) + clouds at ALT=130m (Clouds.svelte) all blend the rise into sky before
+  it's visible. Levers: lower fog density / switch to ranged fog, tighten curve radius (sooner rise), lower/soften
+  clouds, keep terrain colour saturated at distance. [render — needs the user's eye to tune]
+- **EF2. Too many live objects (~800 in-area).** Trim the live/near object count for perf — tighten streaming
+  offload radius / soft targets / breeding plateau so the individually-simulated set stays bounded (memory says
+  ~<400 target). Check whether 800 counts creatures only or +trees/houses. [sim/streaming/perf]
+- **EF3. Genuine weird mutations.** Rare visible mutations — cancerous growths, "very weird" morphologies, and
+  MISSING LIMBS (rarely, from surviving an animal attack). A heritable/again-random visual+stat deviation; injury-
+  driven amputations persist on survivors. [sim genome + render — big]
+- **EF4. Pair-bonding families.** Mates STICK TOGETHER while bonded / mating / gestating / raising a young one; when
+  the young matures to adult the pair MAY break up (or not). Bond = a tracked partner index with a strong mutual
+  tether, released probabilistically at the child's adulthood. [sim — composes with juvenile-follow + breeding]
+- **EF5. Old-age made visible (all animals) + slower + more vulnerable.** Frailty already SLOWS elders (FRAIL_ONSET);
+  add a VISUAL aging cue across every species (greying/thinning/stooped scale) AND make elders more VULNERABLE
+  (easier to catch / lower health). [sim already half-there + render]
+- **EF6. Setup/loading overlay.** An overlay "setting up…" window showing setup progress; it WAITS for object
+  creation / the world to STABILISE, then fades away. [UI — gate on agent/object count settling]
+- **EF7. Predators avoid settlements.** A predator steers AWAY from settlements (refuge/house centres) UNLESS it's
+  really hungry, OR it's a mother with a young child (then it'll risk the edge). Inverse of the refuge pull, gated
+  on the hunger latch + a has-young check. [sim — reuses the refuges channel]
+- **EF10. Prey must SPREAD far (anti-crowding near settlements).** A settlement formed near home and rabbits/rodents
+  pool in that area, crowding it. The world's north-star is to SPREAD OUT as far as possible. Push prey dispersal
+  harder — stronger outward drive / lower crowd threshold for prey near dense areas, so herds keep colonising new
+  ground instead of pooling around a town. Composes with the existing flock dispersal (DISPERSE_CROWD/BLOB_CROWD)
+  + the emergent brain (could add a "seek open range" drive when crowded). [sim — flock/emergent dispersal]
+- **EF9. Combat needs a sense of FIGHTING (not instant kills).** User saw a lion prowl into a couple → both died
+  instantly; wants a sense of struggle (not necessarily visual) — a brief fight: the prey resists / it takes a beat
+  / health drains over a short grapple before death, instead of an on-contact one-shot. Reuse the slash/health
+  mechanics for single predator↔prey, not just mobs. [sim — emergent + manual catch path]
+- **EFbug1. Cats fidget weirdly ON rabbit CARCASSES.** Emergent is great + determined overall (user loves it), but a
+  cat at a dead rabbit jitters/circles oddly. Likely the Scavenge approach (CHASE_W·0.7 toward the corpse) overshoots
+  + the anti-overlap with the carcass body bounces it, or the idle FSM plays over the feed. Smooth the carcass feed
+  (stop/settle on contact, no re-approach jitter). [sim — emergent Scavenge primitive / corpse anti-overlap]
+- **EF8. Genome cross-birth inheritance (finish Tier 2).** Today founders vary but babies re-roll from their own
+  seed → no selection DRIFT. Carry the 5 genome weights through the births buffer (like the vigor gene) so a
+  population's average strategy drifts under selection, visible as a HUD number like ⚡vigor. [sim plumbing]
+
 ### A. Dynamic "Mother Nature" director (homeostatic parameter control)
 When a population stagnates / drifts, Mother Nature should TWEAK PARAMETERS (not just spawn migrations): e.g. make
 a species more reproductive or more aggressive, raise/lower caps, etc. A feedback controller that nudges the sim's
@@ -24,24 +69,38 @@ constants toward a healthy, churning balance — boost a sagging species, rein i
 - PLAYER-built houses: protected — never decay (or ≥10× slower). NPCs can't claim/inhabit them.
 - Implementation note: tag player/LLM-placed buildings with a `keep` flag; only auto-built (emergent) empty homes decay.
 
-### C. In-house protection + flee-to-safety
-- A human IN / right beside a house is SAFE — predators can't harm it there.
-- A threatened human flees toward the nearest house (its own, ideally) and is safe if it makes it.
-- Needs: feed house positions to Rust as "refuges" (precedent: `set_fish` lure points), steer + suppress catch near one.
+### C. In-house protection + flee-to-safety — SHIPPED (flee-to-safety; hard in-house immunity = optional follow-up)
+- Houses are fed to the Rust sim as REFUGE points (new `set_refuges` channel, full pipeline mirroring `set_fish`:
+  world.rs field/setter/`nearest_refuge` → lib.rs Sim → worker `refuges` msg → rustSim `setRustRefuges` → Scene
+  feeds building centres each obstacle-rebuild). A fleeing PERSON within REFUGE_R=40m blends a home-ward bias
+  (REFUGE_PULL=0.8) into her escape vector — UNLESS home is behind the predator (then plain flight wins, never run
+  INTO the hunter). "Protection" emerges: she runs to the houses where the guard men cluster (existing GUARD_RALLY).
+- Test `a_threatened_woman_flees_toward_a_house` (refuge vs none → flight curves toward home).
+- ⏭️ OPTIONAL follow-up: HARD immunity — a person within a few metres of a house can't be caught at all (suppress
+  the catch). Not done yet; current behaviour is "run home + the guards defend you," which is more emergent.
 
 ### D. Neighbour mechanic
 - When a human reaches a house that isn't its own → probability flip on whether the neighbour lets it stay (depends
   on "neighbour type").
 - If conditions are right, it may REPRODUCE with the neighbour.
 
-### E. Low-population human banding (survival instinct)
-- When human pop drops too low: they STOP killing their own kind (aggression off).
-- Scattered survivors actively CONVERGE on any human they can see → regroup in one place → found a town there
-  (abandoning their old houses if needed).
+### E. Low-population human banding (survival instinct) — SHIPPED (truce + gather; long-range seek = follow-up)
+- IN RUST (`world.rs`): a LATCHED `person_banding` flag (hysteresis PERSON_BAND_LOW=12 ↑ PERSON_BAND_RELEASE=20),
+  computed at tick START from the live person count. While banding: (1) aggressive infighting is SUPPRESSED — an
+  aggressive person won't target fellow people (truce gate in `target()`); (2) cohesion rises for EVERYONE incl.
+  men (`coh_w += BAND_GATHER_W`) and dispersal is held off, so those near each other clump into a town nucleus.
+- Tests: `low_population_humans_band_with_hysteresis`, `banding_humans_dont_hunt_their_own`.
+- LONG-RANGE convergence — SHIPPED: a banding person with < BAND_SEEK_QUORUM(3) flock-neighbours steers toward the
+  NEAREST other person on the wider seek grid (SEEK=100m) at BAND_SEEK_W(0.5) drive, so far-flung survivors walk
+  over and regroup; local cohesion takes over once a quorum gathers. Test: `banding_survivors_seek_each_other…`.
 
-### F. Equal-gender colonising bands
-- When a clump splits/disperses, the bands should be roughly gender-balanced (a man + woman strike out together,
-  "like missionaries") so each new band can actually found + grow a settlement.
+### F. Equal-gender colonising bands — SHIPPED (in Rust)
+- When a young person disperses out of a blob it pairs with its nearest opposite-sex young neighbour (tracked in the
+  flock scan). LEADER/FOLLOWER: the lower-seed member leads (takes the outward compass heading + a gentle tether to
+  its partner, BAND_PAIR_W=0.45 swept); the higher-seed FOLLOWS at full outward strength. So each band is a man +
+  woman striking out together ("like missionaries"), gender-mixed by construction — no single-sex dead-end colonies.
+- Test `dispersing_bands_stay_gender_mixed`: from a 16-person blob, the worst-off man stays within ~⅓ of the
+  dispersal radius of a woman (the pairing roughly halves that gap vs. independent random headings).
 
 ### G. Men literally hunt prey (food role)  — HELD pending balance
 - Adult males chase rabbits/prey for food. Gate to "only when hungry" so it doesn't over-pressure the prey base.
@@ -50,13 +109,17 @@ constants toward a healthy, churning balance — boost a sagging species, rein i
 ### H. Bigger / more-frequent prey booms
 - "More prey = more total life." Make Mother Nature's "season of plenty" rabbit/kangaroo booms larger or more frequent.
 
-### I. Move the fast-forward math to Rust
-- The closed-form logistic FF currently runs main-thread in JS (`world.ts fastForward`). The Rust sim is in a Web
-  Worker, unreachable synchronously at load. Proper fix: make the FF a Rust sim op that emits its deltas through the
-  existing birth/death channel; JS just materialises. (Architecture law: heavy math belongs in Rust.)
+### J. Fence not movable (bug) — INCONCLUSIVE (needs a live repro)
+- A fence renders via `Prop.svelte`, whose ROOT group already sets `userData={{ objectId: obj.id }}`, and the move
+  tool's `pickObjectId` walks parents for that id — so on a code read it SHOULD be pickable. No obvious cause found.
+- Likely culprits to check WITH the game open: the fence mesh is thin (raycast misses the slats — try tapping dead-
+  centre on a post), or it's a multi-segment ring where each tap moves one segment. Left for the user to reproduce.
 
-### J. Fence not movable (bug)
-- A built fence can't be picked up by the move tool. Investigate the raycast / `userData.objectId` path for fences.
+### lakes-validation-done. No static objects spawn in water — SHIPPED
+- Settlers raising homes (Scene live + `world.ts fastForward` away-growth) and colony trees now skip any plot that
+  `inWater()` reports — no more houses/trees floating in a lake. (Creatures still may cross water but get pushed out
+  by the obstacle, and graves sit where a person died, which is dry since water is an obstacle — both left as-is.)
+- Also fixed a STALE pre-existing test: the runaway-count clamp expected 120 but MAX_COUNT was raised to 1000.
 
 ### N. Per-user spawn regions (localStorage)
 - A "user" doesn't spawn at (0,6) — each gets their OWN spawn area spread across the grid (decent distance apart:
@@ -65,14 +128,61 @@ constants toward a healthy, churning balance — boost a sagging species, rein i
 - Store per-user in **localStorage** for now (no real auth yet): { spawnPoint, lastPosition, … } — "favour
   computing/persisting as much as possible." (Composes with N's multi-region + B's keep-flag.)
 
+### litter-cluster-done. Litters born clustered around the mother — SHIPPED (in Rust, polish)
+- Newborns already delivered at the mother's spot, but ALL littermates at her EXACT point → anti-overlap exploded
+  them apart on tick 1. Now each baby gets a tiny seeded ring offset (0.4 + 0.25·sibling-index m) so a litter emerges
+  as her brood clustered around her. Test `a_litter_is_born_clustered_around_the_mother`.
+
+### juvenile-follow-done. Juveniles trail a parent — SHIPPED (in Rust, realism)
+- A baby ANIMAL (non-person; people's children already cluster via coh_w) steers toward the nearest grown adult of
+  its kind it can see in the flock — fawn/duckling family trains. FOLLOW_W=0.1 (just above herd cohesion), juvenile
+  = age < 0.18×lifespan, parent = age ≥ 0.3×lifespan. Balance-neutral (keeps the young in the herd → a touch safer).
+- Test `a_juvenile_animal_trails_a_parent` (a parked adult; the baby closes the gap).
+
+### frailty-done. Age frailty — SHIPPED (in Rust, realism)
+- In the last fifth of its life (past FRAIL_ONSET=0.8 of lifespan) an animal SLOWS — its gait cap ramps down to
+  FRAIL_MIN=0.72 at death (multiplies `behave.0`, composing with the injury limp). So predators naturally cull the
+  OLD & weak (a slow elder is the easy meal), and generations turn over instead of everyone dying at the cap. The
+  player's pet is exempt (it never ages out). Test `an_aged_animal_slows_with_frailty` (same seed, old covers less).
+
+### scavenging-done. Carrion / scavenging — SHIPPED (in Rust, realism)
+- A death is no longer wasted food. Every corpse (old age / starvation / a kill's leftovers) carries CARRION_MEAT=26
+  edible-seconds, rotting at 1×/s (fed into the seek grid so scavengers can find it). A HUNGRY carnivore with no
+  live prey pads to the nearest fresh carcass (SCAVENGE_R=16m) and feeds (SCAVENGE_GAIN energy/s), draining the
+  carcass faster so it feeds a few then is picked clean — no food-coma (scraps top up, a fresh kill still gorges).
+- Behaviour rank: live prey > carcass > idle fish-lure/wander. Self-limiting (feeding clears the hunger latch).
+- ⚠️ INVARIANT (regression fixed): corpses are inserted into the SEEK grid (so scavengers find them) but `target()`
+  skips dead agents at the top of its neighbour loop — else a fresh same-rank predator carcass was picked as a
+  territorial RIVAL and the living one charged + bled on it. Test `a_predator_does_not_fight_a_corpse_as_a_rival`.
+- Tests: `a_hungry_carnivore_scavenges_a_fresh_carcass`, `a_carcass_rots_away_even_uneaten` (+ `fast_forward_relaxes…`
+  now covers ff_targets natively). 63 cargo tests.
+
 ### A-done. Dynamic Mother Nature director — SHIPPED (in Rust, homeostatic)
 - The sim now drifts each kind's breeding vitality toward a target from pop/carrying-capacity each tick (struggling
   → breed hard, booming → ease off). Fully in-sim, no JS controller. Vitality eases breed_ready + the cooldown.
+
+### caps-done. Carrying-cap math → Rust — SHIPPED
+- `cap_for` (the trophic carrying-capacity formula) is the single source of truth in `world.rs`; exported as the
+  `pop_caps` wasm fn. JS `world.ts popCaps` now calls it via `rustMath.ts` (a SECOND, stateless main-thread wasm
+  instance — the worker's sim wasm is unreachable synchronously). `+page.svelte` awaits `initRustMath()` before any
+  cap/scatter math so caps are the real Rust numbers, never the permissive fallback. No duplicated balance formula.
+
+### I-done. Fast-forward logistic math → Rust — SHIPPED
+- The closed-form logistic relaxation (rates + floors + prey-before-predators ordering) is now `ff_targets` in
+  `world.rs`, exported as the `ff_targets` wasm fn and called from `world.ts fastForward` via `rustMath.ts`. JS only
+  materialises the deltas (random object scatter — state glue, stays JS). No duplicated FF balance math.
 
 ### L. Move the engine's math to Rust (non-UI parts)
 - `src/lib/engine.ts` (applyOps placement, `findFreeSpot` O(n²) collision search, scatter spiral, anchor maths) is
   heavy compute living in JS. Per the architecture law it belongs in Rust; the op-orchestration / world-object
   authoring stays JS. Big refactor — the engine is tightly coupled to `world.objects` + the LLM ops. Worth it.
+- ⚠️ BLOCKER for the cheap shim route: `findFreeSpot`'s free-test calls `inWater` (`water.ts`), whose blob
+  shoreline (`waterEdgeFactor`, sum-of-sines) is DELIBERATELY mirrored to the GLSL in Water.svelte AND reused by
+  the Player wade/city. A stateless main-thread Rust port would force a THIRD copy of that edge math — the exact
+  mirror-sync hazard we avoid (cf. terrain heightAt↔Grass). So this is NOT a `rustMath` one-off like caps/FF.
+- Correct path: do placement INSIDE the sim (the unified entity buffer, big-world.md §6.9) where obstacles +
+  water zones are already resident — Rust owns the geometry once, no per-call re-shipping, no duplicated water
+  math. Defer until the buffer lands. (findFreeSpot is build-time, not a per-frame hot path, so no perf urgency.)
 
 ### M. Regional / session creature caps (big-world)
 - Player creations: dinosaurs ≤10 per player per session, ≤20 per region; other creatures spread across regions.

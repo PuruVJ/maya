@@ -19,37 +19,25 @@ import { Rng } from './rng';
 // by the agent's stable `seedId` + a CHANNEL, so spawns are reproducible (same obj.id ⇒ same traits → a shared
 // world agrees). (Per-tick rolls now live in the Rust core's addressed RNG.)
 const rng = new Rng('worldgen-agents');
-const CH = { wander: 1, speed: 2, aggro: 3, slash: 4, breed: 5, mutate: 6, fight: 7 } as const;
+const CH = { speed: 2 } as const; // only the render-gait speed roll is still done JS-side (Rust owns the sim rolls)
 
-// ── Food chain (per-kind birth config) ─────────────────────────────────────────────────────────────
-// rank = trophic level. speed = per-individual random range. endurance = sprint stamina. hunts: 'lower' eats
-// anything below its rank · 'humans' (people) attack own kind on a coinflip · 'none' = pure prey. fullAfter =
-// kills before a food-coma; sleepSecs = that nap's length; mobToll = attackers it slashes dead while mobbed.
-// (The Rust core carries the canonical copy of this table; this stays only to seed `makeManaged`.)
-export const ECO: Record<
-	string,
-	{
-		rank: number;
-		speed: [number, number];
-		endurance: number;
-		hunts: 'lower' | 'humans' | 'none';
-		fullAfter?: number;
-		sleepSecs?: number;
-		mobToll?: [number, number];
-	}
-> = {
-	rabbit: { rank: 1, speed: [3.6, 4.8], endurance: 1.0, hunts: 'none' },
-	// predators were slower than prey → starved amid abundant rabbits; bumped so a chase runs down an average prey.
-	// MUST mirror crates/worldsim/src/eco.rs (Rust owns movement; this table feeds the JS trait mirror + parity test).
-	cat: { rank: 2, speed: [3.5, 4.5], endurance: 0.8, hunts: 'lower', sleepSecs: 10, mobToll: [1, 2] },
-	kangaroo: { rank: 2, speed: [3.4, 4.6], endurance: 0.9, hunts: 'none' },
-	person: { rank: 3, speed: [1.8, 2.5], endurance: 0.6, hunts: 'humans' },
-	lion: { rank: 4, speed: [3.7, 4.8], endurance: 0.55, hunts: 'lower', fullAfter: 5, sleepSecs: 16, mobToll: [1, 3] },
-	dinosaur: { rank: 5, speed: [4.8, 6.2], endurance: 0.3, hunts: 'lower', fullAfter: 9, sleepSecs: 24, mobToll: [2, 5] }
+// ── Per-kind RENDER trait mirror ────────────────────────────────────────────────────────────────────
+// The Rust core (crates/worldsim/src/eco.rs) owns the CANONICAL, full ecosystem table and runs ALL the sim
+// (movement / food-chain / combat / metabolism). JS keeps ONLY what RENDERING needs: each kind's `speed` range →
+// a per-agent maxSpeed that scales the leg-swing GAIT, and `rank` (the player-stun check in Player.svelte). The
+// sim-only fields that used to live here (endurance / hunts / fullAfter / sleepSecs / mobToll, and the per-agent
+// stamina/slash/rival/chase state in makeManaged) were JS-SIM-era residue — removed, since Rust is the one source
+// of truth now and the duplicate table was pure mirror-sync hazard (every balance tweak had to be edited twice).
+export const ECO: Record<string, { rank: number; speed: [number, number] }> = {
+	rabbit: { rank: 1, speed: [4.0, 5.2] },
+	cat: { rank: 2, speed: [3.5, 4.5] },
+	kangaroo: { rank: 2, speed: [3.4, 4.6] },
+	person: { rank: 3, speed: [1.8, 2.5] },
+	lion: { rank: 4, speed: [3.7, 4.8] },
+	dinosaur: { rank: 5, speed: [4.8, 6.2] }
 };
-const AGGRO_PROB = 0.2; // share of people that turn aggressive (hunt their own kind)
 
-/** A random max speed in this kind's range (varies every individual; deterministic per seedId). */
+/** A random max speed in this kind's range (varies every individual; deterministic per seedId) — for the gait. */
 export function speedFor(kind: string, seedId: number): number {
 	const s = (ECO[kind] ?? ECO.cat).speed;
 	return rng.range(s[0], s[1], seedId, CH.speed);
@@ -88,38 +76,26 @@ export interface ManagedAgent {
 	lod: 0 | 1 | 2; // 0 near (full), 1 mid, 2 far (freeze articulation)
 	castShadow: boolean; // only the nearest few cast (shadow budget)
 	dist: number; // distance to the player
-	// ecosystem state (seeded by makeManaged; the Rust sim mirrors the live values — health/dead/asleep — back):
-	rank: number;
-	endurance: number;
-	aggressive: boolean; // people only — hunts its own kind
-	seedId: number; // stable per-agent uint32 → its own deterministic trait RNG (matches the Rust seed_id)
-	stamina: number; // 0..1 energy
+	// the Rust sim mirrors the live values back each tick (health/dead/asleep/hunting); the rest of the ecosystem
+	// state the old JS sim tracked (stamina/slash/rival/chase/mob/…) is gone — Rust owns it now.
+	rank: number; // trophic level — the only food-chain field the render side still reads (the player-stun check)
+	seedId: number; // stable per-agent uint32 → its deterministic trait RNG (sex/gait; matches the Rust seed_id)
 	health: number; // 0..1; ≤0 = death; <HURT_AT = injured/limping (mirrored from Rust)
-	meals: number; // kills since last sleep
-	spooked: number; // seconds left fleeing a recent attacker
-	mobbed: boolean; // being swarmed
 	dead: boolean; // caught → corpse (mirrored from Rust)
 	corpseAge: number; // seconds it's been dead → drives the sink-and-reap decay (0 while alive)
 	asleep: boolean; // resting (mirrored from Rust)
 	hunting: boolean; // this apex is charging YOU right now (mirrored from Rust) → its eyeshine glares red
 	juvenile?: boolean; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown when it spawns into the sim
 	gene?: number; // inherited VIGOR (≈1.0; scales speed) — ferried from the Rust birth → set on the sim agent at spawn
-	sleepTimer: number; // seconds left in the current sleep
-	chaseOX: number; // where the current prey-chase began (NaN = none)
-	chaseOZ: number;
-	giveUpCd: number; // seconds it rests after abandoning a chase
-	rivalTime: number; // seconds crowded by a rival → a territorial fight
-	slashMax: number; // attackers it can slay in one mob fight
-	slashBudget: number; // attackers it can still slash this fight
-	slashCd: number; // cooldown until its next retaliatory slash
+	pfamA?: number; // mother's lineage id — ferried from the Rust birth → set_lineage at spawn (incest avoidance)
+	pfamB?: number; // father's lineage id
 }
 
 /** Build a fully-seeded managed agent from its kind (so components don't repeat the eco wiring). The Rust sim
  *  re-seeds its own copy from the same `seedId`; these fields are the JS-side mirror the renderers read. */
 export function makeManaged(agent: Agent, kind: string, radius: number, menu: Behavior[], objId: string | undefined, seedId: number): ManagedAgent {
-	const eco = ECO[kind] ?? ECO.cat;
-	const toll = eco.mobToll;
-	const slashMax = toll ? toll[0] + rng.int(0, toll[1] - toll[0] + 1, seedId, CH.slash) : 0; // deterministic per individual
+	// Render-only state. The Rust sim owns + mirrors back the live values (health / dead / asleep / hunting) each
+	// tick; everything else the OLD JS sim tracked here (stamina/slash/rival/chase/…) is gone — Rust computes it.
 	return {
 		agent,
 		kind,
@@ -129,27 +105,13 @@ export function makeManaged(agent: Agent, kind: string, radius: number, menu: Be
 		lod: 0,
 		castShadow: true,
 		dist: 0,
-		rank: eco.rank,
-		endurance: eco.endurance,
-		aggressive: kind === 'person' && rng.chance(AGGRO_PROB, seedId, CH.aggro), // deterministic per individual
+		rank: (ECO[kind] ?? ECO.cat).rank, // the player-stun check reads this; rest of the food-chain is Rust's
 		seedId,
-		stamina: eco.hunts === 'lower' ? 0.45 : 1, // carnivores start a touch hungry so they hunt soon
 		health: 1,
-		meals: 0,
-		spooked: 0,
-		mobbed: false,
 		dead: false,
 		corpseAge: 0,
 		asleep: false,
-		hunting: false,
-		sleepTimer: 0,
-		chaseOX: NaN,
-		chaseOZ: NaN,
-		giveUpCd: 0,
-		slashMax,
-		slashBudget: slashMax,
-		slashCd: 0,
-		rivalTime: 0
+		hunting: false
 	};
 }
 

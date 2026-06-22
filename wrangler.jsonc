@@ -8,25 +8,11 @@
 		"binding": "ASSETS",
 		"directory": ".svelte-kit/cloudflare"
 	},
-	"observability": { "enabled": true },
+	"observability": { "enabled": true }
 
-	// World persistence (src/routes/api/world). `vite dev` gets a LOCAL SQLite via the adapter's platform proxy,
-	// so this works offline-of-Cloudflare for development. For PROD: `wrangler d1 create world`, paste the real
-	// database_id below, then `wrangler d1 execute world --remote --command "CREATE TABLE IF NOT EXISTS worlds…"`.
-	"d1_databases": [{ "binding": "DB", "database_name": "world", "database_id": "local-dev" }],
-
-	// ── Future "Mother Nature" shared-world backend (docs/big-world.md) ───────────────────────────────
-	// The single ever-living world layers a DB-stored DELTA over the deterministic client-side base. Add
-	// these when that phase lands (mirror ~/Projects/puru-passport for the patterns):
-	//
-	//   "durable_objects": { "bindings": [{ "name": "REGION", "class_name": "Region" }] },
-	//   "migrations":      [{ "tag": "v1", "new_sqlite_classes": ["Region"] }],
-	//   "kv_namespaces":   [{ "binding": "KV", "id": "<silhouette/summary cache>" }],
-	//   "d1_databases":    [{ "binding": "DB", "database_name": "world", "database_id": "<id>" }]
-	//
-	// One Durable Object per region = authoritative delta + serialized writes (no conflicts) + an Alarm
-	// that runs that region's macro sim tick (settlements/populations/biomes + decay). Idle regions
-	// hibernate. "Mother Nature" (the LLM director / evolutionary engine) nudges via committed ops.
+	// The game is 100% LOCAL (single-player; "local & free"). The whole world lives in the player's browser
+	// (IndexedDB) — there is NO backend: no D1, no KV, no Durable Objects. Deploy is just static assets + the
+	// SvelteKit worker shell (which only serves them; the only route is the dev-only /api/debug log sink).
 	//
 	// ── Model weights ─────────────────────────────────────────────────────────────────────────────────
 	// The ~840 MB / ~280 MB fine-tunes in static/models/** are EXCLUDED from CF assets (25 MiB/file limit)
