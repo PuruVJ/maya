@@ -101,6 +101,29 @@ export function wakeRegion(world: World, key: string, tick: number, idPrefix: st
 	return made;
 }
 
+/** WORLD PULSE (user) — fast-forward EVERY dormant region's aggregate to `tick` WITHOUT waking it, so the far
+ *  world keeps LIVING (populations relax toward carrying capacity + vigor evolves) instead of freezing until you
+ *  visit. Pure closed-form (Rust ff_targets/ff_gene), O(1) per region → microseconds for dozens of regions, and it
+ *  runs on the main thread between frames so it never blocks the worker's sim ticks. Scene calls it ~every 10 s. */
+export function fastForwardDormant(world: World, tick: number): void {
+	if (!world.regions) return;
+	const scale = worldAreaScale(world.objects);
+	for (const key in world.regions) {
+		const agg = world.regions[key];
+		const dtSec = (tick - agg.lastTick) / TICK_HZ;
+		if (dtSec <= 0) continue;
+		const c = agg.counts;
+		const adv = rustFfTargets(c.rabbit ?? 0, c.cat ?? 0, c.kangaroo ?? 0, c.person ?? 0, c.lion ?? 0, c.dinosaur ?? 0, scale, dtSec);
+		if (adv) {
+			const next: Record<string, number> = {};
+			FF_KINDS.forEach((k, i) => (next[k] = adv[i]));
+			agg.gene = rustFfGene(agg.gene, c, dtSec); // evolve vigor over the span BEFORE overwriting counts
+			agg.counts = next;
+		}
+		agg.lastTick = tick;
+	}
+}
+
 /** Per-cell streaming step (call when the player crosses a region): WAKE regions that just entered the active set,
  *  SLEEP regions with live creatures that just left it. Returns counts for diagnostics (0/0 if nothing changed). */
 export function streamRegions(world: World, px: number, pz: number, tick: number, idPrefix = 'rg'): { slept: number; woken: number } {

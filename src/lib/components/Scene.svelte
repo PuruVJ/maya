@@ -40,7 +40,7 @@
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { setRustObstacles, setRustPopScale, setRustRefuges } from '$lib/rustSim';
 	import { worldAreaScale } from '$lib/world';
-	import { streamRegions, regionOf } from '$lib/streaming';
+	import { streamRegions, regionOf, fastForwardDormant } from '$lib/streaming';
 	import { playerState } from '$lib/playerState.svelte';
 	import { heightAt } from '$lib/terrain';
 	import { inWater } from '$lib/water';
@@ -241,6 +241,7 @@
 	let lastRevealZ = NaN;
 	let lastObjLen = -1;
 	let lastRegion = ''; // player's region cell last frame → only stream when it changes (crossed a tile)
+	let lastPulseTick = 0; // last sim-tick we fast-forwarded the dormant world (the ~10 s "world pulse")
 	// LIGHTNING — the rainy 'fog' sky flickers with distant sheet lightning: a bright transient added to the
 	// ambient so the whole overcast scene lifts for a beat, then decays fast. No bolt geometry / no sound; the
 	// sudden brighten alone reads as a far storm. Gated to fog → other skies are untouched (flash stays 0).
@@ -514,6 +515,13 @@
 		if (rkey !== lastRegion) {
 			lastRegion = rkey;
 			streamRegions(world, px, pz, rustTick());
+		}
+		// WORLD PULSE: every ~10 s (300 sim ticks @30 Hz), fast-forward EVERY dormant region to now so the far world
+		// keeps living (grows toward carrying capacity + evolves) instead of freezing until visited. Cheap closed-form.
+		const simTick = rustTick();
+		if (simTick - lastPulseTick > 300) {
+			lastPulseTick = simTick;
+			fastForwardDormant(world, simTick);
 		}
 		const objLen = world.objects.length;
 		if (objLen !== lastObjLen || Number.isNaN(lastRevealX) || (px - lastRevealX) ** 2 + (pz - lastRevealZ) ** 2 > RECHECK_MOVE2) {
