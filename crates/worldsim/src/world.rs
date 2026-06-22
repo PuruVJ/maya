@@ -4735,4 +4735,80 @@ mod tests {
         assert!(na >= 3 && nb >= 3, "lost too many youths to measure");
         assert!(ma - mb > 0.5, "the settlements didn't diverge in custom (A={ma:.2}, B={mb:.2}) — culture isn't transmitting");
     }
+
+    // SCENARIO (emergent · FULL SYSTEM): the whole machine at once — people hunt+settle+dig wells+encultarate,
+    // rabbits graze+drink+flee, cats predate, the SEASON cycles into a dry peak AND a director drought hits, and
+    // BOTH feedback loops close (births → spawns, dug wells → new drink sources). Over a long run the world must
+    // stay ALIVE (no crash, no unbounded explosion) AND DIVERSE (the rabbit boldness polymorphism endures). This
+    // is the cross-feature regression guard: if any system starts fighting another, the band breaks here.
+    #[test]
+    fn scenario_full_world_stays_alive_and_diverse() {
+        let mut w = emergent_world(); // seasons ON by default → a dry season sweeps through mid-run
+        cluster(&mut w, Kind::Rabbit, 100, 0.0, 0.0, 70.0, 1000);
+        cluster(&mut w, Kind::Person, 24, 0.0, 0.0, 40.0, 3000);
+        cluster(&mut w, Kind::Cat, 6, 0.0, 0.0, 60.0, 6000);
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        let mut water: Vec<f64> = vec![140.0, 0.0, 10.0]; // a pond off to the side → people at origin are "dry" → they dig
+        w.set_water(&water);
+        let mut next_seed = 950_000i32;
+        let mut wells_dug = 0usize;
+        for t in 0..20000 {
+            w.step(DT);
+            // births → spawns (close the reproduction loop, exactly as the JS bridge does)
+            let births: Vec<f32> = w.births().to_vec();
+            for b in births.chunks_exact(11) {
+                let kind = crate::eco::kind_from_code(b[0] as u8);
+                let bi = w.spawn(Agent::new(b[1] as f64, b[2] as f64, next_seed, &opts_for(kind, next_seed)), kind, radius_of(kind), next_seed);
+                w.agents[bi].breed_cd = JUVENILE_CD;
+                w.agents[bi].gene = b[3] as f64;
+                w.agents[bi].age = 0.0;
+                w.set_lineage(bi, b[4] as u32, b[5] as u32);
+                w.set_genome(bi, b[6] as f64, b[7] as f64, b[8] as f64, b[9] as f64, b[10] as f64);
+                next_seed = next_seed.wrapping_add(1);
+            }
+            // dug wells → new drink sources (close the emergent-jobs feedback, exactly as Scene does)
+            let dug: Vec<f32> = w.wells().to_vec();
+            if !dug.is_empty() {
+                for wl in dug.chunks_exact(2) {
+                    water.extend_from_slice(&[wl[0] as f64, wl[1] as f64, 3.0]);
+                    wells_dug += 1;
+                }
+                w.set_water(&water);
+            }
+            if t == 12000 {
+                w.set_aridity(2.0); // the macro-director slams a hard drought down partway through
+            }
+            if t == 16500 {
+                w.set_aridity(1.0); // …then the rains return
+            }
+        }
+        let mut counts = [0usize; 6];
+        let (mut bold, mut caut, mut rss, mut rsq, mut rn) = (0usize, 0usize, 0.0, 0.0, 0usize);
+        for m in &w.agents {
+            if m.dead {
+                continue;
+            }
+            counts[m.kind as usize] += 1;
+            if matches!(m.kind, Kind::Rabbit) {
+                let s = m.weights.safety;
+                rss += s;
+                rsq += s * s;
+                rn += 1;
+                if s < 0.85 { bold += 1; }
+                if s > 1.15 { caut += 1; }
+            }
+        }
+        let total: usize = counts.iter().sum();
+        let rsd = if rn > 0 { (rsq / rn as f64 - (rss / rn as f64).powi(2)).max(0.0).sqrt() } else { 0.0 };
+        eprintln!("[full world] counts={counts:?} total={total} wells_dug={wells_dug} | rabbit bold={bold} caut={caut} sd={rsd:.2}");
+        // ALIVE — neither a crash nor an unbounded explosion
+        assert!(total > 30, "the whole-system world collapsed (total={total})");
+        assert!(total < 6000, "the whole-system world exploded unbounded (total={total})");
+        assert!(counts[Kind::Rabbit as usize] > 5, "the prey base died out under combined pressure");
+        // DIVERSE — the boldness polymorphism survived the full system + the drought
+        assert!(rsd > 0.05, "rabbit strategy diversity collapsed in the full system (sd={rsd:.2})");
+    }
 }
