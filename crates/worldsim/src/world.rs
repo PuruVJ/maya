@@ -195,6 +195,10 @@ const CARN_IDLE: f64 = 0.48; // the active-hunger stamina an idle predator settl
 // under the per-kind cap + not over-crowded → a baby is born between them; both parents pay energy + a cooldown.
 const BREED_ENERGY: f64 = 0.6; // fullness a parent needs to spare (lowered: 0.72 starved out reproduction → decline)
 const BREED_COOLDOWN: f64 = 30.0; // seconds before a parent can breed again — raised (was 10) so growth is GRADUAL (no caps now; a too-fast rate exploded the world to thousands in seconds)
+const BOND_W: f64 = 0.35; // pair-bond tether: a gentle pull toward a bonded mate (keeps the family together raising young)
+const BOND_REARING: f64 = 90.0; // seconds a bond holds before the "young have grown → may split" check kicks in
+const BOND_SPLIT_FRAC: f64 = 0.5; // chance a pair splits once the young mature (else they stay bonded for life)
+const CH_BONDSPLIT: i32 = 33; // RNG channel for the seeded split-or-stay roll
 const VITALITY_LERP: f64 = 0.004; // per-tick ease of the director's per-kind vitality toward its target (gentle drift)
 const RESCUE_N: usize = 6; // a species below this many alive → Mother Nature boosts its breeding hard (anti-extinction)
 // PER-KIND soft plateau (a TROPHIC PYRAMID): breeding RATE eases to 0 as a kind nears this × pop_scale → grows then
@@ -564,6 +568,9 @@ pub struct ManagedAgent {
     pub rival_time: f64,      // seconds crowded by a rival → ≥RIVAL_PATIENCE boils into a territorial fight
     pub bully: Option<usize>, // who last wounded it in a rival fight → it flees this one while spooked
     pub companion: bool,      // the player's pet → its leash tracks the player (follows) and it doesn't fear you
+    pub partner: Option<usize>, // BONDED mate (set at conception) → the pair sticks together while raising young,
+    // then MAY split once the young matures. Validated mutually (partner[partner]==self) so a recycled slot can't alias.
+    pub bond_age: f64,        // seconds the current bond has lasted → drives the "split when the young grows up" check
     pub hunting: bool,        // this apex is actively charging the PLAYER this tick → the view glares its eyes
     pub migrating: bool,      // a roamer steering toward another settlement this tick → surfaced to the HUD
     pub feeding: f64,         // seconds a predator stays put EATING a fresh kill (set on the catch) → it doesn't
@@ -693,6 +700,8 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         rival_time: 0.0,
         bully: None,
         companion: false,
+        partner: None,
+        bond_age: 0.0,
         hunting: false,
         migrating: false,
         feeding: 0.0,
@@ -1821,6 +1830,24 @@ impl World {
             if self.agents[i].fed_meat > 0.0 {
                 self.agents[i].fed_meat -= DT; // "recently ate meat" ebbs → a person must hunt another rabbit to keep breeding
             }
+            // PAIR-BOND lifecycle: a bond ages; once the young have grown (past BOND_REARING) the couple MAY split
+            // (seeded — some part, some stay for life). Also drop a bond whose partner died or is no longer mutual.
+            if let Some(p) = self.agents[i].partner {
+                let valid = p < self.agents.len() && p != i && !self.agents[p].dead && self.agents[p].partner == Some(i);
+                if !valid {
+                    self.agents[i].partner = None;
+                } else {
+                    self.agents[i].bond_age += DT;
+                    if self.agents[i].bond_age > BOND_REARING {
+                        // one seeded roll per bond (key on the lower index + a coarse time bucket → fires once-ish)
+                        let lo = i.min(p) as i32;
+                        if crate::simrng::rand(&[lo, (self.clock.tick / 600) as i32, CH_BONDSPLIT]) < BOND_SPLIT_FRAC {
+                            self.agents[i].partner = None;
+                            self.agents[p].partner = None; // split cleanly: both go free
+                        }
+                    }
+                }
+            }
             if self.agents[i].build_cd > 0.0 {
                 self.agents[i].build_cd -= DT; // settler's between-builds cooldown ebbs
             }
@@ -1932,6 +1959,12 @@ impl World {
                 self.agents[j].breed_cd = BREED_COOLDOWN / vit;
                 self.agents[i].energy = (self.agents[i].energy - BREED_COST).max(0.0);
                 self.agents[j].energy = (self.agents[j].energy - BREED_COST).max(0.0);
+                // PAIR-BOND: the couple sticks together to raise this litter (tether in flock); the timer resets so
+                // they stay bonded through gestation + rearing, then MAY split once the young grows up (metabolism pass).
+                self.agents[i].partner = Some(j);
+                self.agents[j].partner = Some(i);
+                self.agents[i].bond_age = 0.0;
+                self.agents[j].bond_age = 0.0;
             }
         }
 
@@ -2329,6 +2362,21 @@ impl World {
                 fx += ang.cos() * w;
                 fz += ang.sin() * w;
                 migrating = true;
+            }
+        }
+
+        // PAIR-BOND TETHER — a bonded mate keeps close to its partner (the family stays together raising young).
+        // Validated MUTUALLY (partner[partner]==self) so a recycled/reordered slot can't make it chase a stranger.
+        if let Some(p) = m.partner {
+            if p < agents.len() && p != i && !agents[p].dead && agents[p].partner == Some(i) {
+                let dx = agents[p].agent.x - ax;
+                let dz = agents[p].agent.z - az;
+                let d = dx.hypot(dz);
+                if d > 1.5 {
+                    // only pull when they've drifted apart (so they don't crowd-shove on top of each other)
+                    fx += dx / d * a_max * BOND_W;
+                    fz += dz / d * a_max * BOND_W;
+                }
             }
         }
 
@@ -3835,6 +3883,25 @@ mod tests {
         let d1: f64 = live.iter().map(|&i| near(&w, i)).sum::<f64>() / live.len().max(1) as f64;
         eprintln!("[migration] mean dist to nearest settlement {d0:.0} m → {d1:.0} m ({} roamers)", live.len());
         assert!(d1 < d0 - 15.0, "roamers didn't migrate toward a settlement ({d0:.0}→{d1:.0} m)");
+    }
+
+    // SCENARIO: a bonded pair sticks together (the tether pulls them close while raising young).
+    #[test]
+    fn bonded_mates_stick_together() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        let a = spawn_kind(&mut w, Kind::Rabbit, 0.0, 0.0, 2);
+        let b = spawn_kind(&mut w, Kind::Rabbit, 9.0, 0.0, 3);
+        w.agents[a].partner = Some(b); // bond them directly (conception does this in play)
+        w.agents[b].partner = Some(a);
+        let d0 = 9.0_f64;
+        for t in 1..=400 {
+            w.tick_once(t); // 400 ticks ≈ 13 s, well under BOND_REARING → no split this window
+        }
+        let d1 = (w.agents[a].agent.x - w.agents[b].agent.x).hypot(w.agents[a].agent.z - w.agents[b].agent.z);
+        eprintln!("[bond] pair gap {d0:.0} → {d1:.1} m");
+        assert!(w.agents[a].partner == Some(b), "the bond holds within the rearing window");
+        assert!(d1 < d0 - 2.0, "bonded mates pull together ({d0:.0}→{d1:.1} m)");
     }
 
     // SCENARIO: a meat-hungry PERSON stalks + catches a nearby rabbit (people hunt rabbits for meat; the rabbit

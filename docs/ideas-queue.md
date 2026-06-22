@@ -10,6 +10,17 @@ Newest ideas added at the top of "Queued". Move items to "Shipped" with the comm
 
 ## 🟢 Queued (priority order — top = next)
 
+### EF11. PLANNED SETTLEMENTS — a matured house-cluster upgrades into a designed town (BIG, top of mind)
+User: settlements must be built to a PLAN, not random. Past a housing threshold a cluster gains a well, a
+perimeter fence, a watchtower, ROADS connecting things, etc. Build a set of ~40 "make-city" layouts, varied by
+SIZE; when an emergent settlement gets big (full of houses) it SNAPS into a planned, well-built town.
+- Design fork (asked): (a) a deterministic PLANNER `settlementPlan(center,size,seed)` that lays out radial/grid
+  streets + houses-along-roads + central well/plaza + watchtower + perimeter fence (effectively unlimited varied
+  planned towns, maintainable) — RECOMMENDED; or (b) ~40 hand-authored fixed templates (curated, more control,
+  much more authoring). Either way needs NEW renderable prop kinds: well, watchtower, road segment (Prop/new
+  components) + the upgrade trigger in Scene (detect a ≥N-house cluster, replace the ad-hoc houses with the plan,
+  tag it `planned` so it doesn't re-fire) + keep player/LLM builds exempt. Visual → needs the user's eye to tune.
+
 ### 🌊 2026-06-22 idea-flood (emergent-world session) — captured, awaiting priority
 Done this session: **emergent brain is the world default + on par with Manual** (scenario-tested), **genome spread
 widened** (0.3‥1.7), **player IMMUNITY** (Sim sets it on — no predator hunts/menaces you, danger stays 0). The rest,
