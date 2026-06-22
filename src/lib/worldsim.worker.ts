@@ -40,6 +40,7 @@ interface RustSim {
 	age_means(): Float32Array; // mean age fraction (0..1) per kind → the HUD age readout
 	set_player_immune(immune: number): void;
 	set_lineage(i: number, pfamA: number, pfamB: number): void; // newborn's parent lineage ids → incest avoidance
+	set_genome(i: number, food: number, safety: number, social: number, rest: number, industry: number): void; // inherited behaviour genome
 	step(dt: number): void;
 	count(): number;
 	danger(): number;
@@ -60,7 +61,7 @@ interface WasmModule {
 }
 
 // the main thread sends one of these; we reply with 'ready' / 'failed' / 'snap'
-type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number };
+type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number; genome: number[] | null };
 type InMsg =
 	| { type: 'init'; base: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
@@ -144,6 +145,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 		if (s.juvenile) sim.set_breed_cooldown(idx, sim.juvenile_cd()); // a newborn → must mature before it breeds
 		if (s.gene !== 1) sim.set_gene(idx, s.gene); // a bred baby's inherited vigor (genetics)
 		if (s.pfamA || s.pfamB) sim.set_lineage(idx, s.pfamA, s.pfamB); // a bred baby's parentage → incest avoidance
+		if (s.genome) sim.set_genome(idx, s.genome[0], s.genome[1], s.genome[2], s.genome[3], s.genome[4]); // inherited genome
 	}
 
 	sim.set_player(d.px, d.pz);
@@ -162,7 +164,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 	const sb = behaviors.slice();
 	const sp = progress.slice();
 	const nb = sim.birth_count();
-	const births = nb > 0 ? new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 6).slice() : new Float32Array(0); // [kc,x,z,gene,motherFam,fatherFam]×nb
+	const births = nb > 0 ? new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 11).slice() : new Float32Array(0); // [kc,x,z,gene,momFam,dadFam,g0..g4]×nb
 	const nbd = sim.build_count();
 	const builds = nbd > 0 ? new Float32Array(wasm.memory.buffer, sim.builds_ptr(), nbd * 2).slice() : new Float32Array(0); // [x,z]×nbd
 	const ne = sim.event_count();

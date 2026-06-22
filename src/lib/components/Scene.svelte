@@ -254,7 +254,7 @@
 		// its renderer + spawns into the sim (as a maturing juvenile). The per-kind cap keeps this bounded.
 		const babies = drainBirths();
 		for (const b of babies) {
-			world.objects.push({ id: babyPrefix + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene, pfamA: b.pfamA, pfamB: b.pfamB });
+			world.objects.push({ id: babyPrefix + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene, pfamA: b.pfamA, pfamB: b.pfamB, genome: b.genome });
 		}
 
 		// EMERGENT CITIES: place the houses settlers raised this frame. Snap to an 8 m grid (→ aligned blocks),

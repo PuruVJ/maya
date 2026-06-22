@@ -18,6 +18,7 @@ export interface WorldObject {
 	gene?: number; // inherited vigor (≈1.0) from its parents → scales its speed in the sim (genetics/evolution)
 	pfamA?: number; // mother's lineage id (from the Rust birth) → set on the sim agent at spawn for incest avoidance
 	pfamB?: number; // father's lineage id
+	genome?: number[]; // inherited behaviour genome (5 weights, from the Rust birth) → set on the sim agent at spawn
 	keep?: boolean; // PLAYER/LLM-placed → never reclaimed by habitation decay (only emergent NPC homes can rot away)
 }
 

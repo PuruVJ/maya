@@ -592,6 +592,8 @@ pub struct ManagedAgent {
     pub pfam_a: u32,          // mother's fam (0 = founder/unknown)
     pub pfam_b: u32,          // father's fam (0 = founder/unknown)
     pub unborn_dad_fam: u32,  // the carried litter's father's fam, stored at conception (the sire may wander off/die before delivery)
+    pub unborn_genome: Genome,// the carried litter's inherited behaviour genome (blend of both parents ± mutation),
+    // stored at conception → ferried to the babies via the births buffer so emergent STRATEGIES evolve across births.
 }
 
 /// Build a fully-seeded managed agent from its kind (so callers don't repeat the eco wiring).
@@ -716,6 +718,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         pfam_a: 0,
         pfam_b: 0,
         unborn_dad_fam: 0,
+        unborn_genome: Genome::NEUTRAL,
     }
 }
 
@@ -966,6 +969,14 @@ impl World {
         if let Some(m) = self.agents.get_mut(i) {
             m.pfam_a = pfam_a;
             m.pfam_b = pfam_b;
+        }
+    }
+
+    /// Apply a bred baby's inherited behaviour GENOME (the 5 utility weights from the births buffer) → its emergent
+    /// strategy is its parents' blend, so lineages evolve cautious/bold/industrious traits across generations.
+    pub fn set_genome(&mut self, i: usize, food: f64, safety: f64, social: f64, rest: f64, industry: f64) {
+        if let Some(m) = self.agents.get_mut(i) {
+            m.weights = Genome { food, safety, social, rest, industry };
         }
     }
 
@@ -1929,6 +1940,7 @@ impl World {
             let kc = kind as usize;
             let (mx, mz) = (self.agents[i].agent.x, self.agents[i].agent.z);
             let (pfam_a, pfam_b) = (self.agents[i].fam, self.agents[i].unborn_dad_fam); // the litter's parents (mother, sire)
+            let g = self.agents[i].unborn_genome; // the litter's inherited behaviour genome (ferried to JS → set_genome)
             let born = litter_size(kind, self.agents[i].seed_id, self.clock.tick as i32); // NO cap — deliver the FULL litter; food/predation/old-age are the natural limits
             for b in 0..born {
                 // each littermate inherits the carried vigor ± a touch more mutation, so siblings vary a little
@@ -1940,14 +1952,19 @@ impl World {
                 let rad = 0.4 + 0.25 * b as f64; // siblings ring out a touch so they don't all share one spot
                 let bx = mx + ang.cos() * rad;
                 let bz = mz + ang.sin() * rad;
-                // births stride = 6: [kindCode, x, z, gene, motherFam, fatherFam]. The parent fams ride along so JS
-                // can stamp the baby's lineage (set_lineage) → incest avoidance survives the JS respawn round-trip.
+                // births stride = 11: [kindCode, x, z, gene, motherFam, fatherFam, g.food, g.safety, g.social, g.rest,
+                // g.industry]. Parent fams → set_lineage (incest); the 5 genome weights → set_genome (strategy evolution).
                 self.births.push(kc as f32);
                 self.births.push(bx as f32);
                 self.births.push(bz as f32);
                 self.births.push(baby_gene as f32);
                 self.births.push(pfam_a as f32);
                 self.births.push(pfam_b as f32);
+                self.births.push(g.food as f32); // …+ the 5 behaviour-genome weights (stride 11) → JS set_genome on spawn
+                self.births.push(g.safety as f32);
+                self.births.push(g.social as f32);
+                self.births.push(g.rest as f32);
+                self.births.push(g.industry as f32);
                 self.events.extend_from_slice(&[EV_BIRTH, kc as f32, bx as f32, bz as f32]);
                 pop[kc] += 1;
             }
@@ -1967,6 +1984,8 @@ impl World {
                 self.agents[mom].unborn_gene = (((self.agents[i].gene + self.agents[j].gene) * 0.5) + mu).clamp(GENE_MIN, GENE_MAX);
                 let dad = if mom == i { j } else { i };
                 self.agents[mom].unborn_dad_fam = self.agents[dad].fam; // remember the sire's lineage for the litter's parentage
+                // INHERIT the behaviour genome: blend of both parents ± seeded mutation → strategies evolve across births
+                self.agents[mom].unborn_genome = Genome::inherit(&self.agents[i].weights, &self.agents[j].weights, self.agents[i].seed_id, self.agents[j].seed_id, self.clock.tick as i32);
                 self.agents[mom].pregnant = gestation(self.agents[mom].kind);
                 self.events.extend_from_slice(&[EV_CONCEIVE, kc as f32, self.agents[mom].agent.x as f32, self.agents[mom].agent.z as f32]);
                 let vit = self.vitality[kc]; // director boost → shorter recovery between litters
@@ -3106,7 +3125,7 @@ mod tests {
         for t in 1..=320 {
             w.tick_once(t);
         }
-        let babies = w.births().len() / 6; // 6 floats/birth: kc,x,z,gene,motherFam,fatherFam
+        let babies = w.births().len() / 11; // 11 floats/birth: kc,x,z,gene,motherFam,fatherFam,g0..g4
         assert!(babies >= 3, "a rabbit pregnancy delivers a LITTER (3–5); got {babies}");
         assert_eq!(w.births()[0], 0.0, "the litter is rabbits (kind code 0)");
         // both parents are on a long breed cooldown → just the one litter this window, not a runaway
@@ -3209,6 +3228,25 @@ mod tests {
         // two mutation steps apply (at conception + per-littermate), each ±GENE_MUT
         assert!((baby_gene - 1.4).abs() <= 2.0 * GENE_MUT + 1e-6, "baby inherits ~the parents' vigor 1.4 (±mutation); got {baby_gene}");
         assert!((GENE_MIN..=GENE_MAX).contains(&baby_gene), "gene clamped in range");
+    }
+
+    #[test]
+    fn offspring_inherit_behaviour_genome() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
+        for i in [a, b] {
+            w.agents[i].weights.food = 1.6; // a bold-foraging lineage
+            w.agents[i].age = w.agents[i].lifespan * 0.4; // mature adults
+        }
+        for t in 1..=320 {
+            w.tick_once(t);
+        }
+        let births = w.births();
+        assert!(births.len() >= 11, "a litter delivered");
+        let baby_food = births[6] as f64; // g.food at offset 6 in the stride-11 record
+        assert!((baby_food - 1.6).abs() <= 0.25, "baby inherits ~the parents' food weight 1.6 (±mutation); got {baby_food}");
     }
 
     #[test]
@@ -3546,10 +3584,10 @@ mod tests {
         w.agents[mom].unborn_gene = 1.0;
         w.agents[mom].pregnant = 0.001; // delivering essentially now
         w.tick_once(1);
-        let births = w.births(); // flat [kindCode, x, z, gene, motherFam, fatherFam, …]
-        assert!(births.len() >= 6, "at least one baby delivered (got {} floats)", births.len());
+        let births = w.births(); // flat stride 11: [kc, x, z, gene, motherFam, fatherFam, g0..g4]
+        assert!(births.len() >= 11, "at least one baby delivered (got {} floats)", births.len());
         let mut positions = Vec::new();
-        for chunk in births.chunks_exact(6) {
+        for chunk in births.chunks_exact(11) {
             let (x, z) = (chunk[1], chunk[2]);
             let d = ((x - mx).powi(2) + (z - mz).powi(2)).sqrt();
             assert!(d < 3.0, "a newborn is born right by its mother (d {d:.2})");
@@ -3683,13 +3721,14 @@ mod tests {
             }
             // materialise this step's newborns (what JS does between steps) so reproduction replenishes the world
             let births: Vec<f32> = w.births().to_vec();
-            for b in births.chunks_exact(6) {
+            for b in births.chunks_exact(11) {
                 let kind = crate::eco::kind_from_code(b[0] as u8);
                 let r = radius_of(kind);
                 let bi = w.spawn(Agent::new(b[1] as f64, b[2] as f64, next_seed, &opts_for(kind, next_seed)), kind, r, next_seed);
                 w.agents[bi].breed_cd = JUVENILE_CD; // a newborn matures before it can breed
                 w.agents[bi].gene = b[3] as f64;
                 w.set_lineage(bi, b[4] as u32, b[5] as u32); // parent fams → incest avoidance
+                w.set_genome(bi, b[6] as f64, b[7] as f64, b[8] as f64, b[9] as f64, b[10] as f64); // inherited genome
                 next_seed = next_seed.wrapping_add(1);
             }
             for (k, &i) in idx.iter().enumerate() {
@@ -3760,13 +3799,14 @@ mod tests {
         for t in 0..ticks {
             w.step(DT);
             let births: Vec<f32> = w.births().to_vec();
-            for b in births.chunks_exact(6) {
+            for b in births.chunks_exact(11) {
                 let kind = crate::eco::kind_from_code(b[0] as u8);
                 let bi = w.spawn(Agent::new(b[1] as f64, b[2] as f64, next_seed, &opts_for(kind, next_seed)), kind, radius_of(kind), next_seed);
                 w.agents[bi].breed_cd = JUVENILE_CD;
                 w.agents[bi].gene = b[3] as f64;
                 w.agents[bi].age = 0.0;
                 w.set_lineage(bi, b[4] as u32, b[5] as u32); // parent fams → incest avoidance
+                w.set_genome(bi, b[6] as f64, b[7] as f64, b[8] as f64, b[9] as f64, b[10] as f64); // inherited genome
                 next_seed = next_seed.wrapping_add(1);
             }
             if t % 30 == 0 {

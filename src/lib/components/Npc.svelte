@@ -42,6 +42,7 @@
 		if (obj.juvenile) m.juvenile = true; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown
 		if (obj.gene != null) m.gene = obj.gene; // inherited vigor → rustSim scales its speed at spawn (genetics)
 		if (obj.pfamA != null) ((m.pfamA = obj.pfamA), (m.pfamB = obj.pfamB)); // parentage → rustSim sets lineage (incest avoidance)
+		if (obj.genome) m.genome = obj.genome; // inherited behaviour genome → rustSim set_genome at spawn (evolution)
 		return m;
 	});
 	$effect(() => {

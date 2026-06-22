@@ -93,6 +93,7 @@ export interface ManagedAgent {
 	gene?: number; // inherited VIGOR (≈1.0; scales speed) — ferried from the Rust birth → set on the sim agent at spawn
 	pfamA?: number; // mother's lineage id — ferried from the Rust birth → set_lineage at spawn (incest avoidance)
 	pfamB?: number; // father's lineage id
+	genome?: number[]; // inherited behaviour genome (5 weights) — ferried from the Rust birth → set_genome at spawn
 }
 
 /** Build a fully-seeded managed agent from its kind (so components don't repeat the eco wiring). The Rust sim

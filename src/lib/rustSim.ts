@@ -28,7 +28,7 @@ const KIND_NAME = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] as
 const BEHAVIORS = ['wander', 'pause', 'lookAround', 'groom', 'sit', 'pounce'] as const;
 
 // ── worker message shapes (mirror worldsim.worker.ts) ───────────────────────────────────────────────
-type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number };
+type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number; genome: number[] | null };
 type Snap = {
 	type: 'snap';
 	seq: number;
@@ -55,7 +55,7 @@ type OutMsg =
 type WorkerMsg = { type: 'ready' } | { type: 'failed'; error: string } | Snap;
 
 // newborns from the Rust breeding pass (kind + position) → Scene drains them into world.objects each frame
-export type Birth = { kind: string; x: number; z: number; gene: number; pfamA: number; pfamB: number };
+export type Birth = { kind: string; x: number; z: number; gene: number; pfamA: number; pfamB: number; genome: number[] };
 let pendingBirths: Birth[] = [];
 /** Pull (and clear) the babies bred since the last call — Scene turns each into a world-object. */
 export function drainBirths(): Birth[] {
@@ -239,9 +239,11 @@ export function tickRust(dt: number): void {
 		if (s!.ageMeans) lastAgeMeans = new Float32Array(s!.ageMeans); // mean age fraction per kind → HUD age readout
 		// drain this snapshot's NEWBORNS (Rust bred them) → Scene turns each into a world-object (which mounts +
 		// spawns back into the sim as a juvenile). Flat [kindCode,x,z,…].
-		const nb = s!.births.length / 6; // [kindCode, x, z, gene, motherFam, fatherFam] per birth
-		for (let k = 0; k < nb; k++)
-			pendingBirths.push({ kind: KIND_NAME[s!.births[k * 6]] ?? 'rabbit', x: s!.births[k * 6 + 1], z: s!.births[k * 6 + 2], gene: s!.births[k * 6 + 3], pfamA: s!.births[k * 6 + 4], pfamB: s!.births[k * 6 + 5] });
+		const nb = s!.births.length / 11; // [kc, x, z, gene, motherFam, fatherFam, g0..g4] per birth
+		for (let k = 0; k < nb; k++) {
+			const o = k * 11;
+			pendingBirths.push({ kind: KIND_NAME[s!.births[o]] ?? 'rabbit', x: s!.births[o + 1], z: s!.births[o + 2], gene: s!.births[o + 3], pfamA: s!.births[o + 4], pfamB: s!.births[o + 5], genome: [s!.births[o + 6], s!.births[o + 7], s!.births[o + 8], s!.births[o + 9], s!.births[o + 10]] });
+		}
 		// drain HOUSE-BUILD requests (settlers) → Scene places each as a house world-object. Flat [x,z,…].
 		const nbd = s!.builds.length / 2;
 		for (let k = 0; k < nbd; k++) pendingBuilds.push({ x: s!.builds[k * 2], z: s!.builds[k * 2 + 1] });
@@ -279,7 +281,7 @@ export function tickRust(dt: number): void {
 		const slot = freeSlots.pop() ?? nextSlot++;
 		slotOf.set(m, slot);
 		tracked[slot] = m;
-		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile, gene: m.gene ?? 1, pfamA: m.pfamA ?? 0, pfamB: m.pfamB ?? 0 });
+		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile, gene: m.gene ?? 1, pfamA: m.pfamA ?? 0, pfamB: m.pfamB ?? 0, genome: m.genome ?? null });
 	});
 
 	// Mirror a fresh snapshot onto the live roster.

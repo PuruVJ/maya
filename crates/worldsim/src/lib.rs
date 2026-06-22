@@ -206,11 +206,11 @@ mod wasm_api {
         pub fn juvenile_cd(&self) -> f64 {
             self.world.juvenile_cd()
         }
-        /// Newborns from the last step(): count of births (each is [kindCode, x, z, gene, motherFam, fatherFam]).
+        /// Newborns from the last step(): count (each is [kc, x, z, gene, motherFam, fatherFam, g0..g4] — 11 floats).
         pub fn birth_count(&self) -> usize {
-            self.world.births().len() / 6
+            self.world.births().len() / 11
         }
-        /// Pointer to the flat births buffer [kindCode, x, z, gene, motherFam, fatherFam, …] (length = birth_count()*6).
+        /// Pointer to the flat births buffer [kc, x, z, gene, motherFam, fatherFam, g0..g4, …] (len = birth_count()*11).
         pub fn births_ptr(&self) -> *const f32 {
             self.world.births().as_ptr()
         }
@@ -218,6 +218,11 @@ mod wasm_api {
         /// so the kinship check refuses a future parent/child/sibling pairing (incest avoidance, all kinds).
         pub fn set_lineage(&mut self, i: usize, pfam_a: u32, pfam_b: u32) {
             self.world.set_lineage(i, pfam_a, pfam_b);
+        }
+        /// Apply a bred baby's inherited behaviour GENOME (5 utility weights from the births buffer) → emergent
+        /// strategies evolve across generations.
+        pub fn set_genome(&mut self, i: usize, food: f64, safety: f64, social: f64, rest: f64, industry: f64) {
+            self.world.set_genome(i, food, safety, social, rest, industry);
         }
         /// House-build requests from the last step(): count (each is [x, z]).
         pub fn build_count(&self) -> usize {
