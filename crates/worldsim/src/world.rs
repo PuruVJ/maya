@@ -4216,4 +4216,5 @@ mod tests {
             "boldness niche collapsed (bold={bold}, cautious={cautious}, mean={mean:.2}) — one strategy swept; this is drift, not emergence"
         );
     }
+
 }

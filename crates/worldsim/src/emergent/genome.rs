@@ -68,6 +68,11 @@ impl Genome {
         (1.6 - 0.6 * self.safety).clamp(0.7, 1.6)
     }
 
+    // NOTE (social niche, deferred): a SOCIAL axis (herd↔loner) coexists on its own, but when it ALSO spends
+    // reproductive rate it COUPLES with `breed_haste` through population turnover and destabilises the boldness
+    // polymorphism (one axis collapses). A second niche axis needs a DECOUPLED fitness currency (e.g. herd
+    // dilution = predator straggler-targeting on the survival side, not more breeding). Design with the user.
+
     /// A litter's inherited genome: the average of both parents' weights, ± a seeded mutation per weight,
     /// clamped to a sane band. Same shape as the vigor gene's inheritance, so the two evolve in lockstep.
     pub fn inherit(a: &Genome, b: &Genome, seed_a: i32, seed_b: i32, tick: i32) -> Genome {
