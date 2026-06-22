@@ -20,6 +20,8 @@ const CH_GENOME_MUT: i32 = 75;
 const W_MIN: f64 = 0.25;
 const W_MAX: f64 = 2.2;
 const W_MUT: f64 = 0.1; // ± mutation magnitude per birth (wider than the vigor gene's 0.05 → strategies spread fast)
+const W_JACKPOT_P: f64 = 0.07; // chance a birth rolls a LARGE mutation (anti-fixation → keeps lost morphs returning)
+const W_JACKPOT: f64 = 0.55; // ± magnitude of that rare large jump (spans ~half the weight band in one step)
 
 #[derive(Clone, Copy, Debug)]
 pub struct Genome {
@@ -68,20 +70,24 @@ impl Genome {
         (1.6 - 0.6 * self.safety).clamp(0.7, 1.6)
     }
 
-    // NOTE (social niche, deferred — measured, not guessed): the SOCIAL axis (herd↔loner) does NOT robustly
-    // co-exist alongside boldness under predation. Tried both a position-based straggler bias and a gene-based
-    // herd-dilution, scanning the strength 0.3‥1.6: at every value ONE axis collapsed (boldness swept to all-bold
-    // the moment any dilution existed; social flipped chaotically herd↔loner with the weight). Root cause: BOTH
-    // axes spend the SAME currencies — one predator pressure + one breeding bottleneck — so the system finds a
-    // single joint optimum instead of two independent polymorphisms. A second axis needs a genuinely INDEPENDENT
-    // selective pressure (a distinct resource or hazard) — its natural home is the multi-resource economy rung,
-    // NOT a standalone tuning knob. `social` still biases the Follow primitive; it's just not yet a fitness niche.
+    // SOCIAL niche — RESOLVED via WATER. It first failed to co-exist alongside boldness when it spent the SAME
+    // currencies (predation/breeding) → one joint optimum. The fix was an INDEPENDENT selective pressure: thirst.
+    // Herders navigate to water reliably (herd knowledge → survive thirst) while loners risk it but breed freely
+    // (low crowd). Because boldness spends predation and social spends thirst, the two polymorphisms now hold at
+    // once (scenario_emergent_social_niche_via_water). The lever lives in world.rs (thirst-seek × herd_nav).
 
     /// A litter's inherited genome: the average of both parents' weights, ± a seeded mutation per weight,
     /// clamped to a sane band. Same shape as the vigor gene's inheritance, so the two evolve in lockstep.
     pub fn inherit(a: &Genome, b: &Genome, seed_a: i32, seed_b: i32, tick: i32) -> Genome {
         let blend = |x: f64, y: f64, k: i32| {
-            let mu = (crate::simrng::rand(&[seed_a, seed_b, tick, CH_GENOME_MUT, k]) - 0.5) * 2.0 * W_MUT;
+            let mut mu = (crate::simrng::rand(&[seed_a, seed_b, tick, CH_GENOME_MUT, k]) - 0.5) * 2.0 * W_MUT;
+            // MUTATION JACKPOT — rarely (~7%) a much larger jump. This is what keeps a strategy that selection has
+            // driven to local extinction from being GONE for good (the absorbing-boundary problem): a bold lineage
+            // occasionally throws a cautious pup and vice-versa, so mutation-selection balance holds BOTH morphs
+            // alive indefinitely and the polymorphism is seed-robust + long-run stable, not a lucky transient.
+            if crate::simrng::rand(&[seed_a, seed_b, tick, CH_GENOME_MUT, k + 100]) < W_JACKPOT_P {
+                mu += (crate::simrng::rand(&[seed_a, seed_b, tick, CH_GENOME_MUT, k + 200]) - 0.5) * 2.0 * W_JACKPOT;
+            }
             ((x + y) * 0.5 + mu).clamp(W_MIN, W_MAX)
         };
         Genome {

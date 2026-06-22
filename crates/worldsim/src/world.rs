@@ -407,6 +407,7 @@ const DRINK_RATE: f64 = 0.5; // /s hydration refilled while at a water edge (~2 
 const THIRST_DAMAGE: f64 = 0.04; // /s health bleeds while parched (slightly gentler than starvation; recoverable)
 const THIRST_SEEK_W: f64 = 1.3; // steering weight pulling a thirsty animal toward the nearest water (ramps with thirst)
 const BREED_HYDRATION: f64 = 0.3; // a parched animal (below this) can't breed → thirst regulates population, not just kills
+const APOSTATIC_W: f64 = 6.0; // strength of the search-image bias toward the common morph → frequency-dependent predation
 
 // ── GENETICS (evolution) ────────────────────────────────────────────────────────────────────────────────────
 // A baby's VIGOR gene = the average of its parents' genes, ± a small mutation. Vigor scales max speed, so
@@ -837,6 +838,9 @@ pub struct World {
     pop_scale: f64,                // world-AREA multiplier for prey caps (fed from JS: bigger world → more life)
     person_pop: usize,             // last tick's live PERSON count → drives low-pop BANDING (truce + gather, see PERSON_BAND_LOW)
     kind_pop: [usize; 6],          // last tick's live count per Kind → predators prefer ABUNDANT prey (prey-switching)
+    morph_mean: [f64; 6],          // last tick's MEAN boldness (safety weight) per Kind → APOSTATIC predation: hunters
+    // over-target the COMMON morph (search image), which culls the majority → negative frequency dependence that
+    // keeps a bold↔cautious polymorphism STABLE & seed-robust instead of one strategy drifting to fixation.
     person_banding: bool,          // LATCHED low-pop survival truce (hysteresis PERSON_BAND_LOW↑PERSON_BAND_RELEASE): no infighting, gather up
     vitality: [f64; 6],            // per-kind BREEDING vigour, set by the JS "Mother Nature" director: >1 a struggling
     // species breeds harder (lower fullness bar + shorter cooldown) to recover; <1 a booming one eases off. 1 = neutral.
@@ -886,6 +890,7 @@ impl World {
             pop_scale: 1.0,
             person_pop: 0,
             kind_pop: [0; 6],
+            morph_mean: [1.0; 6],
             person_banding: false,
             vitality: [1.0; 6],
             forces: Vec::new(),
@@ -1311,6 +1316,7 @@ impl World {
         self.seek_grid.clear();
         let mut people = 0usize;
         let mut kind_pop = [0usize; 6];
+        let mut morph_sum = [0.0f64; 6]; // Σ safety weight per kind → mean = the apostatic search-image reference
         for (i, m) in self.agents.iter().enumerate() {
             if m.dead {
                 // a FRESH carcass still goes into the SEEK grid so a hungry scavenger can find it (the dead-check in
@@ -1321,6 +1327,7 @@ impl World {
                 continue;
             }
             kind_pop[m.kind as usize] += 1; // live per-kind census → predators prefer ABUNDANT prey (see target())
+            morph_sum[m.kind as usize] += m.weights.safety;
             if matches!(m.kind, Kind::Person) {
                 people += 1;
             }
@@ -1328,6 +1335,9 @@ impl World {
             self.seek_grid.insert(m.agent.x, m.agent.z, i as u32);
         }
         self.kind_pop = kind_pop;
+        for k in 0..6 {
+            self.morph_mean[k] = if kind_pop[k] > 0 { morph_sum[k] / kind_pop[k] as f64 } else { 1.0 };
+        }
         // hysteresis: a dwindling people close ranks (truce + gather) at/below LOW, only release past RELEASE.
         self.person_pop = people;
         if self.person_banding {
@@ -2661,7 +2671,14 @@ impl World {
                 // kind that's ABUNDANT is "confirmed supply" → more attractive, so predators preferentially crop the
                 // booming species back down (a natural, emergent regulator on prey explosions).
                 let abundance = 1.0 + ABUNDANCE_W * (self.kind_pop[self.agents[j].kind as usize] as f64 / ABUNDANCE_NORM).min(1.0);
-                let s = prize(self.agents[j].kind) * abundance / (d2.max(1.0) * (1.0 + COMPETE_W * self.transient[j].hunted_by as f64));
+                // APOSTATIC predation — the hunter forms a search image for the COMMON morph: a prey on the same side
+                // of its kind's mean boldness as the majority is over-targeted. This culls whichever strategy is
+                // winning → negative frequency dependence that pins the bold↔cautious polymorphism (seed-robust).
+                // Both factors are 0 at the neutral genome, so Manual mode (all-neutral) is unaffected.
+                let kj = self.agents[j].kind as usize;
+                let dev = (self.morph_mean[kj] - 1.0) * (self.agents[j].weights.safety - 1.0); // >0 → prey is the common morph
+                let apostatic = (1.0 + APOSTATIC_W * dev).max(0.3);
+                let s = prize(self.agents[j].kind) * abundance * apostatic / (d2.max(1.0) * (1.0 + COMPETE_W * self.transient[j].hunted_by as f64));
                 if s > self.transient[i].prey_score {
                     self.transient[i].prey = Some(j);
                     self.transient[i].prey_score = s;
@@ -4362,7 +4379,8 @@ mod tests {
     fn scenario_emergent_social_niche_via_water() {
         let mut w = emergent_world();
         cluster(&mut w, Kind::Rabbit, 120, 0.0, 0.0, 35.0, 1000);
-        cluster(&mut w, Kind::Cat, 8, 0.0, 0.0, 50.0, 6000);
+        cluster(&mut w, Kind::Cat, 4, 0.0, 0.0, 50.0, 6000); // light predation — this test isolates the WATER/social
+        // niche; with apostatic predation now on, 8 cats + thirst treks overwhelmed the herd. 4 keeps it survivable.
         w.set_water(&[80.0, 0.0, 8.0]); // a single pond ~70 m from the herd's edge → reaching it is a real errand
         let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
         for (i, s) in seeds.into_iter().enumerate() {
@@ -4388,5 +4406,83 @@ mod tests {
         assert!(n >= 20, "rabbit population crashed to {n} with distant water");
         assert!(herd >= 2 && lone >= 2, "social niche collapsed (herd={herd}, loner={lone}) — the water channel didn't decouple it");
         assert!(bold_sd > 0.05, "boldness froze to a single strategy (sd={bold_sd:.2}) — should still vary even if the waterhole leans it cautious");
+    }
+
+    // helper: run the boldness arena (rabbits + cats, NO water → isolates the predation channel) from a given
+    // founder-seed base for `ticks`, then count the surviving rabbits' boldness cohorts. Returns (n, bold, cautious).
+    fn run_boldness_arena(seed0: i32, ticks: usize) -> (usize, usize, usize) {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 120, 0.0, 0.0, 80.0, seed0);
+        cluster(&mut w, Kind::Cat, 8, 0.0, 0.0, 60.0, seed0 + 5000);
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        run_pop(&mut w, ticks);
+        let (mut bold, mut caut, mut n) = (0usize, 0usize, 0usize);
+        for m in &w.agents {
+            if m.dead || m.kind != Kind::Rabbit {
+                continue;
+            }
+            n += 1;
+            if m.weights.safety < 0.85 { bold += 1; }
+            if m.weights.safety > 1.15 { caut += 1; }
+        }
+        (n, bold, caut)
+    }
+
+    // SCENARIO (emergent · EMERGENCE ROBUSTNESS): the boldness polymorphism must NOT be a single-seed fluke. Run
+    // the arena from several independent founder seeds; the population must survive every time, and BOTH cohorts
+    // must persist in the clear majority (≥3 of 4) — a real selective balance, not luck of one starting draw.
+    #[test]
+    fn scenario_emergent_boldness_robust_across_seeds() {
+        let mut coexist = 0;
+        for seed0 in [1000, 2000, 3000, 4000] {
+            let (n, bold, caut) = run_boldness_arena(seed0, 15000);
+            eprintln!("[boldness robust] seed0={seed0} rabbits={n} bold={bold} cautious={caut}");
+            assert!(n >= 20, "seed0={seed0}: population crashed to {n}");
+            if bold >= 2 && caut >= 2 {
+                coexist += 1;
+            }
+        }
+        assert!(coexist >= 3, "boldness coexistence held in only {coexist}/4 seeds — the niche is seed-fragile, not a real balance");
+    }
+
+    // SCENARIO (emergent · EMERGENCE STABILITY): over a LONG run, BOTH morphs must remain part of the dynamic.
+    // Apostatic predation + the mutation jackpot make the morph frequencies OSCILLATE (predator-prey-style cycles)
+    // rather than sit at a static ratio — so we sample a window of late timepoints and require that each morph is
+    // a real player at SOME point (≥5) and neither is extinct in EVERY window (permanent fixation). No crash.
+    #[test]
+    fn scenario_emergent_boldness_stable_long_run() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 120, 0.0, 0.0, 80.0, 1000);
+        cluster(&mut w, Kind::Cat, 8, 0.0, 0.0, 60.0, 6000);
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        let (mut max_bold, mut max_caut, mut bold_zeros, mut caut_zeros, mut samples) = (0usize, 0usize, 0, 0, 0);
+        for _ in 0..6 {
+            run_pop(&mut w, 6000); // 6 windows × 6000 ticks ≈ 36k ticks total
+            let (mut bold, mut caut, mut n) = (0usize, 0usize, 0usize);
+            for m in &w.agents {
+                if m.dead || m.kind != Kind::Rabbit {
+                    continue;
+                }
+                n += 1;
+                if m.weights.safety < 0.85 { bold += 1; }
+                if m.weights.safety > 1.15 { caut += 1; }
+            }
+            eprintln!("[boldness long-run] window: rabbits={n} bold={bold} cautious={caut}");
+            assert!(n >= 20, "population crashed to {n} mid long-run");
+            max_bold = max_bold.max(bold);
+            max_caut = max_caut.max(caut);
+            if bold == 0 { bold_zeros += 1; }
+            if caut == 0 { caut_zeros += 1; }
+            samples += 1;
+        }
+        assert!(max_bold >= 5, "the bold morph never mattered across the long run (max={max_bold}) — cautious fixed");
+        assert!(max_caut >= 5, "the cautious morph never mattered across the long run (max={max_caut}) — bold fixed");
+        assert!(bold_zeros < samples && caut_zeros < samples, "a morph was extinct in every window — permanent fixation, not a cycle");
     }
 }
