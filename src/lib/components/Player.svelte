@@ -90,6 +90,9 @@
 	const PITCH_MIN = -0.45; // tilt right down → camera swings close & under you to look up at the sky
 	const PITCH_MAX = 1.5; // ...up to nearly top-down
 	const GRAVITY = 22;
+	const TERMINAL_V = 32; // m/s — cap fall speed. An unbounded vy from a long drop feeds Rapier's kinematic
+	// controller a deep-penetration sweep on landing (into a settlement's collider cluster), which recurses its
+	// collide-and-slide solver until the wasm stack overflows. Capping vy keeps every per-frame sweep shallow.
 	const JUMP_V = 10;
 	const CLIMB_V = 8; // sustained ascent speed while Space is held (infinite jump → bird's-eye)
 	const FLY_CEILING = 85; // max altitude (m above the ground beneath you) the hold-to-rise tops out at
@@ -232,6 +235,7 @@
 		}
 
 		vy -= GRAVITY * delta;
+		if (vy < -TERMINAL_V) vy = -TERMINAL_V; // cap fall speed (Rapier deep-penetration / stack-overflow guard)
 		// INFINITE JUMP → bird's-eye: while Space is held, keep ascending at CLIMB_V until you reach FLY_CEILING
 		// metres above the ground beneath you (the "ceiling"), then hold there; release and gravity brings you down.
 		const altAbove = py - (heightAt(px, pz, world.terrain) + CAPSULE_HALF);
@@ -243,10 +247,13 @@
 		const moveSpeed = (sprinting ? SPRINT : SPEED) * (wading ? WADE : 1) * (stunT > 0 ? 0.45 : 1);
 
 		// let Rapier resolve the move against all colliders (collide-and-slide, auto-step, snap)
+		// hard-clamp the per-frame displacement fed to Rapier (belt-and-suspenders): no matter how vy/delta combine,
+		// a single sweep stays within ±3 m so the controller can never recurse on a giant deep-penetration move.
+		const stepCap = (v: number) => (v > 3 ? 3 : v < -3 ? -3 : v);
 		controller.computeColliderMovement(collider, {
-			x: mx * moveSpeed * delta,
-			y: vy * delta,
-			z: mz * moveSpeed * delta
+			x: stepCap(mx * moveSpeed * delta),
+			y: stepCap(vy * delta),
+			z: stepCap(mz * moveSpeed * delta)
 		});
 		const mv = controller.computedMovement();
 		const t = body.translation();
