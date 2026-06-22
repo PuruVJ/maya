@@ -371,6 +371,9 @@ const GRAZE_CROWD: f64 = 10.0; // herd size at which ground is fully overgrazed 
 const STARVE_DAMAGE: f64 = 0.05; // /s health bleeds while fullness is empty (~20 s of famine is fatal; slow enough to recover if food's found)
 const EAT_ENERGY: f64 = 0.85; // fullness a kill restores — a predator GORGES on a kill (feast), then coasts (famine)
 const FEED_SECS: f64 = 4.0; // seconds a predator hunkers over a fresh kill EATING (no fidgeting/re-targeting) before moving on
+const STRIKE_DMG: f64 = 0.6; // health a predator's strike rips off the prey — a healthy prey SURVIVES the first hit
+// (wounded, it bolts → limps via HURT_AT), and the predator must run it down for the FINISHING blow → a brief struggle,
+// not an instant one-shot (user: "there should be a sense of fighting"). Already-wounded prey dies in one.
 // SCAVENGING — a fresh carcass (any natural/predation death) feeds a hungry carnivore that finds it, so deaths
 // aren't wasted (vultures/hyenas). A corpse carries CARRION_MEAT edible-seconds at death; it rots at 1×/s and
 // drains faster while being eaten. A hungry carnivore within SCAVENGE_R pads over; in contact it refuels energy.
@@ -1593,19 +1596,24 @@ impl World {
                 self.forces[i].1 += (dz / d) * a_max * CHASE_W;
                 self.behave[i] = (if close || can_sprint { CHASE_BOOST } else { 1.0 }, true); // close → final lunge even if spent
                 if close && d < radius + pr + CONTACT_PAD {
-                    self.kills.push(p); // caught — turned to a corpse below
-                    self.events.extend_from_slice(&[EV_KILL, self.agents[p].kind as usize as f32, self.agents[p].agent.x as f32, self.agents[p].agent.z as f32]);
-                    self.agents[i].meals += 1;
-                    self.agents[i].feeding = FEED_SECS; // hunker down + eat (no fidget) for a few seconds
-                    self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
-                    self.agents[i].energy = (self.agents[i].energy + EAT_ENERGY).min(1.0); // the meal fills its belly
-                    // EAT — a kill refuels energy; once gorged (full_after kills) it drops into a food-coma
-                    if eco(self.agents[i].kind).full_after.map_or(false, |fa| self.agents[i].meals >= fa) {
-                        self.agents[i].stamina = self.agents[i].stamina.min(0.15);
-                        self.agents[i].asleep = true; // (takes effect next tick — this tick it's still awake)
-                        self.agents[i].sleep_timer = sleep_secs(self.agents[i].kind);
-                    } else {
-                        self.agents[i].stamina = (self.agents[i].stamina + EAT_GAIN).min(1.0);
+                    let finishing = self.agents[p].health <= STRIKE_DMG; // this strike kills it (else just a deep wound)
+                    self.agents[p].health = (self.agents[p].health - STRIKE_DMG).max(0.0);
+                    self.agents[p].spooked = self.agents[p].spooked.max(2.0); // wounded → it bolts (the struggle)
+                    if finishing {
+                        self.kills.push(p); // finishing blow — turned to a corpse below
+                        self.events.extend_from_slice(&[EV_KILL, self.agents[p].kind as usize as f32, self.agents[p].agent.x as f32, self.agents[p].agent.z as f32]);
+                        self.agents[i].meals += 1;
+                        self.agents[i].feeding = FEED_SECS; // hunker down + eat (no fidget) for a few seconds
+                        self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
+                        self.agents[i].energy = (self.agents[i].energy + EAT_ENERGY).min(1.0); // the meal fills its belly
+                        // EAT — a kill refuels energy; once gorged (full_after kills) it drops into a food-coma
+                        if eco(self.agents[i].kind).full_after.map_or(false, |fa| self.agents[i].meals >= fa) {
+                            self.agents[i].stamina = self.agents[i].stamina.min(0.15);
+                            self.agents[i].asleep = true; // (takes effect next tick — this tick it's still awake)
+                            self.agents[i].sleep_timer = sleep_secs(self.agents[i].kind);
+                        } else {
+                            self.agents[i].stamina = (self.agents[i].stamina + EAT_GAIN).min(1.0);
+                        }
                     }
                 }
             } else if let Some((cx, cz, ci)) = carrion_pos {
@@ -2617,9 +2625,10 @@ mod tests {
         let mut w = mw();
         let cat = w.spawn(animal(0.0, 0.0, 10), Kind::Cat, 0.35, 10);
         let rabbit = w.spawn(animal(0.5, 0.0, 11), Kind::Rabbit, 0.35, 11); // within contact (0.35+0.35+0.4)
+        w.agents[rabbit].health = 0.5; // pre-wounded → one strike FINISHES it (a full-health prey takes two strikes — see the scenarios)
         assert!(!w.agents[rabbit].dead);
         w.tick_once(1);
-        assert!(w.agents[rabbit].dead, "cat in contact should catch + kill the rabbit");
+        assert!(w.agents[rabbit].dead, "cat in contact finishes a wounded rabbit");
         let _ = cat;
         // a corpse stops + no longer flocks/targets
         w.tick_once(2);
@@ -2647,6 +2656,7 @@ mod tests {
         let mut w = mw();
         let cat = w.spawn(animal(0.0, 0.0, 10), Kind::Cat, 0.35, 10);
         let rabbit = w.spawn(animal(0.5, 0.0, 11), Kind::Rabbit, 0.35, 11); // in contact
+        w.agents[rabbit].health = 0.5; // pre-wounded → the cat finishes it in one strike (eat/refuel path)
         let s0 = w.agents[cat].stamina; // 0.45 (carnivores start hungry)
         w.tick_once(1);
         assert!(w.agents[rabbit].dead);
@@ -2699,6 +2709,7 @@ mod tests {
         let mut w = mw();
         let lion = w.spawn(animal(50.0, 50.0, 5), Kind::Lion, 0.5, 5); // far from the player (no wake)
         let rabbit = w.spawn(animal(50.6, 50.0, 6), Kind::Rabbit, 0.35, 6); // in contact
+        w.agents[rabbit].health = 0.5; // pre-wounded → the lion finishes it in one strike (reaches the 5th kill)
         w.agents[lion].meals = 4; // one more kill → gorged (lion full_after = 5)
         w.tick_once(1);
         assert!(w.agents[rabbit].dead);
@@ -3897,6 +3908,7 @@ mod tests {
         // catch: a hungry lion adjacent to a rabbit eats it within a short window
         let mut w = emergent_world();
         let prey = spawn_kind(&mut w, Kind::Rabbit, 0.0, 0.0, 12);
+        w.agents[prey].health = 0.5; // pre-wounded → Hunt finishes it in one strike (full-health takes two — the struggle)
         let lion = spawn_kind(&mut w, Kind::Lion, 1.2, 0.0, 5001);
         w.agents[lion].hungry = true;
         w.agents[lion].stamina = 1.0;

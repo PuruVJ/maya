@@ -221,6 +221,12 @@ pub fn decide(world: &mut World, px: f64, pz: f64, pspeed: f64, danger2: f64, hu
                     world.forces[i].1 += (dz / d) * a_max * super::CHASE_W;
                     world.behave[i] = (if close || can_sprint { super::CHASE_BOOST } else { 1.0 }, true);
                     if close && d < radius + pr + super::CONTACT_PAD {
+                        let finishing = world.agents[p].health <= super::STRIKE_DMG; // else just a deep wound (struggle)
+                        world.agents[p].health = (world.agents[p].health - super::STRIKE_DMG).max(0.0);
+                        world.agents[p].spooked = world.agents[p].spooked.max(2.0); // wounded → it bolts
+                        if !finishing {
+                            // a wounding bite — keep chasing to finish it; no meal yet
+                        } else {
                         world.kills.push(p);
                         world.events.extend_from_slice(&[super::EV_KILL, world.agents[p].kind as usize as f32, world.agents[p].agent.x as f32, world.agents[p].agent.z as f32]);
                         world.agents[i].meals += 1;
@@ -233,6 +239,7 @@ pub fn decide(world: &mut World, px: f64, pz: f64, pspeed: f64, danger2: f64, hu
                             world.agents[i].sleep_timer = sleep_secs(kind);
                         } else {
                             world.agents[i].stamina = (world.agents[i].stamina + super::EAT_GAIN).min(1.0);
+                        }
                         }
                     }
                 }
