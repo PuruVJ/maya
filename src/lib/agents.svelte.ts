@@ -85,6 +85,7 @@ export interface ManagedAgent {
 	corpseAge: number; // seconds it's been dead → drives the sink-and-reap decay (0 while alive)
 	asleep: boolean; // resting (mirrored from Rust)
 	hunting: boolean; // this apex is charging YOU right now (mirrored from Rust) → its eyeshine glares red
+	migrating: boolean; // a roamer en route to another settlement (mirrored from Rust) → the HUD tallies these
 	juvenile?: boolean; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown when it spawns into the sim
 	gene?: number; // inherited VIGOR (≈1.0; scales speed) — ferried from the Rust birth → set on the sim agent at spawn
 	pfamA?: number; // mother's lineage id — ferried from the Rust birth → set_lineage at spawn (incest avoidance)
@@ -111,7 +112,8 @@ export function makeManaged(agent: Agent, kind: string, radius: number, menu: Be
 		dead: false,
 		corpseAge: 0,
 		asleep: false,
-		hunting: false
+		hunting: false,
+		migrating: false
 	};
 }
 

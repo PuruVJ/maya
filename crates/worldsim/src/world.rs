@@ -521,6 +521,7 @@ pub struct ManagedAgent {
     pub bully: Option<usize>, // who last wounded it in a rival fight → it flees this one while spooked
     pub companion: bool,      // the player's pet → its leash tracks the player (follows) and it doesn't fear you
     pub hunting: bool,        // this apex is actively charging the PLAYER this tick → the view glares its eyes
+    pub migrating: bool,      // a roamer steering toward another settlement this tick → surfaced to the HUD
     pub breed_cd: f64,        // seconds until it can breed again (>0 = on cooldown / a maturing juvenile)
     pub build_cd: f64,        // people only — seconds until this settler can raise another house (emergent cities)
     pub crowd: u32,           // flock neighbours this tick
@@ -596,6 +597,9 @@ impl Snapshot {
             if m.hunting {
                 f |= 8;
             }
+            if m.migrating {
+                f |= 16; // bit4 → the HUD counts who's migrating between settlements
+            }
             self.flags[i] = f;
             self.behaviors[i] = m.agent.behavior.code();
             self.progress[i] = (m.agent.elapsed / m.agent.duration).min(1.0) as f32;
@@ -642,6 +646,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         bully: None,
         companion: false,
         hunting: false,
+        migrating: false,
         breed_cd: 0.0,
         // start partway through a build cooldown (seeded) so a fresh town doesn't raise every house on one tick
         build_cd: BUILD_COOLDOWN * crate::simrng::rand(&[seed_id, CH_BUILD]),
@@ -1305,8 +1310,9 @@ impl World {
             if self.agents[i].dead || self.slept[i] {
                 continue;
             }
-            let f = self.flock(i, px, pz);
-            self.forces[i] = f;
+            let (fx, fz, crowd, migrating) = self.flock(i, px, pz);
+            self.forces[i] = (fx, fz, crowd);
+            self.agents[i].migrating = migrating; // HUD: who's en route to another settlement
         }
 
         // 5. behaviour — act on the targeting: FLEE a threat, else STALK + CATCH prey (+ EAT / food-coma).
@@ -1992,10 +1998,11 @@ impl World {
 
     /// Reynolds flocking force for agent `i` (anti-overlap + density-gated comfort-spread + cohesion +
     /// alignment), reading only the previous positions. Returns (fx, fz, crowd).
-    fn flock(&self, i: usize, px: f64, pz: f64) -> (f64, f64, u32) {
+    fn flock(&self, i: usize, px: f64, pz: f64) -> (f64, f64, u32, bool) {
         let m = &self.agents[i];
         let (ax, az, avx, avz, a_max) = (m.agent.x, m.agent.z, m.agent.vx, m.agent.vz, m.agent.max_speed);
         let is_person = matches!(m.kind, Kind::Person);
+        let mut migrating = false; // set when the inter-settlement migration steer fires → surfaced to the HUD
         let sep_r = m.radius + if is_person { 1.6 } else { 1.3 }; // moderate spacing (2.1/1.7 was too pushy)
         let hard_r = m.radius + if is_person { 0.4 } else { 0.3 };
         let sep_r2 = sep_r * sep_r;
@@ -2216,6 +2223,7 @@ impl World {
                     let w = a_max * MIGRATE_W;
                     fx += dx / d * w;
                     fz += dz / d * w;
+                    migrating = true; // surfaced to the HUD (snapshot flag) → "in process of migrating"
                 }
             }
         }
@@ -2276,7 +2284,7 @@ impl World {
             }
         }
 
-        (fx, fz, n_near)
+        (fx, fz, n_near, migrating)
     }
 
     /// Food-chain targeting for agent `i` (as the predator): scan its seek-grid neighbours, pick the best prey

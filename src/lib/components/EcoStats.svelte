@@ -40,6 +40,17 @@
 	let vigor = $state(1);
 	let vigorTrend = $state(0);
 
+	// ── detailed breakdown (the "complex HUD" — toggled open with 📊) ───────────────────────────────────────
+	let detail = $state(false);
+	let sexF = $state<Record<string, number>>({}); // live females per species (seedId even = female, matches Rust)
+	let sexM = $state<Record<string, number>>({});
+	let migrating = $state<Record<string, number>>({}); // per species: roamers en route to another settlement (Rust flag)
+	let structures = $state<Record<string, number>>({}); // structure kind → count (near + dormant)
+	let settlements = $state(0); // clumps of ≥3 buildings (a "decently sized" settlement)
+	const CREATURE_KINDS = new Set(['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur']);
+	const SETTLE_KINDS = new Set(['house', 'cabin', 'tower', 'manor']);
+	const STRUCT_ICON: Record<string, string> = { house: '🏠', cabin: '🛖', tower: '🗼', manor: '🏰', tree: '🌳', bush: '🌿', lamp: '🏮', grave: '🪦', fence: '🚧', rock: '🪨', pond: '💧' };
+
 	onMount(() => {
 		let prev: Record<string, number> = {};
 		let first = true; // don't flash the whole row green on the very first sample (everything "appears")
@@ -49,12 +60,44 @@
 			const c: Record<string, number> = {};
 			let live = 0;
 			let geneSum = 0;
+			const f: Record<string, number> = {};
+			const mle: Record<string, number> = {};
+			const mig: Record<string, number> = {};
 			agentManager.forEach((m) => {
 				if (m.dead) return; // live only (corpses excluded)
 				c[m.kind] = (c[m.kind] ?? 0) + 1;
 				geneSum += m.gene ?? 1; // founders carry no JS gene → baseline 1.0 (matches the Rust founder gene)
+				// sex: even seedId = female (matches Rust is_female); migrating = the Rust roamer flag (bit4)
+				if ((m.seedId & 1) === 0) f[m.kind] = (f[m.kind] ?? 0) + 1;
+				else mle[m.kind] = (mle[m.kind] ?? 0) + 1;
+				if (m.migrating) mig[m.kind] = (mig[m.kind] ?? 0) + 1;
 				live++;
 			});
+			sexF = f;
+			sexM = mle;
+			migrating = mig;
+			// structures (near live + dormant statics) by kind, and settlement count (clumps of ≥3 buildings)
+			const st: Record<string, number> = {};
+			const homes: [number, number][] = [];
+			const tally = (o: { kind: string; pos: number[] }) => {
+				if (CREATURE_KINDS.has(o.kind)) return;
+				st[o.kind] = (st[o.kind] ?? 0) + 1;
+				if (SETTLE_KINDS.has(o.kind)) homes.push([o.pos[0], o.pos[2]]);
+			};
+			for (const o of world.objects) tally(o);
+			if (world.regions) for (const key in world.regions) for (const o of world.regions[key].statics) tally(o);
+			structures = st;
+			// greedy proximity clustering of homes → a "settlement" is a clump of ≥3 buildings within ~60 m
+			const clusters: { sx: number; sz: number; n: number }[] = [];
+			for (const [hx, hz] of homes) {
+				let hit = clusters.find((cl) => (cl.sx / cl.n - hx) ** 2 + (cl.sz / cl.n - hz) ** 2 < 60 * 60);
+				if (hit) {
+					hit.sx += hx;
+					hit.sz += hz;
+					hit.n++;
+				} else clusters.push({ sx: hx, sz: hz, n: 1 });
+			}
+			settlements = clusters.filter((cl) => cl.n >= 3).length;
 			// + DORMANT region aggregates — streaming-offloaded creatures are alive too, just not individually
 			// simulated, so the total stays consistent as you roam (no apparent "crash" when a region sleeps).
 			if (world.regions) {
@@ -121,7 +164,44 @@
 		>
 			{emergent ? '🧠 emergent' : '⚙️ manual'}
 		</button>
+		<button
+			type="button"
+			onclick={() => (detail = !detail)}
+			class="pointer-events-auto ml-1 rounded-full px-1.5 text-[12px] transition-colors"
+			class:text-amber-300={detail}
+			title="Toggle the detailed world readout (sex split, settlements, structures, migration)"
+		>
+			📊
+		</button>
 	</div>
+
+	{#if detail}
+		<div
+			class="pointer-events-none fixed left-1/2 top-[5.5rem] z-20 w-[19rem] -translate-x-1/2 space-y-2 rounded-xl bg-black/55 px-3 py-2 text-[12px] text-white/85 backdrop-blur"
+		>
+			<!-- per-species: count, sex split, and how many are migrating right now -->
+			<div class="space-y-0.5">
+				{#each SPECIES as { k, icon } (k)}
+					{#if counts[k]}
+						<div class="flex items-center justify-between tabular-nums">
+							<span>{icon} {counts[k]}</span>
+							<span class="text-sky-300/80">♂{sexM[k] ?? 0}</span>
+							<span class="text-pink-300/80">♀{sexF[k] ?? 0}</span>
+							<span class="text-amber-300/90" title="migrating to another settlement now">✈ {migrating[k] ?? 0}</span>
+						</div>
+					{/if}
+				{/each}
+			</div>
+			<div class="border-t border-white/15 pt-1">
+				<div class="text-white/70">🏘️ settlements: <span class="tabular-nums text-white">{settlements}</span> <span class="text-white/45">(≥3 buildings)</span></div>
+				<div class="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 tabular-nums">
+					{#each Object.entries(structures).sort((a, b) => b[1] - a[1]) as [kind, count] (kind)}
+						<span title={kind}>{STRUCT_ICON[kind] ?? '▫'} {count}</span>
+					{/each}
+				</div>
+			</div>
+		</div>
+	{/if}
 {/if}
 
 <style>

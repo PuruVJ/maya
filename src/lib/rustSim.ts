@@ -309,6 +309,7 @@ export function tickRust(dt: number): void {
 		m.corpseAge = m.dead ? m.corpseAge + dt : 0; // age corpses → Scene's reaper sinks + removes the old ones
 		m.asleep = (f & 2) !== 0;
 		m.hunting = (f & 8) !== 0; // bit3 → this apex is charging the player → the view glares its eyes
+		m.migrating = (f & 16) !== 0; // bit4 → roamer en route to another settlement (HUD)
 		if (m.hunting) {
 			const dx = nx - px;
 			const dz = nz - pz;
