@@ -70,6 +70,20 @@ impl Genome {
         (1.6 - 0.6 * self.safety).clamp(0.7, 1.6)
     }
 
+    /// CULTURE — lerp each weight a fraction `t` toward another genome (a role model). Used for memetic
+    /// transmission: a young agent LEARNS from a successful elder, on top of parental inheritance. The
+    /// niche dims (safety/social) stay pinned by selection; the unselected dims drift → local customs.
+    pub fn blend_toward(&self, o: &Genome, t: f64) -> Genome {
+        let mix = |a: f64, b: f64| a + (b - a) * t;
+        Genome {
+            food: mix(self.food, o.food),
+            safety: mix(self.safety, o.safety),
+            social: mix(self.social, o.social),
+            rest: mix(self.rest, o.rest),
+            industry: mix(self.industry, o.industry),
+        }
+    }
+
     // SOCIAL niche — RESOLVED via WATER. It first failed to co-exist alongside boldness when it spent the SAME
     // currencies (predation/breeding) → one joint optimum. The fix was an INDEPENDENT selective pressure: thirst.
     // Herders navigate to water reliably (herd knowledge → survive thirst) while loners risk it but breed freely

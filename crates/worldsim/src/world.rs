@@ -450,6 +450,14 @@ const EV_CONCEIVE: f32 = 6.0; // a pair mated (diagnostic: conceive≫birth ⇒ 
 const EV_WELL: f32 = 7.0; // an industrious settler dug a well (a self-made water source)
 const WELL_INDUSTRY: f64 = 1.2; // a settler's `industry` genome above this digs wells (emergent job; neutral 1.0 won't → Manual safe)
 const WELL_NEED_R: f64 = 60.0; // …but only when no water edge is within this radius (no water in reach → dig one)
+// CULTURE — memetic transmission among PEOPLE: a young settler occasionally learns from the oldest nearby elder of
+// its kind, blending its behaviour genome toward that role model. Selected dims (safety/social) stay pinned by the
+// niche dynamics; the rest drift → isolated settlements grow distinct CUSTOMS, and separated populations diverge.
+const CH_CULTURE: i32 = 76; // RNG channel for the learning roll (kept clear of the genome channels 70-75)
+const CULTURE_AGE: f64 = 0.4; // an agent learns only while younger than this fraction of its lifespan (formative years)
+const CULTURE_P: f64 = 0.03; // per-tick chance a young person has a learning moment (rare → enculturation is gradual)
+const CULTURE_RATE: f64 = 0.3; // how far each learning moment nudges the learner toward the elder (0..1)
+const CULTURE_R2: f64 = 30.0 * 30.0; // a role model must be within this radius (same settlement/band)
 
 // ── GESTATION + LITTERS ─────────────────────────────────────────────────────────────────────────────────────
 // Mating doesn't clone instantly: the FEMALE conceives and GESTATES for a period, then delivers a species-sized
@@ -1905,6 +1913,35 @@ impl World {
                 let (k, ax, az) = (self.agents[i].kind as usize as f32, self.agents[i].agent.x as f32, self.agents[i].agent.z as f32);
                 self.events.extend_from_slice(&[EV_OLDAGE, k, ax, az]);
                 continue;
+            }
+            // CULTURE — a YOUNG settler learns from the oldest nearby elder of its kind, blending its behaviour
+            // genome toward that role model (memetic transmission, on top of parental genes). Conformity to the
+            // local successful type → settlements grow distinct CUSTOMS and isolated populations diverge. People
+            // only (settlements are a people thing) → the rabbit niche dynamics are untouched.
+            if matches!(self.agents[i].kind, Kind::Person)
+                && self.agents[i].age < self.agents[i].lifespan * CULTURE_AGE
+                && crate::simrng::rand(&[self.agents[i].seed_id, tick, CH_CULTURE]) < CULTURE_P
+            {
+                let (ax, az, my_age) = (self.agents[i].agent.x, self.agents[i].agent.z, self.agents[i].age);
+                let mut model: Option<usize> = None;
+                let mut best_age = my_age; // only learn from someone OLDER (more successful at surviving)
+                self.grid.for_each_neighbor(ax, az, |j| {
+                    let j = j as usize;
+                    if j == i || self.agents[j].dead || !matches!(self.agents[j].kind, Kind::Person) {
+                        return;
+                    }
+                    if self.agents[j].age > best_age {
+                        let d2 = (self.agents[j].agent.x - ax).powi(2) + (self.agents[j].agent.z - az).powi(2);
+                        if d2 <= CULTURE_R2 {
+                            best_age = self.agents[j].age;
+                            model = Some(j);
+                        }
+                    }
+                });
+                if let Some(j) = model {
+                    let learned = self.agents[i].weights.blend_toward(&self.agents[j].weights, CULTURE_RATE);
+                    self.agents[i].weights = learned;
+                }
             }
             // EXPECTANT FATHER STANDS GUARD — when a predator menaces him or his carrying mate, he BRANDISHES (his
             // machete): the predator is spooked off + gives up the stalk. Aggression toward predators, not flight.
@@ -4629,5 +4666,73 @@ mod tests {
         }
         assert!(built, "with water in reach the couple should build a house");
         assert!(w2.wells().is_empty(), "they should NOT dig a well when water is already in reach");
+    }
+
+    // CULTURE: a YOUNG settler beside a distinctive ELDER drifts its behaviour genome toward that role model
+    // (memetic learning). Here the youth starts LAZY (industry 0.5) next to an INDUSTRIOUS elder (1.8) → it learns
+    // toward high industry. Parked (max_speed 0) so they stay within learning range.
+    #[test]
+    fn a_young_settler_learns_from_a_nearby_elder() {
+        let mut w = emergent_world();
+        w.set_seasons(false);
+        let elder = spawn_kind(&mut w, Kind::Person, 0.0, 0.0, 20);
+        let youth = spawn_kind(&mut w, Kind::Person, 2.0, 0.0, 22);
+        w.set_genome(elder, 1.0, 1.0, 1.0, 1.0, 1.8); // industrious role model
+        w.set_genome(youth, 1.0, 1.0, 1.0, 1.0, 0.5); // lazy learner
+        w.agents[elder].age = w.agents[elder].lifespan * 0.85; // an elder
+        w.agents[youth].age = w.agents[youth].lifespan * 0.08; // a child in its formative years
+        w.agents[elder].agent.max_speed = 0.0; // park them so they stay in learning range
+        w.agents[youth].agent.max_speed = 0.0;
+        let before = w.agents[youth].weights.industry;
+        for t in 1..=3000 {
+            w.tick_once(t);
+        }
+        let after = w.agents[youth].weights.industry;
+        eprintln!("[culture] youth industry {before:.2} → {after:.2} (elder 1.8)");
+        assert!(after > before + 0.3, "the youth didn't learn from the elder ({before:.2}→{after:.2})");
+        assert!(after < 1.81, "learning shouldn't overshoot the elder");
+    }
+
+    // CULTURE: two SEPARATED settlements drift to DIFFERENT customs. Group A's young learn from an industrious
+    // elder, group B's from a lazy one → A trends industrious, B lazy. The divergence is the emergent signal:
+    // identical genes at the start, distinct local cultures at the end purely from who you grow up around.
+    #[test]
+    fn separated_settlements_diverge_in_custom() {
+        let mut w = emergent_world();
+        w.set_seasons(false);
+        let spawn_group = |w: &mut World, cx: f64, elder_ind: f64, seed0: i32| {
+            let elder = spawn_kind(w, Kind::Person, cx, 0.0, seed0);
+            w.set_genome(elder, 1.0, 1.0, 1.0, 1.0, elder_ind);
+            w.agents[elder].age = w.agents[elder].lifespan * 0.85;
+            w.agents[elder].agent.max_speed = 0.0;
+            for k in 1..=6 {
+                let y = spawn_kind(w, Kind::Person, cx + k as f64 * 2.0, 0.0, seed0 + 100 + k);
+                w.set_genome(y, 1.0, 1.0, 1.0, 1.0, 1.0); // all youths start NEUTRAL (identical) — culture does the rest
+                w.agents[y].age = w.agents[y].lifespan * 0.08;
+                w.agents[y].agent.max_speed = 0.0;
+            }
+        };
+        spawn_group(&mut w, 0.0, 1.8, 1000); // settlement A: industrious elder
+        spawn_group(&mut w, 600.0, 0.4, 2000); // settlement B: laid-back elder (far away → no cross-learning)
+        for t in 1..=3000 {
+            w.tick_once(t);
+        }
+        let (mut sa, mut na, mut sb, mut nb) = (0.0, 0, 0.0, 0);
+        for m in &w.agents {
+            if m.dead || !matches!(m.kind, Kind::Person) || m.age > m.lifespan * 0.5 {
+                continue; // only the YOUTHS (skip the parked elders)
+            }
+            if m.agent.x < 300.0 {
+                sa += m.weights.industry;
+                na += 1;
+            } else {
+                sb += m.weights.industry;
+                nb += 1;
+            }
+        }
+        let (ma, mb) = (sa / na as f64, sb / nb as f64);
+        eprintln!("[culture diverge] settlement A youth industry={ma:.2} (n={na}) | B={mb:.2} (n={nb})");
+        assert!(na >= 3 && nb >= 3, "lost too many youths to measure");
+        assert!(ma - mb > 0.5, "the settlements didn't diverge in custom (A={ma:.2}, B={mb:.2}) — culture isn't transmitting");
     }
 }
