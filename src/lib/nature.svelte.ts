@@ -24,23 +24,26 @@ class Nature {
 	banner = $state(''); // current announcement (HUD reads this; clears itself after a beat)
 	aridity = $state(1); // current DROUGHT level the director is holding (1 = normal); fed to the sim (set_aridity)
 	#token = 0;
+	#climate: 'normal' | 'drought' | 'rains' = 'normal'; // last climate phase → only announce on a TRANSITION
 
 	/** MACRO-DIRECTOR slow shock (the LLM seam): read the world's pulse (live population) and steer the CLIMATE —
 	 *  a boom invites a DROUGHT that thins the herds at the watering holes; a crash brings the RAINS back. Returns
 	 *  the new aridity + an optional banner. Rule-based today; an LLM can later replace this body with a narrative
 	 *  call that reads richer state (vigor, morphs, settlements) and authors the shock. */
 	directClimate(pop: number): { aridity: number; banner: string | null } {
-		if (pop > 900) {
-			// overcrowded → a hard drought culls at the shrinking water (emergent watering-hole crises)
-			this.aridity = 2.2;
-			return { aridity: this.aridity, banner: '☀️ A drought grips the land — the ponds shrink and the herds crowd the water' };
+		// hysteresis on the phase so a population hovering at a threshold doesn't flap drought↔normal every check
+		const phase: 'normal' | 'drought' | 'rains' = pop > 900 ? 'drought' : pop < 200 ? 'rains' : 'normal';
+		const changed = phase !== this.#climate;
+		this.#climate = phase;
+		if (phase === 'drought') {
+			this.aridity = 2.2; // a hard drought culls at the shrinking water (emergent watering-hole crises)
+			return { aridity: this.aridity, banner: changed ? '☀️ A drought grips the land — the ponds shrink and the herds crowd the water' : null };
 		}
-		if (pop < 200) {
-			// sparse → the rains return, water everywhere, life rebounds
-			this.aridity = 0.6;
-			return { aridity: this.aridity, banner: '🌧️ The rains return — water runs plentiful and the land greens' };
+		if (phase === 'rains') {
+			this.aridity = 0.6; // the rains return, water everywhere, life rebounds
+			return { aridity: this.aridity, banner: changed ? '🌧️ The rains return — water runs plentiful and the land greens' : null };
 		}
-		// healthy → ease the climate back toward normal, quietly (no banner spam)
+		// healthy → ease the climate back toward normal, quietly
 		this.aridity = this.aridity + (1 - this.aridity) * 0.5;
 		if (Math.abs(this.aridity - 1) < 0.05) this.aridity = 1;
 		return { aridity: this.aridity, banner: null };
