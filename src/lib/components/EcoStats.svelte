@@ -47,6 +47,7 @@
 	let migrating = $state<Record<string, number>>({}); // per species: roamers en route to another settlement (Rust flag)
 	let structures = $state<Record<string, number>>({}); // structure kind → count (near + dormant)
 	let settlements = $state(0); // clumps of ≥3 buildings (a "decently sized" settlement)
+	let liveByKind = $state<Record<string, number>>({}); // LIVE (individually simulated) per species — sex is only known for these
 	const CREATURE_KINDS = new Set(['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur']);
 	const SETTLE_KINDS = new Set(['house', 'cabin', 'tower', 'manor']);
 	const STRUCT_ICON: Record<string, string> = { house: '🏠', cabin: '🛖', tower: '🗼', manor: '🏰', tree: '🌳', bush: '🌿', lamp: '🏮', grave: '🪦', fence: '🚧', rock: '🪨', pond: '💧' };
@@ -76,6 +77,7 @@
 			sexF = f;
 			sexM = mle;
 			migrating = mig;
+			liveByKind = { ...c }; // snapshot LIVE counts (with sex) before the dormant aggregates are folded in below
 			// structures (near live + dormant statics) by kind, and settlement count (clumps of ≥3 buildings)
 			const st: Record<string, number> = {};
 			const homes: [number, number][] = [];
@@ -177,17 +179,23 @@
 
 	{#if detail}
 		<div
-			class="pointer-events-none fixed left-1/2 top-[5.5rem] z-20 w-[19rem] -translate-x-1/2 space-y-2 rounded-xl bg-black/55 px-3 py-2 text-[12px] text-white/85 backdrop-blur"
+			class="pointer-events-none fixed left-1/2 top-[5.5rem] z-20 w-[21rem] -translate-x-1/2 space-y-2 rounded-xl bg-black/55 px-3 py-2 text-[12px] text-white/85 backdrop-blur"
 		>
-			<!-- per-species: count, sex split, and how many are migrating right now -->
+			<!-- per-species TOTAL ♂/♀ across the whole world. Live ones are sexed exactly; dormant (streamed-away)
+			     ones are a headcount, so they're split ~50/50 (sex is seed-parity, ≈even) → an accurate total. ✈ is
+			     the live roamers migrating right now. -->
+			<div class="text-[10px] uppercase tracking-wide text-white/45">total ♂/♀ (incl. dormant) · ✈ migrating</div>
 			<div class="space-y-0.5">
 				{#each SPECIES as { k, icon } (k)}
 					{#if counts[k]}
+						{@const dorm = Math.max(0, (counts[k] ?? 0) - (liveByKind[k] ?? 0))}
+						{@const tM = (sexM[k] ?? 0) + Math.ceil(dorm / 2)}
+						{@const tF = (sexF[k] ?? 0) + Math.floor(dorm / 2)}
 						<div class="flex items-center justify-between tabular-nums">
-							<span>{icon} {counts[k]}</span>
-							<span class="text-sky-300/80">♂{sexM[k] ?? 0}</span>
-							<span class="text-pink-300/80">♀{sexF[k] ?? 0}</span>
-							<span class="text-amber-300/90" title="migrating to another settlement now">✈ {migrating[k] ?? 0}</span>
+							<span class="w-12">{icon} {counts[k]}</span>
+							<span class="text-sky-300/80" title="males (live + ~half of {dorm} dormant)">♂{tM}</span>
+							<span class="text-pink-300/80" title="females (live + ~half of {dorm} dormant)">♀{tF}</span>
+							<span class="text-amber-300/90" title="live roamers migrating to another settlement now">✈{migrating[k] ?? 0}</span>
 						</div>
 					{/if}
 				{/each}

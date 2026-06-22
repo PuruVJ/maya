@@ -46,7 +46,7 @@
 	let yaw = 0;
 	let pitch = 0.5;
 	let vy = 0;
-	let jumpsRemaining = 2;
+	let jumpHeld = false; // Space held → keep ascending (infinite jump) to a bird's-eye view, up to FLY_CEILING
 	let dragging = false;
 	let lastPointerX = 0;
 	let lastPointerY = 0;
@@ -91,7 +91,8 @@
 	const PITCH_MAX = 1.5; // ...up to nearly top-down
 	const GRAVITY = 22;
 	const JUMP_V = 10;
-	const MAX_JUMPS = 2;
+	const CLIMB_V = 8; // sustained ascent speed while Space is held (infinite jump → bird's-eye)
+	const FLY_CEILING = 85; // max altitude (m above the ground beneath you) the hold-to-rise tops out at
 	const CAPSULE_HALF = 0.9; // capsule centre above the feet
 	const MAX_WALK_SLOPE = 1.3; // max climbable terrain gradient (rise/run ≈ tan 52°); steeper faces block the uphill move
 	const WADE = 0.45; // movement multiplier while wading through water (you can enter; it slows you)
@@ -121,10 +122,7 @@
 	let spawned = false;
 
 	function tryJump() {
-		if (jumpsRemaining > 0) {
-			vy = JUMP_V;
-			jumpsRemaining -= 1;
-		}
+		vy = Math.max(vy, JUMP_V); // an initial hop; holding Space then SUSTAINS the climb (see the physics tick)
 	}
 
 	onMount(() => {
@@ -135,12 +133,16 @@
 			if (isTyping()) return;
 			keys.add(e.key.toLowerCase());
 			if (e.key === 'Shift' && !e.repeat) sprinting = !sprinting; // tap to toggle sprint
-			if (e.code === 'Space' && !e.repeat) {
+			if (e.code === 'Space') {
 				e.preventDefault();
-				tryJump();
+				jumpHeld = true; // hold → keep rising to the ceiling (infinite jump)
+				if (!e.repeat) tryJump();
 			}
 		};
-		const up = (e: KeyboardEvent) => keys.delete(e.key.toLowerCase());
+		const up = (e: KeyboardEvent) => {
+			keys.delete(e.key.toLowerCase());
+			if (e.code === 'Space') jumpHeld = false; // release → gravity takes over, you descend
+		};
 		// look = drag on the canvas. Track the last pointer position and use the delta (works for BOTH mouse
 		// and touch — movementX/Y is unreliable for touch pointers). The on-screen joystick/jump live in
 		// their own corners (non-canvas targets), so they don't rotate the view.
@@ -230,6 +232,11 @@
 		}
 
 		vy -= GRAVITY * delta;
+		// INFINITE JUMP → bird's-eye: while Space is held, keep ascending at CLIMB_V until you reach FLY_CEILING
+		// metres above the ground beneath you (the "ceiling"), then hold there; release and gravity brings you down.
+		const altAbove = py - (heightAt(px, pz, world.terrain) + CAPSULE_HALF);
+		if (jumpHeld && altAbove < FLY_CEILING) vy = Math.max(vy, CLIMB_V);
+		else if (altAbove >= FLY_CEILING && vy > 0) vy = 0; // bonk the ceiling → stop rising
 
 		// wading through a pond slows you right down (you can still enter — animals can't)
 		const wading = submerged(px, pz, py);
@@ -279,7 +286,6 @@
 			if (vy < 0) vy = 0;
 			grounded = true;
 		}
-		if (grounded) jumpsRemaining = MAX_JUMPS;
 
 		// predator-strike knockback + stun decay (the hit is detected in the animal loop below)
 		if (stunT > 0) {
