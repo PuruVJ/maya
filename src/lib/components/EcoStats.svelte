@@ -7,7 +7,12 @@
 	import { onMount } from 'svelte';
 	import { agentManager } from '$lib/agents.svelte';
 	import { rustBehaviorIsEmergent, setRustBehaviorMode, rustAgeMeans } from '$lib/rustSim';
+	import { nature } from '$lib/nature.svelte';
 	import type { World } from '$lib/world';
+
+	// CLIMATE chip — the macro-director's current drought level (nature.aridity, fed to the sim's set_aridity). A
+	// glanceable read on whether the world is in a drought (water-stressed) or flush with rain.
+	const climate = $derived(nature.aridity >= 1.5 ? { icon: '☀️', label: 'drought', cls: 'text-amber-300/90' } : nature.aridity <= 0.7 ? { icon: '🌧️', label: 'rains', cls: 'text-sky-300/90' } : null);
 
 	// the decision BRAIN driving the agents (docs/emergent-behavior.md): Emergent (needs+primitives+utility, the
 	// default) vs Manual (the hand-coded sim). A dev A/B toggle — flip it live in the same world to compare.
@@ -181,6 +186,9 @@
 		<span class="ml-1 tabular-nums text-emerald-300/90" title="Average inherited vigor (speed gene) — drifts up as evolution selects faster lineages">
 			⚡{vigor.toFixed(2)}{vigorTrend > 0 ? '↑' : vigorTrend < 0 ? '↓' : ''}
 		</span>
+		{#if climate}
+			<span class="ml-1 {climate.cls}" title="The macro-director's climate: a drought (water-stressed) or the rains returning">{climate.icon} {climate.label}</span>
+		{/if}
 		<button
 			type="button"
 			onclick={toggleBrain}

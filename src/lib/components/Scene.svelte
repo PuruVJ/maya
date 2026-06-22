@@ -91,6 +91,22 @@
 	};
 	const light = $derived(LIGHT[world.sky] ?? LIGHT.day);
 
+	// DROUGHT TINT — the macro-director's drought (nature.aridity) visibly dries the world: a warm dusty haze
+	// thickens and the light goes harsh-amber, easing back with the rains. Subtle. `dry`: 0 below aridity 1.2,
+	// ramps to 1 by ~2.0. Pure colour/density lerp on top of the sky's base palette → no new render passes.
+	const dry = $derived(Math.max(0, Math.min(1, (nature.aridity - 1.2) / 0.8)));
+	const droughtFog = $derived.by(() => {
+		if (dry <= 0) return fog;
+		const c = new THREE.Color(fog.color).lerp(new THREE.Color('#d8b483'), 0.4 * dry);
+		return { color: '#' + c.getHexString(), density: fog.density * (1 + 0.6 * dry) };
+	});
+	const droughtLight = $derived.by(() => {
+		if (dry <= 0) return light;
+		const ambC = '#' + new THREE.Color(light.ambC).lerp(new THREE.Color('#e9c290'), 0.3 * dry).getHexString();
+		const dirC = '#' + new THREE.Color(light.dirC).lerp(new THREE.Color('#ffb060'), 0.35 * dry).getHexString();
+		return { ...light, ambC, dirC };
+	});
+
 	// tell the food chain how nocturnal it is → prey jumpier, predators keener after dark
 	const NIGHTNESS: Record<string, number> = { day: 0, sunset: 0.4, fog: 0.25, night: 1, space: 1 };
 	$effect(() => {
@@ -619,13 +635,13 @@
 
 <SkyDome sky={world.sky} ground={world.ground} />
 
-<T.FogExp2 attach="fog" args={[fog.color, fog.density]} />
+<T.FogExp2 attach="fog" args={[droughtFog.color, droughtFog.density]} />
 
-<T.AmbientLight intensity={light.amb + flash} color={light.ambC} />
+<T.AmbientLight intensity={droughtLight.amb + flash} color={droughtLight.ambC} />
 <T.DirectionalLight
 	bind:ref={sun}
-	intensity={light.dir}
-	color={light.dirC}
+	intensity={droughtLight.dir}
+	color={droughtLight.dirC}
 	castShadow
 	shadow.mapSize.width={2048}
 	shadow.mapSize.height={2048}
