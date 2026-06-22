@@ -377,6 +377,8 @@ const GRAZE_CROWD: f64 = 10.0; // herd size at which ground is fully overgrazed 
 const STARVE_DAMAGE: f64 = 0.05; // /s health bleeds while fullness is empty (~20 s of famine is fatal; slow enough to recover if food's found)
 const EAT_ENERGY: f64 = 0.85; // fullness a kill restores — a predator GORGES on a kill (feast), then coasts (famine)
 const FEED_SECS: f64 = 4.0; // seconds a predator hunkers over a fresh kill EATING (no fidgeting/re-targeting) before moving on
+const MEAT_SATED: f64 = 120.0; // seconds a meat meal (a rabbit) sustains a PERSON — within this they can breed
+const MEAT_HUNGRY: f64 = 40.0; // a person whose fed_meat drops below this goes hunting rabbits for more
 const STRIKE_DMG: f64 = 0.6; // health a predator's strike rips off the prey — a healthy prey SURVIVES the first hit
 // (wounded, it bolts → limps via HURT_AT), and the predator must run it down for the FINISHING blow → a brief struggle,
 // not an instant one-shot (user: "there should be a sense of fighting"). Already-wounded prey dies in one.
@@ -566,6 +568,8 @@ pub struct ManagedAgent {
     pub migrating: bool,      // a roamer steering toward another settlement this tick → surfaced to the HUD
     pub feeding: f64,         // seconds a predator stays put EATING a fresh kill (set on the catch) → it doesn't
     // fidget/re-target on the corpse; it hunkers down a few seconds, then moves on. Decrements in the metabolism pass.
+    pub fed_meat: f64,        // PEOPLE: seconds of "recently ate meat" left (set by eating a rabbit). People hunt
+    // rabbits when this runs low, and can't BREED while it's 0 (user: human energy + reproduction tied to meat).
     pub breed_cd: f64,        // seconds until it can breed again (>0 = on cooldown / a maturing juvenile)
     pub build_cd: f64,        // people only — seconds until this settler can raise another house (emergent cities)
     pub crowd: u32,           // flock neighbours this tick
@@ -692,6 +696,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         hunting: false,
         migrating: false,
         feeding: 0.0,
+        fed_meat: if matches!(kind, Kind::Person) { MEAT_SATED } else { 0.0 }, // founders start fed (can breed); only people use it
         breed_cd: 0.0,
         // start partway through a build cooldown (seeded) so a fresh town doesn't raise every house on one tick
         build_cd: BUILD_COOLDOWN * crate::simrng::rand(&[seed_id, CH_BUILD]),
@@ -750,7 +755,8 @@ fn preys_on(a: &ManagedAgent, b: &ManagedAgent) -> bool {
     }
     match eco(a.kind).hunts {
         Hunts::Lower => b.rank < a.rank,                                       // cat/lion/dino → anything below
-        Hunts::Humans => a.aggressive && matches!(b.kind, Kind::Person),       // aggressive person → people
+        // people HUNT RABBITS for meat (user), and aggressive ones also hunt their own kind
+        Hunts::Humans => matches!(b.kind, Kind::Rabbit) || (a.aggressive && matches!(b.kind, Kind::Person)),
         Hunts::None => false,
     }
 }
@@ -1609,6 +1615,7 @@ impl World {
                         self.kills.push(p); // finishing blow — turned to a corpse below
                         self.events.extend_from_slice(&[EV_KILL, self.agents[p].kind as usize as f32, self.agents[p].agent.x as f32, self.agents[p].agent.z as f32]);
                         self.agents[i].meals += 1;
+                        self.agents[i].fed_meat = MEAT_SATED; // a meat meal → people can breed for a while (no-op for others)
                         self.agents[i].feeding = FEED_SECS; // hunker down + eat (no fidget) for a few seconds
                         self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
                         self.agents[i].energy = (self.agents[i].energy + EAT_ENERGY).min(1.0); // the meal fills its belly
@@ -1811,6 +1818,9 @@ impl World {
             if self.agents[i].feeding > 0.0 {
                 self.agents[i].feeding -= DT; // eating-its-kill timer ebbs → then it moves on
             }
+            if self.agents[i].fed_meat > 0.0 {
+                self.agents[i].fed_meat -= DT; // "recently ate meat" ebbs → a person must hunt another rabbit to keep breeding
+            }
             if self.agents[i].build_cd > 0.0 {
                 self.agents[i].build_cd -= DT; // settler's between-builds cooldown ebbs
             }
@@ -1982,6 +1992,8 @@ impl World {
             && m.energy > BREED_ENERGY / self.vitality[m.kind as usize] // well-fed bar, EASED for a species the director is boosting
             && m.age >= m.lifespan * JUVENILE_FRAC // matured to sexual maturity (scales with lifespan — see JUVENILE_FRAC)
             && m.age < m.fertile_until // …and within its fertile window (female menopause / near-death for males)
+            && (!matches!(m.kind, Kind::Person) || m.fed_meat > 0.0) // PEOPLE need a recent MEAT meal (a rabbit) to breed
+
             && m.pregnant <= 0.0 // not already carrying a litter
             && !m.mobbed
             && m.spooked <= 0.0
@@ -2409,6 +2421,9 @@ impl World {
         // (and so isn't a threat). Non-carnivores always "seek" (their prey check just never matches).
         let a_seeks = if a_hunts {
             self.agents[i].hungry && self.agents[i].give_up_cd <= 0.0
+        } else if matches!(self.agents[i].kind, Kind::Person) {
+            // people hunt rabbits only when their MEAT is running low (light pressure) — they graze for the rest
+            self.agents[i].fed_meat < MEAT_HUNGRY && self.agents[i].give_up_cd <= 0.0
         } else {
             true
         };
@@ -2447,7 +2462,11 @@ impl World {
                     self.transient[i].prey = Some(j);
                     self.transient[i].prey_score = s;
                 }
-                if d2 < danger2 && d2 < self.transient[j].threat_d {
+                // a PERSON hunting a rabbit is a STEALTH/trap hunter, not a bolt-predator — the rabbit doesn't flee
+                // it (people are too slow to win a footrace, so they approach a milling rabbit + grab it). Other
+                // hunters still set the prey's flee-threat as before.
+                let stealth = matches!(self.agents[i].kind, Kind::Person) && matches!(self.agents[j].kind, Kind::Rabbit);
+                if !stealth && d2 < danger2 && d2 < self.transient[j].threat_d {
                     self.transient[j].threat = Some(i); // j fears its nearest hunter
                     self.transient[j].threat_d = d2;
                 }
@@ -3816,6 +3835,27 @@ mod tests {
         let d1: f64 = live.iter().map(|&i| near(&w, i)).sum::<f64>() / live.len().max(1) as f64;
         eprintln!("[migration] mean dist to nearest settlement {d0:.0} m → {d1:.0} m ({} roamers)", live.len());
         assert!(d1 < d0 - 15.0, "roamers didn't migrate toward a settlement ({d0:.0}→{d1:.0} m)");
+    }
+
+    // SCENARIO: a meat-hungry PERSON stalks + catches a nearby rabbit (people hunt rabbits for meat; the rabbit
+    // doesn't bolt from the slow human — stealth). Eating it replenishes fed_meat (which gates human breeding).
+    #[test]
+    fn a_meat_hungry_person_hunts_a_rabbit() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        let person = spawn_kind(&mut w, Kind::Person, 0.0, 0.0, 3);
+        let rabbit = spawn_kind(&mut w, Kind::Rabbit, 2.0, 0.0, 11);
+        w.agents[person].fed_meat = 0.0; // meat-hungry → goes hunting
+        w.agents[rabbit].health = 0.5; // one strike finishes (the struggle's covered elsewhere)
+        let mut fed = false;
+        for t in 1..=400 {
+            w.tick_once(t);
+            if w.agents[rabbit].dead && w.agents[person].fed_meat > 0.0 {
+                fed = true;
+                break;
+            }
+        }
+        assert!(fed, "a meat-hungry person should stalk + catch a nearby rabbit and replenish its meat");
     }
 
     // SCENARIO: a WELL-FED predator gives a settlement a wide berth (towns are safer); a STARVING one risks it.

@@ -230,6 +230,7 @@ pub fn decide(world: &mut World, px: f64, pz: f64, pspeed: f64, danger2: f64, hu
                         world.kills.push(p);
                         world.events.extend_from_slice(&[super::EV_KILL, world.agents[p].kind as usize as f32, world.agents[p].agent.x as f32, world.agents[p].agent.z as f32]);
                         world.agents[i].meals += 1;
+                        world.agents[i].fed_meat = super::MEAT_SATED; // meat meal → people can breed a while (no-op for others)
                         world.agents[i].feeding = super::FEED_SECS; // hunker down + eat (no fidget) a few seconds
                         world.agents[i].chase_ox = f64::NAN;
                         world.agents[i].energy = (world.agents[i].energy + super::EAT_ENERGY).min(1.0);
