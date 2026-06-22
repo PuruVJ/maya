@@ -22,6 +22,7 @@
 	import { loadWorld, saveWorld } from '$lib/worldStore';
 	import { SKY_BG } from '$lib/kinds';
 	import { enableWorldCurvature } from '$lib/curveWorld';
+	import { settlementPlan, SIZES } from '$lib/settlementPlanner';
 	import { llm } from '$lib/llm.svelte';
 	import { agentManager } from '$lib/agents.svelte';
 	import { editor } from '$lib/editor.svelte';
@@ -105,6 +106,25 @@
 		if (typeof window !== 'undefined') {
 			(window as unknown as { goto: (x: number, z: number) => void }).goto = (x, z) => {
 				playerState.teleportTo = [x, 0, z];
+			};
+			// DEV: `demoSettlements()` in the console drops a spaced GALLERY of planned towns (all sizes), logs each
+			// site's coordinates, and you teleport to them with goto(x,z). For previewing the settlement planner.
+			(window as unknown as { demoSettlements: () => void }).demoSettlements = () => {
+				const GAP = 240;
+				const COLS = 4;
+				if (!world.paths) world.paths = [];
+				const sites: { site: number; size: string; goto: string }[] = [];
+				for (let k = 0; k < 12; k++) {
+					const size = SIZES[k % SIZES.length];
+					const cx = 160 + (k % COLS) * GAP;
+					const cz = -GAP + Math.floor(k / COLS) * GAP;
+					const plan = settlementPlan(cx, cz, size, k * 1000 + 7, `demo${k}_`);
+					world.objects.push(...plan.objects);
+					world.paths!.push(...plan.paths);
+					sites.push({ site: k + 1, size, goto: `goto(${cx}, ${cz})` });
+				}
+				console.table(sites);
+				console.log('%c🏘️ Settlement gallery placed — teleport to a site with its goto(x, z) above.', 'font-weight:bold;font-size:13px');
 			};
 		}
 	});
