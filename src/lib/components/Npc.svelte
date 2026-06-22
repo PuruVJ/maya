@@ -85,6 +85,10 @@
 	let armL = $state<THREE.Group>();
 	let armR = $state<THREE.Group>();
 	let pregnant = $state(false); // mirrored from the sim each frame → toggles the belly (females only)
+	let guardian = $state(false); // her mate (expectant father) → carries a machete, mirrored from the sim
+	let bellyGrow = $state(0); // 0→1 ramp over the gestation window → the belly visibly grows as she progresses
+	const PREG_GROW_SECS = 60; // seconds for the belly to swell from first-trimester to full (≈ a person's gestation)
+	const bellyScale = $derived(0.5 + 0.5 * bellyGrow); // small bump → full term
 
 	const lean = new Spring(0, 9, 0.7);
 	const headYaw = new Spring(0, 6, 0.85);
@@ -156,6 +160,10 @@
 		// (far living agents already returned above; corpses fell through the dead branch)
 
 		if (pregnant !== managed.pregnant) pregnant = managed.pregnant; // surfaced to the belly mesh (write only on flip)
+		if (guardian !== managed.guardian) guardian = managed.guardian; // surfaced to the machete mesh
+		// belly grows over gestation (render-side ramp; resets the moment she's no longer carrying — i.e. delivered)
+		if (pregnant) bellyGrow = Math.min(1, bellyGrow + dt / PREG_GROW_SECS);
+		else if (bellyGrow !== 0) bellyGrow = 0;
 
 		// ASLEEP → lie down and rest (people rarely tire — only predators sleep — but handle it safely)
 		if (managed.asleep) {
@@ -173,6 +181,14 @@
 		if (legR) legR.rotation.x = -swing;
 		if (armL) armL.rotation.x = -swing * 0.85; // arms opposite their same-side leg
 		if (armR) armR.rotation.x = swing * 0.85;
+		// PREGNANT → both hands cradle the belly (forward + inward), with a tiny residual sway from the gait
+		if (pregnant && female) {
+			if (armL) ((armL.rotation.x = 1.05 + swing * 0.1), (armL.rotation.z = 0.32));
+			if (armR) ((armR.rotation.x = 1.05 - swing * 0.1), (armR.rotation.z = -0.32));
+		} else if (armL && armR) {
+			armL.rotation.z = 0; // clear any cradle lean when not (or no longer) carrying
+			armR.rotation.z = 0;
+		}
 
 		// secondary motion + a gentle STANDING idle so a paused person isn't a frozen mannequin: a slow breathing
 		// bob and a weight-shift sway, faded in as they slow (idle≈1 standing → 0 walking) and desynchronised
@@ -204,9 +220,9 @@
 		<T.Group bind:ref={core}>
 		<!-- torso · SHARED geometry + cached material -->
 		<T.Mesh position={[0, 1.05, 0]} geometry={NPC.torso} material={creatureMat(SHIRT)} castShadow />
-		<!-- PREGNANT → a rounded belly bulging forward (females only; mirrored from the sim's gestation) -->
+		<!-- PREGNANT → a rounded belly that grows over gestation (females only; bellyScale ramps 0.5→1 in the task) -->
 		{#if female && pregnant}
-			<T.Mesh geometry={PRIM.sphere} scale={[0.34, 0.32, 0.36]} position={[0, 0.92, 0.18]} material={creatureMat(SHIRT)} castShadow />
+			<T.Mesh geometry={PRIM.sphere} scale={[0.34 * bellyScale, 0.32 * bellyScale, 0.36 * bellyScale]} position={[0, 0.92, 0.12 + 0.08 * bellyScale]} material={creatureMat(SHIRT)} castShadow />
 		{/if}
 		<!-- head pivot -->
 		<T.Group bind:ref={head} position={[0, 1.62, 0]}>
@@ -227,6 +243,13 @@
 		</T.Group>
 		<T.Group bind:ref={armR} position={[-0.34, 1.4, 0]}>
 			<T.Mesh position={[0, -0.3, 0]} geometry={NPC.arm} material={creatureMat(SHIRT)} castShadow />
+			<!-- GUARDIAN (her expectant mate) grips a machete in his fist → he brandishes it to drive off predators -->
+			{#if guardian}
+				<T.Group position={[0, -0.62, 0.06]} rotation={[0.35, 0, 0]}>
+					<T.Mesh geometry={PRIM.box} scale={[0.05, 0.14, 0.05]} material={creatureMat('#5a3b22')} castShadow />
+					<T.Mesh geometry={PRIM.box} scale={[0.045, 0.52, 0.13]} position={[0, 0.33, 0]} material={creatureMat('#cfd6dd')} castShadow />
+				</T.Group>
+			{/if}
 		</T.Group>
 		<!-- legs (hip pivots; foot reaches the ground) -->
 		<T.Group bind:ref={legL} position={[0.14, 0.7, 0]}>

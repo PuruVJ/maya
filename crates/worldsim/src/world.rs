@@ -102,6 +102,8 @@ const HURT_AT: f64 = 0.45; // below this health an animal is injured → limps (
 const HURT_SPEED: f64 = 0.6; // injured locomotion multiplier (so a healthy hunter can run it down)
 const FRAIL_ONSET: f64 = 0.8; // past this fraction of its lifespan an animal SLOWS (senescence) …
 const FRAIL_MIN: f64 = 0.72; // … down to this speed multiplier at death — so predators cull the old/weak, generations turn over
+const PREGNANT_SPEED: f64 = 0.55; // a carrying female's walk speed multiplier (a slow waddle), unless fleeing a hunter
+const BRANDISH_SPOOK: f64 = 2.5; // seconds an expectant father's machete-brandish spooks / makes a predator give up
 const RIVAL_PATIENCE: f64 = 5.0; // seconds two apex predators tolerate crowding before they turn and fight
 const RIVAL_DPS: f64 = 0.35; // health/s each loses in a territorial scrap → one breaks off wounded (or down)
 
@@ -659,6 +661,11 @@ impl Snapshot {
             }
             if m.pregnant > 0.0 {
                 f |= 32; // bit5 → carrying a litter → the view shows a rounded belly
+            }
+            if let Some(p) = m.partner {
+                if p < world.agents.len() && world.agents[p].pregnant > 0.0 {
+                    f |= 64; // bit6 → his mate is expecting → an "armed guardian" (the view gives him a machete)
+                }
             }
             self.flags[i] = f;
             self.behaviors[i] = m.agent.behavior.code();
@@ -1791,6 +1798,18 @@ impl World {
                 self.events.extend_from_slice(&[EV_OLDAGE, k, ax, az]);
                 continue;
             }
+            // EXPECTANT FATHER STANDS GUARD — when a predator menaces him or his carrying mate, he BRANDISHES (his
+            // machete): the predator is spooked off + gives up the stalk. Aggression toward predators, not flight.
+            if let Some(mate) = self.agents[i].partner {
+                if mate < n && self.agents[mate].pregnant > 0.0 {
+                    for t in [self.transient[i].threat, self.transient[mate].threat].into_iter().flatten() {
+                        if t < n && !self.agents[t].dead && matches!(eco(self.agents[t].kind).hunts, Hunts::Lower) {
+                            self.agents[t].spooked = self.agents[t].spooked.max(BRANDISH_SPOOK);
+                            self.agents[t].give_up_cd = self.agents[t].give_up_cd.max(BRANDISH_SPOOK);
+                        }
+                    }
+                }
+            }
             let boost = self.behave[i].0;
             let endurance = self.agents[i].endurance;
             let is_carnivore = matches!(eco(self.agents[i].kind).hunts, Hunts::Lower);
@@ -1867,7 +1886,9 @@ impl World {
                     self.agents[i].partner = None;
                 } else {
                     self.agents[i].bond_age += DT;
-                    if self.agents[i].bond_age > BOND_REARING {
+                    // never split while she's still carrying — the couple stays glued through gestation
+                    let gestating = self.agents[i].pregnant > 0.0 || self.agents[p].pregnant > 0.0;
+                    if !gestating && self.agents[i].bond_age > BOND_REARING {
                         // one seeded roll per bond (key on the lower index + a coarse time bucket → fires once-ish)
                         let lo = i.min(p) as i32;
                         if crate::simrng::rand(&[lo, (self.clock.tick / 600) as i32, CH_BONDSPLIT]) < BOND_SPLIT_FRAC {
@@ -2035,7 +2056,12 @@ impl World {
                 continue;
             }
             let (fx, fz, crowd) = self.forces[i];
-            let (boost, pursuing) = self.behave[i];
+            let (mut boost, pursuing) = self.behave[i];
+            // PREGNANCY — she waddles (slow) while carrying, UNLESS fleeing a hunter (survival overrides). Applies in
+            // both behaviour arms since this step pass is shared. The mate's tether keeps him beside her regardless.
+            if self.agents[i].pregnant > 0.0 && !self.agents[i].hunting && self.agents[i].spooked <= 0.0 {
+                boost *= PREGNANT_SPEED;
+            }
             self.agents[i].crowd = crowd;
             let menu = menu_for(self.agents[i].kind);
             self.agents[i].agent.update(tick, DT, menu, Some((fx, fz)), boost, pursuing);
@@ -2409,10 +2435,14 @@ impl World {
                 let dx = agents[p].agent.x - ax;
                 let dz = agents[p].agent.z - az;
                 let d = dx.hypot(dz);
-                if d > 1.5 {
+                // while either is expecting, the mate sticks RIGHT beside her — tighter leash + stronger pull (the
+                // expectant father shadows her everywhere); otherwise the gentle family tether.
+                let gestating = m.pregnant > 0.0 || agents[p].pregnant > 0.0;
+                let (leash, pull) = if gestating { (0.8, BOND_W * 2.2) } else { (1.5, BOND_W) };
+                if d > leash {
                     // only pull when they've drifted apart (so they don't crowd-shove on top of each other)
-                    fx += dx / d * a_max * BOND_W;
-                    fz += dz / d * a_max * BOND_W;
+                    fx += dx / d * a_max * pull;
+                    fz += dz / d * a_max * pull;
                 }
             }
         }

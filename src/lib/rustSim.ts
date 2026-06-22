@@ -76,6 +76,17 @@ export function drainBuilds(): Build[] {
 	return out;
 }
 
+// conception events (a pair just bonded) → Scene floats a heart at the spot. [x,z] at the mom (≈ the couple's midpoint).
+export type Love = { x: number; z: number };
+let pendingLoves: Love[] = [];
+/** Pull (and clear) the bonding/conception spots since the last call — Scene pops a floating heart at each. */
+export function drainLoves(): Love[] {
+	if (pendingLoves.length === 0) return pendingLoves;
+	const out = pendingLoves;
+	pendingLoves = [];
+	return out;
+}
+
 let worker: Worker | null = null;
 let status: 'off' | 'loading' | 'ready' | 'failed' = 'off';
 
@@ -247,6 +258,12 @@ export function tickRust(dt: number): void {
 		// drain HOUSE-BUILD requests (settlers) → Scene places each as a house world-object. Flat [x,z,…].
 		const nbd = s!.builds.length / 2;
 		for (let k = 0; k < nbd; k++) pendingBuilds.push({ x: s!.builds[k * 2], z: s!.builds[k * 2 + 1] });
+		// drain CONCEIVE events (a pair just bonded) → Scene floats a heart at the spot. Events are [code,kind,x,z]×n.
+		const ne = s!.events.length / 4;
+		for (let k = 0; k < ne; k++) {
+			const o = k * 4;
+			if (s!.events[o] === 6 /* EV_CONCEIVE */) pendingLoves.push({ x: s!.events[o + 2], z: s!.events[o + 3] });
+		}
 	}
 
 	const px = playerState.pos[0];
@@ -321,6 +338,7 @@ export function tickRust(dt: number): void {
 		m.hunting = (f & 8) !== 0; // bit3 → this apex is charging the player → the view glares its eyes
 		m.migrating = (f & 16) !== 0; // bit4 → roamer en route to another settlement (HUD)
 		m.pregnant = (f & 32) !== 0; // bit5 → carrying a litter → the view shows a belly
+		m.guardian = (f & 64) !== 0; // bit6 → his mate is expecting → the view arms him with a machete
 		if (m.hunting) {
 			const dx = nx - px;
 			const dz = nz - pz;
