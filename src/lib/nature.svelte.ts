@@ -22,7 +22,29 @@ const EVENTS: { weight: number; make: () => Wildcard }[] = [
 
 class Nature {
 	banner = $state(''); // current announcement (HUD reads this; clears itself after a beat)
+	aridity = $state(1); // current DROUGHT level the director is holding (1 = normal); fed to the sim (set_aridity)
 	#token = 0;
+
+	/** MACRO-DIRECTOR slow shock (the LLM seam): read the world's pulse (live population) and steer the CLIMATE —
+	 *  a boom invites a DROUGHT that thins the herds at the watering holes; a crash brings the RAINS back. Returns
+	 *  the new aridity + an optional banner. Rule-based today; an LLM can later replace this body with a narrative
+	 *  call that reads richer state (vigor, morphs, settlements) and authors the shock. */
+	directClimate(pop: number): { aridity: number; banner: string | null } {
+		if (pop > 900) {
+			// overcrowded → a hard drought culls at the shrinking water (emergent watering-hole crises)
+			this.aridity = 2.2;
+			return { aridity: this.aridity, banner: '☀️ A drought grips the land — the ponds shrink and the herds crowd the water' };
+		}
+		if (pop < 200) {
+			// sparse → the rains return, water everywhere, life rebounds
+			this.aridity = 0.6;
+			return { aridity: this.aridity, banner: '🌧️ The rains return — water runs plentiful and the land greens' };
+		}
+		// healthy → ease the climate back toward normal, quietly (no banner spam)
+		this.aridity = this.aridity + (1 - this.aridity) * 0.5;
+		if (Math.abs(this.aridity - 1) < 0.05) this.aridity = 1;
+		return { aridity: this.aridity, banner: null };
+	}
 
 	/** Roll a weighted wildcard event (or null on the rare empty roll). Scene calls this on the wildcard timer. */
 	roll(): Wildcard | null {

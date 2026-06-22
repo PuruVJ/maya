@@ -52,6 +52,7 @@ type OutMsg =
 	| { type: 'obstacles'; flat: Float64Array }
 	| { type: 'refuges'; xz: Float64Array }
 	| { type: 'water'; xzr: Float64Array }
+	| { type: 'aridity'; a: number }
 	| { type: 'behaviorMode'; code: number }
 	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 type WorkerMsg = { type: 'ready' } | { type: 'failed'; error: string } | Snap;
@@ -117,6 +118,7 @@ let behindTarget = 0; // 1 while a hunter is in your back hemisphere → eased i
 let pendingObstacles: Float64Array | null = null; // survives the async worker load; flushed on 'ready'
 let pendingRefuges: Float64Array | null = null; // house centres (flee-to-safety); survives load, flushed on 'ready'
 let pendingWater: Float64Array | null = null; // drinkable water sources [x,z,r]×n (thirst); survives load, flushed on 'ready'
+let pendingAridity: number | null = null; // director drought level; survives load, flushed on 'ready'
 let popScale = 1; // world-area multiplier for prey caps (Scene computes it from the world's extent), rides the tick msg
 let behaviorCode = 1; // which decision brain the Rust world runs: 0 Manual · 1 Emergent (the default, see Sim::new)
 
@@ -190,6 +192,12 @@ export function setRustWater(ponds: { x: number; z: number; r: number }[]): void
 	if (worker && status === 'ready') worker.postMessage({ type: 'water', xzr } satisfies OutMsg);
 }
 
+/** DROUGHT level from the macro-director (Mother Nature / LLM): 1 = normal, >1 drier, <1 wetter. Scales thirst. */
+export function setRustAridity(a: number): void {
+	pendingAridity = a;
+	if (worker && status === 'ready') worker.postMessage({ type: 'aridity', a } satisfies OutMsg);
+}
+
 /** Lifecycle status — `AgentSystem` only ticks the world once this is `'ready'` (agents idle while loading;
  *  `'failed'` means the worker/wasm didn't load → agents stay put, no main-thread fallback). */
 export function rustStatus(): typeof status {
@@ -220,6 +228,7 @@ export async function initRustSim(): Promise<boolean> {
 					if (pendingObstacles) worker!.postMessage({ type: 'obstacles', flat: pendingObstacles } satisfies OutMsg);
 					if (pendingRefuges) worker!.postMessage({ type: 'refuges', xz: pendingRefuges } satisfies OutMsg);
 					if (pendingWater) worker!.postMessage({ type: 'water', xzr: pendingWater } satisfies OutMsg);
+					if (pendingAridity != null) worker!.postMessage({ type: 'aridity', a: pendingAridity } satisfies OutMsg);
 					if (behaviorCode !== 1) worker!.postMessage({ type: 'behaviorMode', code: behaviorCode } satisfies OutMsg); // re-assert a non-default (Manual) choice across loads
 					console.info('[rustSim] engine=rust ready (worker)');
 					resolve(true);

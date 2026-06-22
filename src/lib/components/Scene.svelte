@@ -39,7 +39,7 @@
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { drainBirths, drainBuilds, drainWells, rustTick } from '$lib/rustSim';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
-	import { setRustObstacles, setRustPopScale, setRustRefuges, setRustWater } from '$lib/rustSim';
+	import { setRustObstacles, setRustPopScale, setRustRefuges, setRustWater, setRustAridity } from '$lib/rustSim';
 	import { worldAreaScale } from '$lib/world';
 	import { streamRegions, regionOf, fastForwardDormant } from '$lib/streaming';
 	import { playerState } from '$lib/playerState.svelte';
@@ -230,6 +230,8 @@
 	const WILDCARD_MIN = 120; // seconds — soonest the next wildcard can fire
 	const WILDCARD_MAX = 240;
 	let wildcardT = 70 + Math.random() * 60; // first one a bit after you've settled in
+	const CLIMATE_PERIOD = 90; // seconds between macro-director climate checks (slow shocks, not twitchy weather)
+	let climateT = 40 + Math.random() * 30;
 
 	// LAZY / DISTANCE-CAPPED REVEAL — only realize STATIC builds (houses/trees/props/lamps) NEAR the player; far
 	// ones stay unmounted until you approach (they pop in front of you, emerging from the fog/curve). So reloading
@@ -504,6 +506,21 @@
 				}
 				nature.announce(wc.banner);
 			}
+		}
+
+		// MACRO-DIRECTOR climate shock (nature.directClimate, the LLM seam): on a slow timer read the world's pulse
+		// (live headcount) and steer the DROUGHT level — a boom brings a drought that thins the herds at the
+		// shrinking water; a crash brings the rains. Feeds the sim's set_aridity. Banner only on a real shift.
+		climateT -= dt;
+		if (climateT <= 0) {
+			climateT = CLIMATE_PERIOD;
+			let pop = 0;
+			agentManager.forEach((m) => {
+				if (!m.dead) pop++;
+			});
+			const c = nature.directClimate(pop);
+			setRustAridity(c.aridity);
+			if (c.banner) nature.announce(c.banner);
 		}
 
 		wind.uTime.value += dt; // the ONE shared foliage clock — Tree + AmbientScatter read it (never tick it)
