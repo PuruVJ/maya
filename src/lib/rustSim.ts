@@ -44,6 +44,7 @@ type Snap = {
 	builds: Float32Array; // [x,z]×n — house-build requests (Scene places them)
 	events: Float32Array; // [code,kind,x,z]×n — sim events from the worker (currently unused client-side)
 	danger: number;
+	ageMeans: Float32Array; // 6 — mean age fraction (0..1) per kind; -1 = none alive (HUD age readout)
 };
 type OutMsg =
 	| { type: 'init'; base: string; obstacles: Float64Array | null }
@@ -106,6 +107,12 @@ export function setRustBehaviorMode(emergent: boolean): boolean {
 /** The decision brain the sim is currently running (true = Emergent, false = Manual) — for the HUD readout. */
 export function rustBehaviorIsEmergent(): boolean {
 	return behaviorCode === 1;
+}
+
+let lastAgeMeans = new Float32Array(6).fill(-1); // mean age fraction per kind from the latest snapshot (HUD)
+/** Mean AGE as a fraction of lifespan (0..1) per kind [rabbit,cat,kangaroo,person,lion,dino]; -1 = none alive. */
+export function rustAgeMeans(): Float32Array {
+	return lastAgeMeans;
 }
 
 /** Set the world-AREA population multiplier — bigger/more-built world → higher prey caps (predators follow prey).
@@ -229,6 +236,7 @@ export function tickRust(dt: number): void {
 	if (hasSnap) {
 		appliedSeq = s!.seq;
 		lastDanger = s!.danger;
+		if (s!.ageMeans) lastAgeMeans = new Float32Array(s!.ageMeans); // mean age fraction per kind → HUD age readout
 		// drain this snapshot's NEWBORNS (Rust bred them) → Scene turns each into a world-object (which mounts +
 		// spawns back into the sim as a juvenile). Flat [kindCode,x,z,…].
 		const nb = s!.births.length / 6; // [kindCode, x, z, gene, motherFam, fatherFam] per birth

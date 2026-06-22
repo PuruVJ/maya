@@ -6,7 +6,7 @@
 	// living world is glanceable without staring at the numbers.
 	import { onMount } from 'svelte';
 	import { agentManager } from '$lib/agents.svelte';
-	import { rustBehaviorIsEmergent, setRustBehaviorMode } from '$lib/rustSim';
+	import { rustBehaviorIsEmergent, setRustBehaviorMode, rustAgeMeans } from '$lib/rustSim';
 	import type { World } from '$lib/world';
 
 	// the decision BRAIN driving the agents (docs/emergent-behavior.md): Emergent (needs+primitives+utility, the
@@ -48,6 +48,7 @@
 	let structures = $state<Record<string, number>>({}); // structure kind → count (near + dormant)
 	let settlements = $state(0); // clumps of ≥3 buildings (a "decently sized" settlement)
 	let liveByKind = $state<Record<string, number>>({}); // LIVE (individually simulated) per species — sex is only known for these
+	let ageMeans = $state<Float32Array>(new Float32Array(6).fill(-1)); // mean age fraction (0..1) per kind, by Kind index
 	const CREATURE_KINDS = new Set(['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur']);
 	const SETTLE_KINDS = new Set(['house', 'cabin', 'tower', 'manor']);
 	const STRUCT_ICON: Record<string, string> = { house: '🏠', cabin: '🛖', tower: '🗼', manor: '🏰', tree: '🌳', bush: '🌿', lamp: '🏮', grave: '🪦', fence: '🚧', rock: '🪨', pond: '💧' };
@@ -78,6 +79,7 @@
 			sexM = mle;
 			migrating = mig;
 			liveByKind = { ...c }; // snapshot LIVE counts (with sex) before the dormant aggregates are folded in below
+			ageMeans = rustAgeMeans(); // mean age fraction per kind (live) → the age readout below
 			// structures (near live + dormant statics) by kind, and settlement count (clumps of ≥3 buildings)
 			const st: Record<string, number> = {};
 			const homes: [number, number][] = [];
@@ -184,18 +186,20 @@
 			<!-- per-species TOTAL ♂/♀ across the whole world. Live ones are sexed exactly; dormant (streamed-away)
 			     ones are a headcount, so they're split ~50/50 (sex is seed-parity, ≈even) → an accurate total. ✈ is
 			     the live roamers migrating right now. -->
-			<div class="text-[10px] uppercase tracking-wide text-white/45">total ♂/♀ (incl. dormant) · ✈ migrating</div>
+			<div class="text-[10px] uppercase tracking-wide text-white/45">total ♂/♀ (incl. dormant) · ✈ migrating · 🎂 mean age (live)</div>
 			<div class="space-y-0.5">
-				{#each SPECIES as { k, icon } (k)}
+				{#each SPECIES as { k, icon }, idx (k)}
 					{#if counts[k]}
 						{@const dorm = Math.max(0, (counts[k] ?? 0) - (liveByKind[k] ?? 0))}
 						{@const tM = (sexM[k] ?? 0) + Math.ceil(dorm / 2)}
 						{@const tF = (sexF[k] ?? 0) + Math.floor(dorm / 2)}
+						{@const age = ageMeans[idx] ?? -1}
 						<div class="flex items-center justify-between tabular-nums">
 							<span class="w-12">{icon} {counts[k]}</span>
 							<span class="text-sky-300/80" title="males (live + ~half of {dorm} dormant)">♂{tM}</span>
 							<span class="text-pink-300/80" title="females (live + ~half of {dorm} dormant)">♀{tF}</span>
 							<span class="text-amber-300/90" title="live roamers migrating to another settlement now">✈{migrating[k] ?? 0}</span>
+							<span class="text-lime-300/80" title="mean age as % of lifespan, live (0 = all newborns, 100 = all elderly)">🎂{age >= 0 ? Math.round(age * 100) + '%' : '–'}</span>
 						</div>
 					{/if}
 				{/each}

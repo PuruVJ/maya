@@ -888,6 +888,21 @@ impl World {
         self.behavior_mode
     }
 
+    /// Mean AGE as a fraction of lifespan (0 newborn … 1 at death) per Kind, for the HUD's age readout — lets the
+    /// player see a population's "oldness" + trends on one 0–100 scale across species. -1 for a kind with none alive.
+    pub fn age_means(&self) -> Vec<f32> {
+        let mut sum = [0f32; 6];
+        let mut cnt = [0u32; 6];
+        for m in self.agents.iter() {
+            if !m.dead {
+                let k = m.kind as usize;
+                sum[k] += (m.age / m.lifespan.max(1.0)) as f32;
+                cnt[k] += 1;
+            }
+        }
+        (0..6).map(|k| if cnt[k] > 0 { sum[k] / cnt[k] as f32 } else { -1.0 }).collect()
+    }
+
     /// How nocturnal the world is (0 day … 1 night) — widens the prey's danger radius.
     pub fn set_night(&mut self, n: f64) {
         self.night = n.clamp(0.0, 1.0);

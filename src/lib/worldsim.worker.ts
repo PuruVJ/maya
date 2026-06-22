@@ -37,6 +37,8 @@ interface RustSim {
 	set_refuges(xz: Float64Array): void;
 	set_obstacles(flat: Float64Array): void;
 	set_behavior_mode(code: number): void; // 0 = Manual (hand-coded) · 1 = Emergent (needs+utility, the default)
+	age_means(): Float32Array; // mean age fraction (0..1) per kind → the HUD age readout
+	set_player_immune(immune: number): void;
 	set_lineage(i: number, pfamA: number, pfamB: number): void; // newborn's parent lineage ids → incest avoidance
 	step(dt: number): void;
 	count(): number;
@@ -166,8 +168,9 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 	const ne = sim.event_count();
 	const events = ne > 0 ? new Float32Array(wasm.memory.buffer, sim.events_ptr(), ne * 4).slice() : new Float32Array(0); // [code,kind,x,z]×ne
 
+	const ageMeans = sim.age_means(); // 6 floats — mean age fraction per kind (HUD age readout); tiny, not transferred
 	ctx.postMessage(
-		{ type: 'snap', seq: d.seq, count: viewCount, xs: sx, zs: sz, headings: sh, healths: shp, flags: sf, behaviors: sb, progress: sp, births, builds, events, danger: sim.danger() },
+		{ type: 'snap', seq: d.seq, count: viewCount, xs: sx, zs: sz, headings: sh, healths: shp, flags: sf, behaviors: sb, progress: sp, births, builds, events, danger: sim.danger(), ageMeans },
 		[sx.buffer, sz.buffer, sh.buffer, shp.buffer, sf.buffer, sb.buffer, sp.buffer, births.buffer, builds.buffer, events.buffer]
 	);
 };

@@ -148,6 +148,11 @@ mod wasm_api {
             self.world.set_behavior_mode(BehaviorMode::from_code(code));
         }
 
+        /// Mean age (fraction of lifespan, 0..1) per Kind [rabbit,cat,kangaroo,person,lion,dino]; -1 = none alive.
+        pub fn age_means(&self) -> Vec<f32> {
+            self.world.age_means()
+        }
+
         /// The brain currently running (0 = Manual · 1 = Emergent) — for the HUD readout / persistence.
         pub fn behavior_mode(&self) -> u8 {
             match self.world.behavior_mode() {
