@@ -130,6 +130,9 @@ const MIGRATE_R2: f64 = MIGRATE_R * MIGRATE_R;
 const MIGRATE_W: f64 = 0.55; // travel drive toward the chosen settlement (gentle — below flee/dispersal, like BAND_SEEK_W)
 const CH_MIGRATE: i32 = 30; // RNG channel for the per-(agent,settlement) jitter that decorrelates who goes where
 const CH_WANDERLUST: i32 = 32; // RNG channel for the per-person "restless wanderer" trait roll
+const WANDER_PERIOD: i64 = 900; // ticks (~30 s) — restlessness is RE-ROLLED each period so migration is EPISODIC
+// (a wanderer gets the itch, relocates, then settles + breeds; a different subset gets it later) — not a permanent
+// nomad stuck forever en route. Keeps the migrating count fluctuating + gives every kind its turns.
 const WANDER_FRAC: f64 = 0.2; // base RESTLESS share (× the per-kind weight below) — wanderers leave even a comfortable
 // spot to found/join a sparser one elsewhere and breed there (gene flow + spread). The rest settle + anchor.
 
@@ -2286,7 +2289,8 @@ impl World {
         // to fresh range (nomadic relocation). Decentralised + occupancy-aware → no "everyone to one spot".
         let mig_t = migrate_weight(m.kind) * age_migrate_factor(m.age, m.lifespan);
         if mig_t > 0.0 {
-            let wanderer = crate::simrng::rand(&[m.seed_id, CH_WANDERLUST]) < WANDER_FRAC * mig_t;
+            let bucket = (self.clock.tick / WANDER_PERIOD) as i32; // re-rolled each period → episodic, not perpetual
+            let wanderer = crate::simrng::rand(&[m.seed_id, bucket, CH_WANDERLUST]) < WANDER_FRAC * mig_t;
             let w = a_max * MIGRATE_W * migrate_weight(m.kind);
             if is_person && !self.refuges.is_empty() {
                 let want = match self.here_occupancy(ax, az) {
