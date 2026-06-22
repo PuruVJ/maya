@@ -30,6 +30,12 @@
 		{ k: 'dinosaur', icon: '🦖' }
 	] as const;
 
+	// per-species migratory tendency (mirrors the Rust sim's migrate_weight) → used to ESTIMATE how many of the
+	// DORMANT (streamed-away) population are roaming, so ✈ stays a whole-world stat instead of collapsing to the
+	// handful of live agents near you. DORMANT_MIGRATE_FRAC ≈ the share of a migratory population en route at once.
+	const MIGRATE_WEIGHT: Record<string, number> = { person: 1.0, kangaroo: 0.7, dinosaur: 0.6, lion: 0.55, cat: 0.4, rabbit: 0.3 };
+	const DORMANT_MIGRATE_FRAC = 0.12;
+
 	let counts = $state<Record<string, number>>({});
 	let pulse = $state<Record<string, number>>({}); // bumps on every change → re-keys the chip so the flash replays
 	let dir = $state<Record<string, number>>({}); // +1 = gained (green), -1 = lost (red) — picks which flash plays
@@ -77,7 +83,6 @@
 			});
 			sexF = f;
 			sexM = mle;
-			migrating = mig;
 			liveByKind = { ...c }; // snapshot LIVE counts (with sex) before the dormant aggregates are folded in below
 			ageMeans = rustAgeMeans(); // mean age fraction per kind (live) → the age readout below
 			// structures (near live + dormant statics) by kind, and settlement count (clumps of ≥3 buildings)
@@ -111,11 +116,15 @@
 					for (const k in agg.counts) {
 						c[k] = (c[k] ?? 0) + agg.counts[k];
 						regN += agg.counts[k];
+						// ESTIMATE dormant roamers (no per-agent flag out here) → ✈ reflects the whole world, not just nearby
+						mig[k] = (mig[k] ?? 0) + agg.counts[k] * (MIGRATE_WEIGHT[k] ?? 0.3) * DORMANT_MIGRATE_FRAC;
 					}
 					live += regN;
 					geneSum += Math.min(1.6, Math.max(0.6, agg.gene)) * regN; // clamp the dormant aggregate's gene too
 				}
 			}
+			for (const k in mig) mig[k] = Math.round(mig[k]); // live (exact) + dormant (estimated) → whole-world ✈
+			migrating = mig;
 			if (!first) {
 				for (const { k } of SPECIES) {
 					const cur = c[k] ?? 0;
@@ -185,8 +194,8 @@
 		>
 			<!-- per-species TOTAL ♂/♀ across the whole world. Live ones are sexed exactly; dormant (streamed-away)
 			     ones are a headcount, so they're split ~50/50 (sex is seed-parity, ≈even) → an accurate total. ✈ is
-			     the live roamers migrating right now. -->
-			<div class="text-[10px] uppercase tracking-wide text-white/45">total ♂/♀ (incl. dormant) · ✈ migrating · 🎂 mean age (live)</div>
+			     whole-world: live roamers (exact) + an estimate of the dormant population on the move (by migrate-weight). -->
+			<div class="text-[10px] uppercase tracking-wide text-white/45">total ♂/♀ (incl. dormant) · ✈ migrating (world) · 🎂 mean age (live)</div>
 			<div class="space-y-0.5">
 				{#each SPECIES as { k, icon }, idx (k)}
 					{#if counts[k]}
@@ -198,7 +207,7 @@
 							<span class="w-12">{icon} {counts[k]}</span>
 							<span class="text-sky-300/80" title="males (live + ~half of {dorm} dormant)">♂{tM}</span>
 							<span class="text-pink-300/80" title="females (live + ~half of {dorm} dormant)">♀{tF}</span>
-							<span class="text-amber-300/90" title="live roamers migrating to another settlement now">✈{migrating[k] ?? 0}</span>
+							<span class="text-amber-300/90" title="roamers migrating to another settlement — whole world (live exact + dormant estimate)">✈{migrating[k] ?? 0}</span>
 							<span class="text-lime-300/80" title="mean age as % of lifespan, live (0 = all newborns, 100 = all elderly)">🎂{age >= 0 ? Math.round(age * 100) + '%' : '–'}</span>
 						</div>
 					{/if}
