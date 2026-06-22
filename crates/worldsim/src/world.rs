@@ -130,6 +130,9 @@ const MIGRATE_R2: f64 = MIGRATE_R * MIGRATE_R;
 const MIGRATE_W: f64 = 0.55; // travel drive toward the chosen settlement (gentle — below flee/dispersal, like BAND_SEEK_W)
 const CH_MIGRATE: i32 = 30; // RNG channel for the per-(agent,settlement) jitter that decorrelates who goes where
 const CH_WANDERLUST: i32 = 32; // RNG channel for the per-person "restless wanderer" trait roll
+const SETTLEMENT_AVOID_R: f64 = 50.0; // a predator steers away from a town centre within this range (unless desperate)
+const SETTLEMENT_AVOID_W: f64 = 1.4; // strength of that aversion (moderate — a really-hungry predator still goes in)
+const PRED_DESPERATE: f64 = 0.35; // fullness below which a predator is hungry enough to RISK raiding a settlement
 const WANDER_PERIOD: i64 = 900; // ticks (~30 s) — restlessness is RE-ROLLED each period so migration is EPISODIC
 // (a wanderer gets the itch, relocates, then settles + breeds; a different subset gets it later) — not a permanent
 // nomad stuck forever en route. Keeps the migrating count fluctuating + gives every kind its turns.
@@ -2317,6 +2320,22 @@ impl World {
             }
         }
 
+        // PREDATORS AVOID SETTLEMENTS — a carnivore steers AWAY from a nearby town UNLESS it's REALLY hungry
+        // (desperation drives it in to hunt) or a mother shadowing her young (she'll risk the edge). Towns stay safer.
+        if matches!(eco(m.kind).hunts, Hunts::Lower) {
+            let really_hungry = m.energy < PRED_DESPERATE;
+            let mother = is_female(m.seed_id) && m.breed_cd > 0.0; // recently bred → has young about
+            if !really_hungry && !mother {
+                if let Some((rx, rz)) = self.nearest_refuge(ax, az, SETTLEMENT_AVOID_R) {
+                    let (dx, dz) = (ax - rx, az - rz); // push away from the town centre
+                    let d = dx.hypot(dz).max(0.1);
+                    let falloff = 1.0 - d / SETTLEMENT_AVOID_R; // stronger the closer it is
+                    fx += dx / d * a_max * SETTLEMENT_AVOID_W * falloff;
+                    fz += dz / d * a_max * SETTLEMENT_AVOID_W * falloff;
+                }
+            }
+        }
+
         // DISPERSAL — a young herbivore in a crowded patch heads off to colonise new ground (see consts). Direction
         // is seeded (steady per animal) so it commits to a heading and travels, rather than jittering in place; the
         // drive ramps with crowding and vanishes once it reaches open range, so it settles where there's room.
@@ -3797,6 +3816,36 @@ mod tests {
         let d1: f64 = live.iter().map(|&i| near(&w, i)).sum::<f64>() / live.len().max(1) as f64;
         eprintln!("[migration] mean dist to nearest settlement {d0:.0} m → {d1:.0} m ({} roamers)", live.len());
         assert!(d1 < d0 - 15.0, "roamers didn't migrate toward a settlement ({d0:.0}→{d1:.0} m)");
+    }
+
+    // SCENARIO: a WELL-FED predator gives a settlement a wide berth (towns are safer); a STARVING one risks it.
+    #[test]
+    fn well_fed_predator_avoids_a_settlement_starving_risks_it() {
+        let near = |w: &World, c: usize| w.agents[c].agent.x.hypot(w.agents[c].agent.z);
+        // well-fed cat near a town → drifts AWAY
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        w.set_refuges(&[0.0, 0.0]); // a settlement centre
+        let cat = spawn_kind(&mut w, Kind::Cat, 18.0, 0.0, 7); // within SETTLEMENT_AVOID_R, male (not a mother)
+        w.agents[cat].energy = 0.9; // not desperate
+        let d0 = near(&w, cat);
+        for t in 1..=150 {
+            w.tick_once(t);
+        }
+        let d1 = near(&w, cat);
+        eprintln!("[pred-avoid] well-fed cat {d0:.0} → {d1:.0} m from town");
+        assert!(d1 > d0 + 3.0, "a well-fed predator should leave the settlement's edge ({d0:.0}→{d1:.0} m)");
+        // a STARVING cat in the same spot does NOT flee the town (it'll risk a raid) → stays closer than the fed one
+        let mut w2 = mw();
+        w2.set_player(1e4, 1e4);
+        w2.set_refuges(&[0.0, 0.0]);
+        let hungry = spawn_kind(&mut w2, Kind::Cat, 18.0, 0.0, 7);
+        w2.agents[hungry].energy = 0.1; // desperate
+        for t in 1..=150 {
+            w2.tick_once(t);
+        }
+        eprintln!("[pred-avoid] starving cat {:.0} m from town (vs fed {d1:.0})", near(&w2, hungry));
+        assert!(near(&w2, hungry) < d1, "a starving predator risks the settlement (stays nearer than a fed one)");
     }
 
     // ─────────────────────────── EMERGENT MODE — on-par scenario parity ───────────────────────────
