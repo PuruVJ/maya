@@ -370,6 +370,7 @@ const GRAZE_RATE: f64 = 0.16; // /s a calm herbivore on UNcrowded ground refuels
 const GRAZE_CROWD: f64 = 10.0; // herd size at which ground is fully overgrazed → grazing yields ~nothing (raised: less starvation)
 const STARVE_DAMAGE: f64 = 0.05; // /s health bleeds while fullness is empty (~20 s of famine is fatal; slow enough to recover if food's found)
 const EAT_ENERGY: f64 = 0.85; // fullness a kill restores — a predator GORGES on a kill (feast), then coasts (famine)
+const FEED_SECS: f64 = 4.0; // seconds a predator hunkers over a fresh kill EATING (no fidgeting/re-targeting) before moving on
 // SCAVENGING — a fresh carcass (any natural/predation death) feeds a hungry carnivore that finds it, so deaths
 // aren't wasted (vultures/hyenas). A corpse carries CARRION_MEAT edible-seconds at death; it rots at 1×/s and
 // drains faster while being eaten. A hungry carnivore within SCAVENGE_R pads over; in contact it refuels energy.
@@ -554,6 +555,8 @@ pub struct ManagedAgent {
     pub companion: bool,      // the player's pet → its leash tracks the player (follows) and it doesn't fear you
     pub hunting: bool,        // this apex is actively charging the PLAYER this tick → the view glares its eyes
     pub migrating: bool,      // a roamer steering toward another settlement this tick → surfaced to the HUD
+    pub feeding: f64,         // seconds a predator stays put EATING a fresh kill (set on the catch) → it doesn't
+    // fidget/re-target on the corpse; it hunkers down a few seconds, then moves on. Decrements in the metabolism pass.
     pub breed_cd: f64,        // seconds until it can breed again (>0 = on cooldown / a maturing juvenile)
     pub build_cd: f64,        // people only — seconds until this settler can raise another house (emergent cities)
     pub crowd: u32,           // flock neighbours this tick
@@ -679,6 +682,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         companion: false,
         hunting: false,
         migrating: false,
+        feeding: 0.0,
         breed_cd: 0.0,
         // start partway through a build cooldown (seeded) so a fresh town doesn't raise every house on one tick
         build_cd: BUILD_COOLDOWN * crate::simrng::rand(&[seed_id, CH_BUILD]),
@@ -1380,6 +1384,10 @@ impl World {
             if self.agents[i].dead || self.slept[i] {
                 continue;
             }
+            if self.agents[i].feeding > 0.0 {
+                self.behave[i] = (1.0, true); // hunkered over a fresh kill → settle + eat, don't fidget/re-target
+                continue;
+            }
             let ax = self.agents[i].agent.x;
             let az = self.agents[i].agent.z;
             let a_max = self.agents[i].agent.max_speed;
@@ -1588,6 +1596,7 @@ impl World {
                     self.kills.push(p); // caught — turned to a corpse below
                     self.events.extend_from_slice(&[EV_KILL, self.agents[p].kind as usize as f32, self.agents[p].agent.x as f32, self.agents[p].agent.z as f32]);
                     self.agents[i].meals += 1;
+                    self.agents[i].feeding = FEED_SECS; // hunker down + eat (no fidget) for a few seconds
                     self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
                     self.agents[i].energy = (self.agents[i].energy + EAT_ENERGY).min(1.0); // the meal fills its belly
                     // EAT — a kill refuels energy; once gorged (full_after kills) it drops into a food-coma
@@ -1784,6 +1793,9 @@ impl World {
             }
             if self.agents[i].breed_cd > 0.0 {
                 self.agents[i].breed_cd -= DT; // post-birth / juvenile maturation cooldown ebbs
+            }
+            if self.agents[i].feeding > 0.0 {
+                self.agents[i].feeding -= DT; // eating-its-kill timer ebbs → then it moves on
             }
             if self.agents[i].build_cd > 0.0 {
                 self.agents[i].build_cd -= DT; // settler's between-builds cooldown ebbs
