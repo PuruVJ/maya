@@ -44,17 +44,20 @@ export function speedFor(kind: string, seedId: number): number {
 }
 
 // render-side perf-flag thresholds (the only sim-ish constants left — used by assignPerfFlags / #assignShadows)
-const LOD1_DIST = 26;
+// Reveal distances bumped (the AmbientScatter freeze fix freed main-thread budget): full articulated animals now
+// draw FARTHER before dropping to the flat impostor (user: "increase the radius of drawing the full animal rather
+// than a floating cube"). Tune down if a 1000-strong herd ever hitches again.
+const LOD1_DIST = 36;
 // LOD2 = "far": the full articulated Critter/Npc mesh is shed and the agent draws via the instanced impostor.
 // Exported so those components can init their mesh-mounted state from spawn distance (avoid the mount storm).
-export const LOD2_DIST = 62;
+export const LOD2_DIST = 95;
 const SHADOW_AGENTS = 12; // only the nearest few cast shadows (shadows are the dominant cost at scale)
 // MESH BUDGET — cap full articulated meshes to the nearest N agents. Distance-LOD alone fails for a CLUSTER:
 // spawn 1000 cats around you and hundreds sit inside LOD2_DIST → hundreds of ~15-node bodies + per-frame tasks
 // + shadow work → the main thread hangs (the Worker moved the SIM off-thread, not this render cost). With a
 // COUNT cap, surplus near agents fall back to the instanced impostor (2 draw calls), so a dense crowd costs a
 // fixed amount no matter how many you spawn — the nearest N stay fully articulated (you only scrutinise those).
-const MESH_BUDGET = 96;
+const MESH_BUDGET = 150;
 
 // CORPSE DECAY: now that reproduction makes the world cycle life→death→corpse forever, bodies would pile up
 // without bound (scene graph + the saved share-link both grow). A corpse lingers (you wanted to SEE dead
