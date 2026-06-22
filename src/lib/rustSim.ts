@@ -281,7 +281,7 @@ export function tickRust(dt: number): void {
 		const slot = freeSlots.pop() ?? nextSlot++;
 		slotOf.set(m, slot);
 		tracked[slot] = m;
-		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile, gene: m.gene ?? 1, pfamA: m.pfamA ?? 0, pfamB: m.pfamB ?? 0, genome: m.genome ?? null });
+		spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile, gene: m.gene ?? 1, pfamA: m.pfamA ?? 0, pfamB: m.pfamB ?? 0, genome: m.genome ? Array.from(m.genome) : null }); // plain copy — m.genome may be a $state Proxy (not cloneable to the worker)
 	});
 
 	// Mirror a fresh snapshot onto the live roster.

@@ -68,7 +68,7 @@
 			agentManager.forEach((m) => {
 				if (m.dead) return; // live only (corpses excluded)
 				c[m.kind] = (c[m.kind] ?? 0) + 1;
-				geneSum += m.gene ?? 1; // founders carry no JS gene → baseline 1.0 (matches the Rust founder gene)
+				geneSum += Math.min(1.6, Math.max(0.6, m.gene ?? 1)); // gene is defined 0.6..1.6; clamp the readout defensively
 				// sex: even seedId = female (matches Rust is_female); migrating = the Rust roamer flag (bit4)
 				if ((m.seedId & 1) === 0) f[m.kind] = (f[m.kind] ?? 0) + 1;
 				else mle[m.kind] = (mle[m.kind] ?? 0) + 1;
@@ -113,7 +113,7 @@
 						regN += agg.counts[k];
 					}
 					live += regN;
-					geneSum += agg.gene * regN;
+					geneSum += Math.min(1.6, Math.max(0.6, agg.gene)) * regN; // clamp the dormant aggregate's gene too
 				}
 			}
 			if (!first) {

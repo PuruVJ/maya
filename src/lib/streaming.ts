@@ -59,7 +59,7 @@ export function collapseRegion(world: World, key: string, tick: number): void {
 	for (const k in counts) merged[k] = (merged[k] ?? 0) + counts[k];
 	world.regions[key] = {
 		counts: merged,
-		gene: geneN > 0 ? geneSum / geneN : (prev?.gene ?? 1),
+		gene: Math.min(1.6, Math.max(0.6, geneN > 0 ? geneSum / geneN : (prev?.gene ?? 1))),
 		statics: [...(prev?.statics ?? []), ...statics],
 		lastTick: tick
 	};
@@ -117,7 +117,10 @@ export function fastForwardDormant(world: World, tick: number): void {
 		if (adv) {
 			const next: Record<string, number> = {};
 			FF_KINDS.forEach((k, i) => (next[k] = adv[i]));
-			agg.gene = rustFfGene(agg.gene, c, dtSec); // evolve vigor over the span BEFORE overwriting counts
+			// evolve vigor over the span (BEFORE overwriting counts). CLAMP defensively to the gene band: ff_gene
+			// should already, but a stale/mismatched main-thread wasm must never let agg.gene drift past 1.6 — that
+			// was inflating the HUD "vigor" readout over time (and region-dependent, as dormant regions came/went).
+			agg.gene = Math.min(1.6, Math.max(0.6, rustFfGene(agg.gene, c, dtSec)));
 			agg.counts = next;
 		}
 		agg.lastTick = tick;
