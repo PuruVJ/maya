@@ -48,6 +48,26 @@ impl Genome {
         }
     }
 
+    /// FORAGE PHENOTYPE — the trade-off that turns `safety` from a pure-downside knob into a real NICHE axis.
+    /// A BOLD individual (low `safety`) ventures onto richer open ground → refuels FASTER (this bonus), but its
+    /// low flee-drive (utility scorer) gets it CAUGHT more. A CAUTIOUS one (high `safety`) forages timidly near
+    /// cover → refuels slower, but survives predators. Neither dominates: bold out-breeds when rare, gets culled
+    /// when common (predators face abundant easy targets) → NEGATIVE FREQUENCY DEPENDENCE keeps both lineages
+    /// alive. Returns 1.0 at the NEUTRAL safety=1.0, so Manual mode (neutral genome) forages exactly as before.
+    pub fn forage(&self) -> f64 {
+        (1.5 - 0.5 * self.safety).clamp(0.6, 1.55)
+    }
+
+    /// BREED-HASTE — the primary niche lever (r/K selection). A BOLD individual (low `safety`) lives fast: it
+    /// recovers between litters SOONER (>1 → shorter breed cooldown) so it out-reproduces — paying for it by
+    /// fleeing late and getting eaten (the utility scorer). A CAUTIOUS one (high `safety`) breeds slowly but
+    /// survives. Bold wins when rare, is culled when common → the two strategies coexist instead of one sweeping.
+    /// Prey aren't energy-limited (they graze to full in seconds), so REPRODUCTIVE rate — not forage — is the
+    /// fitness currency the trade-off must spend. 1.0 at the NEUTRAL safety=1.0 → Manual mode is unchanged.
+    pub fn breed_haste(&self) -> f64 {
+        (1.6 - 0.6 * self.safety).clamp(0.7, 1.6)
+    }
+
     /// A litter's inherited genome: the average of both parents' weights, ± a seeded mutation per weight,
     /// clamped to a sane band. Same shape as the vigor gene's inheritance, so the two evolve in lockstep.
     pub fn inherit(a: &Genome, b: &Genome, seed_a: i32, seed_b: i32, tick: i32) -> Genome {

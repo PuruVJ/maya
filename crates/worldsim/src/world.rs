@@ -1846,7 +1846,9 @@ impl World {
                 let mut en = self.agents[i].energy - drain * DT;
                 if !is_carnivore && boost <= 1.0 && self.agents[i].spooked <= 0.0 {
                     let lushness = (1.0 - self.agents[i].crowd as f64 / GRAZE_CROWD).max(0.0);
-                    en += GRAZE_RATE * lushness * DT;
+                    // BOLD foragers refuel faster on open ground (they also flee later → caught more): the trade-off
+                    // that makes `safety` a niche axis, not a one-way ratchet. Neutral genome (Manual) → forage()=1.
+                    en += GRAZE_RATE * lushness * self.agents[i].weights.forage() * DT;
                 }
                 self.agents[i].energy = en.clamp(0.0, 1.0);
             }
@@ -2013,8 +2015,10 @@ impl World {
                 self.agents[mom].pregnant = gestation(self.agents[mom].kind);
                 self.events.extend_from_slice(&[EV_CONCEIVE, kc as f32, self.agents[mom].agent.x as f32, self.agents[mom].agent.z as f32]);
                 let vit = self.vitality[kc]; // director boost → shorter recovery between litters
-                self.agents[i].breed_cd = BREED_COOLDOWN / vit;
-                self.agents[j].breed_cd = BREED_COOLDOWN / vit;
+                // each parent's own boldness sets how fast IT bounces back (r/K niche lever): bold → shorter cd →
+                // more litters, paid for by dying more (flees late). Neutral genome (Manual) → haste 1.0 → unchanged.
+                self.agents[i].breed_cd = BREED_COOLDOWN / (vit * self.agents[i].weights.breed_haste());
+                self.agents[j].breed_cd = BREED_COOLDOWN / (vit * self.agents[j].weights.breed_haste());
                 self.agents[i].energy = (self.agents[i].energy - BREED_COST).max(0.0);
                 self.agents[j].energy = (self.agents[j].energy - BREED_COST).max(0.0);
                 // PAIR-BOND: the couple sticks together to raise this litter (tether in flock); the timer resets so
@@ -4169,5 +4173,47 @@ mod tests {
             }
         }
         assert!(caught, "emergent hungry lion failed to catch an adjacent rabbit — Hunt primitive isn't resolving kills");
+    }
+
+    // SCENARIO (emergent · EMERGENCE ENDGAME): the boldness niche must COEXIST, not collapse to one optimum.
+    // `safety` used to be a pure-downside knob (low → flees late → dies, with no upside) so selection swept it
+    // UP and strategy diversity died — that's drift, not emergence. The forage trade-off (bold refuels faster
+    // on open ground, cautious survives predators) makes it a real niche axis held open by NEGATIVE FREQUENCY
+    // DEPENDENCE (bold thrives when rare, gets culled when common). The emergence signal is SUSTAINED DIVERSITY:
+    // after many generations under predation, BOTH a bold cohort and a cautious cohort must still be alive.
+    #[test]
+    fn scenario_emergent_boldness_niches_coexist() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 120, 0.0, 0.0, 80.0, 1000);
+        cluster(&mut w, Kind::Cat, 8, 0.0, 0.0, 60.0, 6000);
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s); // stagger ages → overlapping generations, deaths not synchronized
+        }
+        run_pop(&mut w, 18000); // ≈600 s → many rabbit generations, enough for selection to sweep IF it would
+        let (mut bold, mut cautious, mut n, mut sum, mut sq) = (0usize, 0usize, 0usize, 0.0, 0.0);
+        for m in &w.agents {
+            if m.dead || m.kind != Kind::Rabbit {
+                continue;
+            }
+            let s = m.weights.safety;
+            n += 1;
+            sum += s;
+            sq += s * s;
+            if s < 0.85 {
+                bold += 1;
+            }
+            if s > 1.15 {
+                cautious += 1;
+            }
+        }
+        let mean = if n > 0 { sum / n as f64 } else { 0.0 };
+        let sd = if n > 0 { (sq / n as f64 - mean * mean).max(0.0).sqrt() } else { 0.0 };
+        eprintln!("[emergent boldness-niches] rabbits={n} mean_safety={mean:.2} sd={sd:.2} bold(<0.85)={bold} cautious(>1.15)={cautious}");
+        assert!(n >= 20, "rabbit population crashed to {n} — the forage trade-off destabilised the world");
+        assert!(
+            bold >= 2 && cautious >= 2,
+            "boldness niche collapsed (bold={bold}, cautious={cautious}, mean={mean:.2}) — one strategy swept; this is drift, not emergence"
+        );
     }
 }
