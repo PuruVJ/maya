@@ -149,9 +149,13 @@
 		const pcx = Math.round(playerState.pos[0] / REBUILD) * REBUILD;
 		const pcz = Math.round(playerState.pos[2] / REBUILD) * REBUILD;
 		const len = world.terrain.length;
-		const zl = world.zones?.length ?? 0; // re-scatter when zones/paths/objects change (a new lake/road/house clears its trees)
+		const zl = world.zones?.length ?? 0; // re-scatter when zones/paths/SOLID objects change (a new lake/road/house clears its trees)
 		const pl = world.paths?.length ?? 0;
-		const ol = world.objects.length;
+		// count only SOLID objects (buildings/props/trees) — NOT creatures (they're excluded from the grid below).
+		// Using world.objects.length here re-scattered ~3000 trees on EVERY creature birth/death (a 10–15 ms hitch
+		// most frames while a herd breeds) for zero visual change. Counting solids only kills that freeze entirely.
+		let ol = 0;
+		for (const o of world.objects) if (!CREATURES.has(o.kind)) ol++;
 		if (pcx === lastCx && pcz === lastCz && len === lastLen && zl === lastZones && pl === lastPaths && ol === lastObjs) return;
 		lastCx = pcx;
 		lastCz = pcz;
