@@ -408,6 +408,11 @@ const THIRST_DAMAGE: f64 = 0.04; // /s health bleeds while parched (slightly gen
 const THIRST_SEEK_W: f64 = 1.3; // steering weight pulling a thirsty animal toward the nearest water (ramps with thirst)
 const BREED_HYDRATION: f64 = 0.3; // a parched animal (below this) can't breed → thirst regulates population, not just kills
 const APOSTATIC_W: f64 = 6.0; // strength of the search-image bias toward the common morph → frequency-dependent predation
+// SEASONS — a slow wet↔dry cycle scales thirst: in the DRY season water drains faster, so animals lean harder on
+// the ponds (congregate, get ambushed, migrate to water) → emergent ecological drama. Gentle amplitude so a drought
+// stresses but doesn't wipe. This is also the seam a future Mother-Nature/LLM director drives (set_aridity).
+const SEASON_TICKS: f64 = 12000.0; // ticks for a full wet→dry→wet cycle (~6.7 min) — long enough to feel like weather
+const DRY_AMP: f64 = 0.3; // peak DRY season multiplies thirst drain by 1+DRY_AMP; the wet trough is 1.0× (when seasons on)
 
 // ── GENETICS (evolution) ────────────────────────────────────────────────────────────────────────────────────
 // A baby's VIGOR gene = the average of its parents' genes, ± a small mutation. Vigor scales max speed, so
@@ -835,6 +840,10 @@ pub struct World {
     player: (f64, f64),
     last_player: (f64, f64),       // previous tick's player pos → its speed (a running player scares wildlife)
     night: f64,                    // 0 day … 1 night → prey jumpier (wider danger radius)
+    aridity: f64,                  // DROUGHT multiplier on thirst (1 = normal). The director/LLM sets this for a
+    // drought event; it stacks on top of the ambient wet↔dry SEASON cycle → animals lean harder on water in dry times.
+    seasons: bool,                 // ambient wet↔dry CYCLE on/off (default on for richness). Off → stable climate
+    // (a fixed-environment control for the niche scenario tests, whose equilibria a moving season would smear).
     pop_scale: f64,                // world-AREA multiplier for prey caps (fed from JS: bigger world → more life)
     person_pop: usize,             // last tick's live PERSON count → drives low-pop BANDING (truce + gather, see PERSON_BAND_LOW)
     kind_pop: [usize; 6],          // last tick's live count per Kind → predators prefer ABUNDANT prey (prey-switching)
@@ -887,6 +896,8 @@ impl World {
             player: (0.0, 0.0),
             last_player: (f64::NAN, f64::NAN),
             night: 0.0,
+            aridity: 1.0,
+            seasons: true,
             pop_scale: 1.0,
             person_pop: 0,
             kind_pop: [0; 6],
@@ -949,6 +960,30 @@ impl World {
     /// How nocturnal the world is (0 day … 1 night) — widens the prey's danger radius.
     pub fn set_night(&mut self, n: f64) {
         self.night = n.clamp(0.0, 1.0);
+    }
+
+    /// DROUGHT control (director / future LLM seam): a multiplier on thirst (1 = normal, >1 = drier). Stacks on
+    /// the ambient season cycle. Clamped so a shock stresses the world without instantly wiping it.
+    pub fn set_aridity(&mut self, a: f64) {
+        self.aridity = a.clamp(0.5, 3.0);
+    }
+
+    /// Effective thirst multiplier at `tick`: the director's `aridity` × the ambient wet↔dry SEASON cycle (a slow
+    /// cosine, 1.0 in the wet trough up to 1+DRY_AMP at the dry peak). Drives how fast hydration ebbs this tick.
+    fn drought(&self, tick: i32) -> f64 {
+        let season = if self.seasons {
+            let phase = (tick as f64 / SEASON_TICKS) * std::f64::consts::TAU;
+            1.0 + DRY_AMP * (0.5 - 0.5 * phase.cos()) // tick 0 = wet (1.0), half-cycle = dry peak (1+DRY_AMP)
+        } else {
+            1.0 // stable climate
+        };
+        self.aridity * season
+    }
+
+    /// Toggle the ambient wet↔dry season cycle (default on). Off = a fixed climate (niche tests pin this so a
+    /// moving season doesn't smear the equilibrium they measure). The director drought (`set_aridity`) still applies.
+    pub fn set_seasons(&mut self, on: bool) {
+        self.seasons = on;
     }
 
     /// World-AREA multiplier for the prey carrying capacity (fed from JS, which knows the world's spatial extent).
@@ -1920,8 +1955,9 @@ impl World {
             } else if has_water {
                 let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
                 let at_water = matches!(self.nearest_water(ax, az), Some((_, _, d)) if d <= 0.0);
-                let h = self.agents[i].hydration + if at_water { DRINK_RATE } else { -THIRST_DRAIN } * DT;
-                self.agents[i].hydration = h.clamp(0.0, 1.0);
+                let drought = self.drought(tick); // season × director drought → faster thirst in the dry season
+                let rate = if at_water { DRINK_RATE } else { -THIRST_DRAIN * drought };
+                self.agents[i].hydration = (self.agents[i].hydration + rate * DT).clamp(0.0, 1.0);
             }
             let parched = has_water && !self.agents[i].companion && self.agents[i].hydration <= 0.0;
             // health heals when fed AND watered, but BLEEDS when the belly's empty (starvation) or parched (thirst)
@@ -4378,6 +4414,7 @@ mod tests {
     #[test]
     fn scenario_emergent_social_niche_via_water() {
         let mut w = emergent_world();
+        w.set_seasons(false); // stable climate → the social equilibrium isn't smeared by the moving dry season
         cluster(&mut w, Kind::Rabbit, 120, 0.0, 0.0, 35.0, 1000);
         cluster(&mut w, Kind::Cat, 4, 0.0, 0.0, 50.0, 6000); // light predation — this test isolates the WATER/social
         // niche; with apostatic predation now on, 8 cats + thirst treks overwhelmed the herd. 4 keeps it survivable.
@@ -4412,6 +4449,7 @@ mod tests {
     // founder-seed base for `ticks`, then count the surviving rabbits' boldness cohorts. Returns (n, bold, cautious).
     fn run_boldness_arena(seed0: i32, ticks: usize) -> (usize, usize, usize) {
         let mut w = emergent_world();
+        w.set_seasons(false); // no water in this arena anyway; pin a stable climate so the morph balance is clean
         cluster(&mut w, Kind::Rabbit, 120, 0.0, 0.0, 80.0, seed0);
         cluster(&mut w, Kind::Cat, 8, 0.0, 0.0, 60.0, seed0 + 5000);
         let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
@@ -4484,5 +4522,39 @@ mod tests {
         assert!(max_bold >= 5, "the bold morph never mattered across the long run (max={max_bold}) — cautious fixed");
         assert!(max_caut >= 5, "the cautious morph never mattered across the long run (max={max_caut}) — bold fixed");
         assert!(bold_zeros < samples && caut_zeros < samples, "a morph was extinct in every window — permanent fixation, not a cycle");
+    }
+
+    // SCENARIO (emergent · SEASONS): a watered herd must RIDE OUT the wet↔dry season cycle. The dry peak (1.5×
+    // thirst) stresses them — they lean harder on the pond — but with water in reach the population persists.
+    // Proves the seasonal drought adds drama without being a population wipe. Runs > one full season.
+    #[test]
+    fn scenario_emergent_herd_survives_the_season_cycle() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 50, 0.0, 0.0, 25.0, 1000);
+        w.set_water(&[0.0, 0.0, 8.0]); // a central pond the herd can reach even in the dry season
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        let p0 = alive(&w)[Kind::Rabbit as usize];
+        run_pop(&mut w, 14000); // > SEASON_TICKS (12000) → spans the full dry peak and back toward wet
+        let p1 = alive(&w)[Kind::Rabbit as usize];
+        eprintln!("[seasons] rabbits {p0}→{p1} across a full wet→dry→wet cycle");
+        assert!(p1 >= p0 / 3, "the herd didn't survive the dry season ({p0}→{p1}) — the drought is too harsh");
+    }
+
+    // a DIRECTOR-driven hard drought (set_aridity) bites: with water UNREACHABLE and aridity cranked, thirst
+    // claims the population fast — the LLM/Mother-Nature seam can force a real crisis.
+    #[test]
+    fn a_director_drought_intensifies_thirst() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 40, 0.0, 0.0, 20.0, 1000);
+        w.set_water(&[100_000.0, 100_000.0, 5.0]); // water exists but unreachable → thirst is the only outcome
+        w.set_aridity(3.0); // director cranks the drought → hydration ebbs ~3× faster
+        let p0 = alive(&w)[Kind::Rabbit as usize];
+        run_pop(&mut w, 4000); // a SHORT run — under normal aridity many would still be alive here
+        let p1 = alive(&w)[Kind::Rabbit as usize];
+        eprintln!("[director drought] rabbits {p0}→{p1} in 4000 ticks at aridity 3.0");
+        assert!(p1 <= p0 / 3, "a cranked drought should be culling fast ({p0}→{p1})");
     }
 }

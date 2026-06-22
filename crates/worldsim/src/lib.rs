@@ -245,6 +245,12 @@ mod wasm_api {
             self.world.set_night(n);
         }
 
+        /// DROUGHT multiplier on thirst (1 = normal). The director/LLM sets this for a drought event; it stacks on
+        /// the always-on wet↔dry season cycle. Clamped 0.5‥3.0 internally.
+        pub fn set_aridity(&mut self, a: f64) {
+            self.world.set_aridity(a);
+        }
+
         pub fn set_pop_scale(&mut self, s: f64) {
             self.world.set_pop_scale(s);
         }
