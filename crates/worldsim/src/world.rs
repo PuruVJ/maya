@@ -4811,4 +4811,44 @@ mod tests {
         // DIVERSE — the boldness polymorphism survived the full system + the drought
         assert!(rsd > 0.05, "rabbit strategy diversity collapsed in the full system (sd={rsd:.2})");
     }
+
+    // PERF AUDIT: the thirst path calls nearest_water per-agent per-tick (O(agents × water_sources)). Run a LARGE
+    // fixed population with FEW vs MANY water sources and compare wall-clock — if nearest_water were a hotspot the
+    // many-source run would blow up. Also a correctness-at-scale check (handles 800 agents + 200 ponds, no crash).
+    // Prints timings (not asserted — machine-dependent); asserts only completion + sanity so it can't go flaky.
+    #[test]
+    fn perf_thirst_scale_is_not_a_hotspot() {
+        use std::time::Instant;
+        let build = |n_water: usize| -> World {
+            let mut w = emergent_world();
+            w.set_seasons(false);
+            cluster(&mut w, Kind::Rabbit, 800, 0.0, 0.0, 200.0, 1000);
+            let mut water = Vec::new();
+            for k in 0..n_water {
+                let a = k as f64 * 2.399_963; // golden-angle scatter of ponds across the field
+                let r = 12.0 * (k as f64).sqrt();
+                water.extend_from_slice(&[r * a.cos(), r * a.sin(), 6.0]);
+            }
+            w.set_water(&water);
+            w
+        };
+        let mut few = build(2);
+        let t0 = Instant::now();
+        for t in 1..=400 {
+            few.tick_once(t);
+        }
+        let few_ms = t0.elapsed().as_millis();
+        let mut many = build(200);
+        let t1 = Instant::now();
+        for t in 1..=400 {
+            many.tick_once(t);
+        }
+        let many_ms = t1.elapsed().as_millis();
+        let alive = many.agents.iter().filter(|m| !m.dead && matches!(m.kind, Kind::Rabbit)).count();
+        eprintln!("[perf thirst] 800 rabbits × 400 ticks — 2 ponds: {few_ms} ms · 200 ponds: {many_ms} ms · alive={alive}");
+        assert!(alive > 50, "the big population should largely survive with ample water (alive={alive})");
+        // 100× the water sources must NOT make it 10× slower — nearest_water is a small linear scan, dwarfed by the
+        // flock/behaviour passes. A loose ceiling catches a catastrophic O(n²)-style regression without being flaky.
+        assert!(many_ms < few_ms * 6 + 500, "nearest_water became a hotspot: 2 ponds {few_ms}ms vs 200 ponds {many_ms}ms");
+    }
 }
