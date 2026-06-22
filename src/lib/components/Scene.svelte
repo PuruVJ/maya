@@ -227,6 +227,12 @@
 	// bare; this first kills the jank.)
 	const SHOW_R2 = 125 * 125;
 	const KEEP_R2 = 150 * 150;
+	// STRUCTURES reveal from MUCH farther than props/trees — they're static (cheap once mounted, no per-frame
+	// animation), they're the landmarks you navigate by, and the freed scatter budget affords it. Beyond this the
+	// SettlementGlows lamp-blooms take over (their fade-in NEAR is matched to ~BUILD_KEEP so there's no double-draw).
+	const BUILDINGS = new Set(['house', 'cabin', 'tower', 'manor']);
+	const BUILD_SHOW_R2 = 300 * 300;
+	const BUILD_KEEP_R2 = 340 * 340;
 	const RECHECK_MOVE2 = 6 * 6;
 	const CREATURE_KINDS = new Set(['person', 'cat', 'lion', 'rabbit', 'kangaroo', 'dinosaur']);
 	let visible = $state<WorldObject[]>([]);
@@ -521,7 +527,10 @@
 					continue;
 				}
 				const d2 = (o.pos[0] - px) ** 2 + (o.pos[2] - pz) ** 2;
-				const keep = shownIds.has(o.id) ? d2 < KEEP_R2 : d2 < SHOW_R2; // hysteresis: hold a shown one until past KEEP
+				const isBuild = BUILDINGS.has(o.kind); // structures reveal much farther than props/trees
+				const showR = isBuild ? BUILD_SHOW_R2 : SHOW_R2;
+				const keepR = isBuild ? BUILD_KEEP_R2 : KEEP_R2;
+				const keep = shownIds.has(o.id) ? d2 < keepR : d2 < showR; // hysteresis: hold a shown one until past KEEP
 				if (keep) {
 					next.push(o);
 					shownIds.add(o.id);

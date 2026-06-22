@@ -119,6 +119,16 @@ const REFUGE_R: f64 = 55.0; // a fleeing person within this range of a house RUN
 const REFUGE_PULL: f64 = 1.6; // home-ward bias blended into the flee vector — ABOVE 1 so they actually head INTO the
 // house when threatened (not just drift homeward), as long as home isn't behind the predator (then plain flight wins)
 const OBSTACLE_CELL: f64 = 12.0; // obstacle grid cell — must exceed the biggest footprint+body radius (port of the JS)
+// INTER-SETTLEMENT MIGRATION — a lone adult roamer drifts toward the nearest UNDER-POPULATED settlement to bring
+// fresh UNRELATED blood (so an isolated all-kin town can breed again past the incest rule) + fill thin towns.
+// Decentralised (each picks from its own spot + a seeded jitter; a town stops attracting once it hits the target).
+const SETTLE_R: f64 = 40.0; // a person within this of a house = part of that settlement (counts toward its occupancy)
+const SETTLE_R2: f64 = SETTLE_R * SETTLE_R;
+const SETTLE_TARGET: u32 = 14; // a settlement at/above this occupancy is "full" → no longer draws migrants (anti-pile-up)
+const MIGRATE_R: f64 = 320.0; // a roamer perceives + heads for sparse settlements within this range (not the whole map)
+const MIGRATE_R2: f64 = MIGRATE_R * MIGRATE_R;
+const MIGRATE_W: f64 = 0.55; // travel drive toward the chosen settlement (gentle — below flee/dispersal, like BAND_SEEK_W)
+const CH_MIGRATE: i32 = 30; // RNG channel for the per-(agent,settlement) jitter that decorrelates who goes where
 
 /// A solid the agents can't walk through — a CIRCLE (props/ponds) or an ORIENTED BOX (buildings, so animals hug
 /// walls / use streets like the player). Port of the JS `Obstacle`; `is_box` picks the resolve path.
@@ -712,6 +722,7 @@ pub struct World {
     slept: Vec<bool>,              // was asleep AT TICK START → handled by the sleep pass, skipped elsewhere
     fish: Vec<(f64, f64)>,         // lake-fish lure points (fed from the JS view; cats pad to the bank after them)
     refuges: Vec<(f64, f64)>,      // house/settlement centres (fed from JS) → a threatened woman/child FLEES toward the nearest (home = safety)
+    refuge_pop: Vec<u32>,          // per-refuge occupancy (people within SETTLE_R), recomputed each tick → drives sparse-settlement MIGRATION
     obstacles: Vec<Obstacle>,      // solid props/buildings/ponds → agents are pushed out (no tunnelling)
     ob_grid: SpatialHashGrid,      // obstacle lookup grid (cell = OBSTACLE_CELL), rebuilt on set_obstacles
     has_obstacles: bool,
@@ -756,6 +767,7 @@ impl World {
             slept: Vec::new(),
             fish: Vec::new(),
             refuges: Vec::new(),
+            refuge_pop: Vec::new(),
             obstacles: Vec::new(),
             ob_grid: SpatialHashGrid::new(OBSTACLE_CELL),
             has_obstacles: false,
@@ -888,6 +900,7 @@ impl World {
     pub fn set_refuges(&mut self, xz: &[f64]) {
         self.refuges.clear();
         self.refuges.extend(xz.chunks_exact(2).map(|c| (c[0], c[1])));
+        self.refuge_pop = vec![0; self.refuges.len()]; // parallel occupancy buffer, refilled each tick
     }
 
     /// Replace the solid obstacles agents route around. `flat` is a packed [x,z,r,hx,hz,cos,sin] per obstacle
@@ -1022,6 +1035,33 @@ impl World {
         best
     }
 
+    /// Nearest UNDER-populated settlement (occupancy < SETTLE_TARGET) within MIGRATE_R, for a roamer at (x,z).
+    /// Each candidate's distance is multiplied by a per-(agent, settlement) seeded jitter so different roamers
+    /// favour different sparse towns — they spread across the thin settlements instead of all funnelling to the
+    /// single nearest one (the "everybody to one road" pile-up the user wants avoided). Decentralised + occupancy-
+    /// aware → once a town fills to SETTLE_TARGET it drops out of every roamer's candidate set automatically.
+    fn nearest_sparse_refuge(&self, x: f64, z: f64, seed_id: i32) -> Option<(f64, f64)> {
+        let mut best: Option<(f64, f64)> = None;
+        let mut best_score = MIGRATE_R2;
+        for (ri, &(rx, rz)) in self.refuges.iter().enumerate() {
+            if self.refuge_pop.get(ri).copied().unwrap_or(0) >= SETTLE_TARGET {
+                continue; // already full → not a migration draw
+            }
+            let d2 = (rx - x).powi(2) + (rz - z).powi(2);
+            if d2 > MIGRATE_R2 {
+                continue;
+            }
+            // jitter the effective distance ±~25% by a seed stable per (agent, this settlement's location)
+            let j = 0.75 + 0.5 * crate::simrng::rand(&[seed_id, (rx as i32).wrapping_mul(73) ^ (rz as i32), CH_MIGRATE]);
+            let score = d2 * j;
+            if score < best_score {
+                best_score = score;
+                best = Some((rx, rz));
+            }
+        }
+        best
+    }
+
     /// Drive the sim from real elapsed seconds (advances the clock; runs each emitted fixed-DT tick).
     pub fn step(&mut self, real_dt: f64) {
         self.births.clear(); // births accumulate across this step's ticks; JS drains them after step()
@@ -1105,6 +1145,31 @@ impl World {
             }
         } else if people <= PERSON_BAND_LOW {
             self.person_banding = true;
+        }
+
+        // 1b. SETTLEMENT OCCUPANCY — tally each live person into their nearest settlement (within SETTLE_R) so the
+        // migration drive can steer roamers toward UNDER-populated towns. O(people × refuges); fine for moderate
+        // counts and it's off the main thread (the worker). Cleared + refilled each tick (occupancy shifts as people move).
+        if !self.refuge_pop.is_empty() {
+            for p in self.refuge_pop.iter_mut() {
+                *p = 0;
+            }
+            for m in self.agents.iter() {
+                if m.dead || !matches!(m.kind, Kind::Person) {
+                    continue;
+                }
+                let (mut best, mut best_d2) = (usize::MAX, SETTLE_R2);
+                for (ri, &(rx, rz)) in self.refuges.iter().enumerate() {
+                    let d2 = (rx - m.agent.x).powi(2) + (rz - m.agent.z).powi(2);
+                    if d2 < best_d2 {
+                        best_d2 = d2;
+                        best = ri;
+                    }
+                }
+                if best != usize::MAX {
+                    self.refuge_pop[best] += 1;
+                }
+            }
         }
 
         // 2. food-chain targeting — reset the transient buffer, then each agent (as predator) picks its best
@@ -2108,6 +2173,24 @@ impl World {
                 let w = a_max * BAND_SEEK_W;
                 fx += dx / d * w;
                 fz += dz / d * w;
+            }
+        }
+
+        // INTER-SETTLEMENT MIGRATION — a lone ADULT person OUT IN THE WILD (no settlement within SETTLE_R) drifts
+        // toward the nearest UNDER-populated town it can perceive: brings fresh UNRELATED blood so an isolated all-
+        // kin settlement can breed again past the incest rule, and fills thin towns. Decentralised (each picks from
+        // its own spot + a seeded jitter; a town stops drawing once it's full) → no "everyone to the one empty spot".
+        if is_person && !self.refuges.is_empty() && m.age >= m.lifespan * 0.15 {
+            let settled = self.nearest_refuge(ax, az, SETTLE_R).is_some();
+            if !settled {
+                if let Some((tx, tz)) = self.nearest_sparse_refuge(ax, az, m.seed_id) {
+                    let dx = tx - ax;
+                    let dz = tz - az;
+                    let d = dx.hypot(dz).max(0.001);
+                    let w = a_max * MIGRATE_W;
+                    fx += dx / d * w;
+                    fz += dz / d * w;
+                }
             }
         }
 
@@ -3551,6 +3634,32 @@ mod tests {
         assert!(related(&w.agents[kid], &w.agents[sib]), "full siblings (shared parents) are kin");
         assert!(!related(&w.agents[dad], &w.agents[mum]), "the two unrelated founders are NOT kin");
         assert!(!related(&w.agents[kid], &w.agents[outsider]), "an unrelated outsider is fair game (no false-positive)");
+    }
+
+    // SCENARIO: a lone roamer drifts toward an UNDER-populated settlement (gene flow + filling thin towns). The
+    // migration lives in the shared flock pass, so it's tested on the manual brain here.
+    #[test]
+    fn scenario_roamers_migrate_to_sparse_settlements() {
+        let mut w = mw();
+        w.set_refuges(&[0.0, 0.0, 200.0, 0.0]); // two empty (sparse) settlements
+        let near = |w: &World, i: usize| {
+            let (x, z) = (w.agents[i].agent.x, w.agents[i].agent.z);
+            (x * x + z * z).sqrt().min(((x - 200.0).powi(2) + z * z).sqrt())
+        };
+        // lone adult roamers out in the wild, no settlement within SETTLE_R of spawn
+        let ids: Vec<usize> = (0..8).map(|k| spawn_kind(&mut w, Kind::Person, 90.0 + k as f64 * 2.0, 95.0, 3000 + k as i32)).collect();
+        for &i in &ids {
+            let s = w.agents[i].seed_id;
+            w.randomize_start_age(i, s); // adults (past the child gate)
+        }
+        let d0: f64 = ids.iter().map(|&i| near(&w, i)).sum::<f64>() / ids.len() as f64;
+        for t in 1..=900 {
+            w.tick_once(t);
+        }
+        let live: Vec<usize> = ids.iter().copied().filter(|&i| !w.agents[i].dead).collect();
+        let d1: f64 = live.iter().map(|&i| near(&w, i)).sum::<f64>() / live.len().max(1) as f64;
+        eprintln!("[migration] mean dist to nearest settlement {d0:.0} m → {d1:.0} m ({} roamers)", live.len());
+        assert!(d1 < d0 - 15.0, "roamers didn't migrate toward a settlement ({d0:.0}→{d1:.0} m)");
     }
 
     // ─────────────────────────── EMERGENT MODE — on-par scenario parity ───────────────────────────

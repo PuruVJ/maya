@@ -18,10 +18,10 @@
 
 	const BUILDINGS = new Set(['house', 'cabin', 'tower']);
 	const MAX = 1200;
-	// fade in over NEAR…NEAR+FADE so a bloom is OFF just as the real building reveals (Scene SHOW≈125 m), then
-	// glows out to FAR (≈ the fog limit). Tunable.
-	const NEAR = 125;
-	const FADE = 85;
+	// fade in over NEAR…NEAR+FADE so a bloom is OFF where the real building reveals (matched to Scene BUILD_KEEP
+	// ≈340 m now that structures reveal far), then glows out to FAR on the horizon. Tunable.
+	const NEAR = 330;
+	const FADE = 90;
 	const FAR = 1700; // far HORIZON reveal (was 560) — distant settlements glow on the curved "wall" (user: show them far)
 	const FAR_FADE = 360; // glows fade out over the last FAR_FADE m → a soft band of city-lights at the horizon, not a hard cut
 
