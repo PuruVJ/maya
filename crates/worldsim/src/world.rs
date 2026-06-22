@@ -679,6 +679,14 @@ impl Snapshot {
                     f |= 64; // bit6 → his mate is expecting → an "armed guardian" (the view gives him a machete)
                 }
             }
+            // bit7 → DRINKING: thirsty + standing at a water edge → the view dips its head to lap (watering hole)
+            if !world.water_src.is_empty() && !m.companion && m.hydration < 0.95 {
+                if let Some((_, _, d_edge)) = world.nearest_water(m.agent.x, m.agent.z) {
+                    if d_edge <= 0.0 {
+                        f |= 128;
+                    }
+                }
+            }
             self.flags[i] = f;
             self.behaviors[i] = m.agent.behavior.code();
             self.progress[i] = (m.agent.elapsed / m.agent.duration).min(1.0) as f32;

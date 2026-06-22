@@ -300,22 +300,24 @@
 				// lap (all species drink). Animals treat water as an obstacle so they naturally stop at the bank;
 				// this catches them there. Takes priority over grazing (water > grass); the player-gaze override
 				// below still wins, so they look UP from drinking to watch you pass.
-				let drinking = false;
-				if (gait < 0.22) {
+				// the SIM says when it's actually lapping (thirsty + at a bank, refilling hydration) — drive the pose
+				// off that truth, not mere proximity. Find the nearest pond only to FACE it.
+				const drinking = managed.drinking;
+				if (drinking) {
+					let bestD = Infinity;
+					let bx = 0;
+					let bz = 0;
 					for (const z of world.zones ?? []) {
 						if (z.material !== 'water') continue;
 						const dwx = z.pos[0] - agent.x;
 						const dwz = z.pos[2] - agent.z;
 						const dw = Math.hypot(dwx, dwz);
-						if (dw > z.size && dw < z.size + 2.6) {
-							const rel = Math.atan2(dwx, dwz) - agent.heading; // face the water
-							headYawT = Math.max(-1.2, Math.min(1.2, Math.atan2(Math.sin(rel), Math.cos(rel))));
-							headPitchT = -1.05 + Math.sin(t * 6.0) * 0.1; // head down, gentle lapping
-							bodyYT = -0.05;
-							drinking = true;
-							break;
-						}
+						if (dw < bestD) ((bestD = dw), (bx = dwx), (bz = dwz));
 					}
+					const rel = Math.atan2(bx, bz) - agent.heading; // turn to face the water
+					headYawT = Math.max(-1.2, Math.min(1.2, Math.atan2(Math.sin(rel), Math.cos(rel))));
+					headPitchT = -1.05 + Math.sin(t * 6.0) * 0.1; // head down, gentle lapping
+					bodyYT = -0.05;
 				}
 				if (!drinking && isHerb && gait < 0.22 && world.ground === 'grass') {
 					// idle grazer: head dipped to the grass with a gentle nibble (only while nearly stationary)

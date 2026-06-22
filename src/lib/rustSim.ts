@@ -355,6 +355,7 @@ export function tickRust(dt: number): void {
 		m.migrating = (f & 16) !== 0; // bit4 → roamer en route to another settlement (HUD)
 		m.pregnant = (f & 32) !== 0; // bit5 → carrying a litter → the view shows a belly
 		m.guardian = (f & 64) !== 0; // bit6 → his mate is expecting → the view arms him with a machete
+		m.drinking = (f & 128) !== 0; // bit7 → lapping at a water edge → the view dips its head (watering hole)
 		if (m.hunting) {
 			const dx = nx - px;
 			const dz = nz - pz;
