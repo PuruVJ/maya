@@ -42,6 +42,7 @@ type Snap = {
 	progress: Float32Array;
 	births: Float32Array;
 	builds: Float32Array; // [x,z]×n — house-build requests (Scene places them)
+	wells: Float32Array; // [x,z]×n — well-dig requests (Scene places a well + feeds it back as a drink source)
 	events: Float32Array; // [code,kind,x,z]×n — sim events from the worker (currently unused client-side)
 	danger: number;
 	ageMeans: Float32Array; // 6 — mean age fraction (0..1) per kind; -1 = none alive (HUD age readout)
@@ -74,6 +75,17 @@ export function drainBuilds(): Build[] {
 	if (pendingBuilds.length === 0) return pendingBuilds;
 	const out = pendingBuilds;
 	pendingBuilds = [];
+	return out;
+}
+
+// well-dig requests from industrious settlers (x,z) → Scene places a well AND feeds it back as a drink source
+export type Well = { x: number; z: number };
+let pendingWells: Well[] = [];
+/** Pull (and clear) the well-dig requests since the last call — Scene places each as a well + a new water source. */
+export function drainWells(): Well[] {
+	if (pendingWells.length === 0) return pendingWells;
+	const out = pendingWells;
+	pendingWells = [];
 	return out;
 }
 
@@ -274,6 +286,8 @@ export function tickRust(dt: number): void {
 		// drain HOUSE-BUILD requests (settlers) → Scene places each as a house world-object. Flat [x,z,…].
 		const nbd = s!.builds.length / 2;
 		for (let k = 0; k < nbd; k++) pendingBuilds.push({ x: s!.builds[k * 2], z: s!.builds[k * 2 + 1] });
+		const nw = s!.wells.length / 2;
+		for (let k = 0; k < nw; k++) pendingWells.push({ x: s!.wells[k * 2], z: s!.wells[k * 2 + 1] });
 		// drain CONCEIVE events (a pair just bonded) → Scene floats a heart at the spot. Events are [code,kind,x,z]×n.
 		const ne = s!.events.length / 4;
 		for (let k = 0; k < ne; k++) {

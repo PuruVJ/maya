@@ -37,7 +37,7 @@
 	import { SKY_FOG, kindDef } from '$lib/kinds';
 	import { treeAt, treeRadius, onPath, SCATTER_STEP } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
-	import { drainBirths, drainBuilds, rustTick } from '$lib/rustSim';
+	import { drainBirths, drainBuilds, drainWells, rustTick } from '$lib/rustSim';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { setRustObstacles, setRustPopScale, setRustRefuges, setRustWater } from '$lib/rustSim';
 	import { worldAreaScale } from '$lib/world';
@@ -133,6 +133,14 @@
 		setRustObstacles([...baseObstacles, ...trees]); // the Rust sim resolves these solids (push-out, no tunnelling)
 	}
 
+	// DRINK SOURCES = natural ponds + any WELLS settlers have dug. Re-run whenever a well is placed (emergent jobs),
+	// so the new water joins the thirst sim and life can congregate at it. A well is a small drink point (r≈3).
+	function feedWaterSources(): void {
+		const ponds = (world.zones ?? []).filter((z) => z.material === 'water').map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
+		const wells = world.objects.filter((o) => o.kind === 'well').map((o) => ({ x: o.pos[0], z: o.pos[2], r: 3 }));
+		setRustWater([...ponds, ...wells]);
+	}
+
 	$effect(() => {
 		const props: Obstacle[] = world.objects
 			.filter((o) => !CREATURES.has(o.kind))
@@ -161,7 +169,7 @@
 		feedObstacles(playerState.pos[0], playerState.pos[2]); // re-feed with the current near-forest
 		// WATER SOURCES (thirst): the same ponds are where animals drink — every creature must reach a bank to slake
 		// hydration or it dies of thirst. Changes only when a pond is added/removed.
-		setRustWater(ponds);
+		feedWaterSources(); // ponds + settler-dug WELLS -> the sim drink sources (re-runs on each new well)
 		// REFUGES (flee-to-safety): the houses are where a threatened woman/child runs for cover (and where the
 		// guard men cluster). Feed their centres to the Rust sim; it changes only when a building is raised/removed.
 		setRustRefuges(world.objects.filter((o) => BUILDING_KINDS.has(o.kind)).map((o) => ({ x: o.pos[0], z: o.pos[2] })));
@@ -188,6 +196,8 @@
 	// weather away over a very long time once the world-clock fast-forward lands (see save timestamp work).
 	const gravePrefix = 'g' + Math.random().toString(36).slice(2, 8) + '-';
 	let graveN = 0;
+	const wellPrefix = 'w' + Math.random().toString(36).slice(2, 8) + '-';
+	let wellN = 0;
 	const GRAVE_CAP = 70;
 	// VEGETATION: broadleaf (non-pine) trees slowly take root around a SETTLEMENT — people tend gardens/orchards,
 	// so a colony greens over time and reads as inhabited, not a bare cluster of boxes (user request). Bounded per
@@ -304,6 +314,31 @@
 				world.objects.push({ id: housePrefix + houseN++, kind, pos: [gx, heightAt(gx, gz, world.terrain), gz], scale: [s, s, s] });
 				houses++;
 			}
+		}
+
+		// EMERGENT WELLS (jobs): an industrious settler with no water in reach dug one → place it as a `well` object
+		// AND register it as a new drink source (feedWaterSources), so life can now slake thirst there and the
+		// settlement grows around the water it made. Dedup so a cluster of diggers makes ONE well, not a stack.
+		const wells = drainWells();
+		if (wells.length) {
+			let placed = 0;
+			for (const wl of wells) {
+				const gx = Math.round(wl.x / 4) * 4;
+				const gz = Math.round(wl.z / 4) * 4;
+				if (inWater(world.zones, gx, gz)) continue; // a well in a lake is pointless
+				let near = false;
+				for (const o of world.objects) {
+					if (o.kind !== 'well') continue;
+					if ((o.pos[0] - gx) ** 2 + (o.pos[2] - gz) ** 2 < 35 * 35) {
+						near = true;
+						break;
+					}
+				}
+				if (near) continue; // a well already serves this spot
+				world.objects.push({ id: wellPrefix + wellN++, kind: 'well', pos: [gx, heightAt(gx, gz, world.terrain), gz], keep: true });
+				placed++;
+			}
+			if (placed) feedWaterSources(); // the new wells join the thirst sim
 		}
 
 		// CORPSE REAPER: a body that's fully decayed (sunk into the earth, see Critter/Npc) is removed from the

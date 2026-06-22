@@ -232,6 +232,14 @@ mod wasm_api {
         pub fn builds_ptr(&self) -> *const f32 {
             self.world.builds().as_ptr()
         }
+        /// Well-dig requests from the last step(): count (each is [x, z]).
+        pub fn well_count(&self) -> usize {
+            self.world.wells().len() / 2
+        }
+        /// Pointer to the flat wells buffer [x, z, …] (length = well_count()*2) for a zero-copy read.
+        pub fn wells_ptr(&self) -> *const f32 {
+            self.world.wells().as_ptr()
+        }
         /// Telemetry events from the last step(): count (each is [code, kind, x, z]).
         pub fn event_count(&self) -> usize {
             self.world.events().len() / 4

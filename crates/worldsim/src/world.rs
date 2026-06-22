@@ -447,6 +447,9 @@ const EV_OLDAGE: f32 = 3.0; // died of old age
 const EV_BIRTH: f32 = 4.0; // a baby was delivered
 const EV_BUILD: f32 = 5.0; // a settler raised a house
 const EV_CONCEIVE: f32 = 6.0; // a pair mated (diagnostic: conceive≫birth ⇒ gestation/delivery is the bottleneck)
+const EV_WELL: f32 = 7.0; // an industrious settler dug a well (a self-made water source)
+const WELL_INDUSTRY: f64 = 1.2; // a settler's `industry` genome above this digs wells (emergent job; neutral 1.0 won't → Manual safe)
+const WELL_NEED_R: f64 = 60.0; // …but only when no water edge is within this radius (no water in reach → dig one)
 
 // ── GESTATION + LITTERS ─────────────────────────────────────────────────────────────────────────────────────
 // Mating doesn't clone instantly: the FEMALE conceives and GESTATES for a period, then delivers a species-sized
@@ -869,6 +872,9 @@ pub struct World {
     ob_scratch: Vec<u32>,          // reused obstacle-query scratch (mem::take'd in → no per-agent alloc)
     births: Vec<f32>,              // this tick's births, flat [kindCode, x, z, gene, …] → JS spawns the babies
     builds: Vec<f32>,              // this step's house-build requests, flat [x, z, …] → JS places the houses
+    wells: Vec<f32>,               // this step's WELL-dig requests, flat [x, z, …] → JS places a well that JS then
+    // feeds back as a drink source (set_water). Emergent JOBS: an industrious settler with no water in reach digs
+    // one → a self-made watering point → life congregates → the settlement grows around water it created.
     events: Vec<f32>,              // TELEMETRY: this step's events, flat [code, kind, x, z, …] → JS posts to /api/telemetry
     behavior_mode: BehaviorMode,   // which decision brain runs the per-tick DECIDE pass (Manual default / Emergent)
     lineage_counter: u32,          // next unique family id to hand out (incest avoidance) — bumped per spawn
@@ -918,6 +924,7 @@ impl World {
             ob_scratch: Vec::new(),
             births: Vec::new(),
             builds: Vec::new(),
+            wells: Vec::new(),
             events: Vec::new(),
             behavior_mode: BehaviorMode::Emergent, // the world runs the EMERGENT brain by default (user: "world should be emergent"); flip to Manual via set_behavior_mode (the unit tests that pin Manual's exact mechanics do so explicitly)
             lineage_counter: 1, // 0 is reserved for "unknown parent"; real ids start at 1
@@ -1297,6 +1304,7 @@ impl World {
     pub fn step(&mut self, real_dt: f64) {
         self.births.clear(); // births accumulate across this step's ticks; JS drains them after step()
         self.builds.clear(); // …same for house-build requests
+        self.wells.clear(); // …same for well-dig requests
         self.events.clear(); // …same for telemetry events
         let n = self.clock.advance(real_dt);
         for k in 0..n {
@@ -1313,6 +1321,11 @@ impl World {
     /// This step's house-build requests, flat [x, z, …] — JS places the houses.
     pub fn builds(&self) -> &[f32] {
         &self.builds
+    }
+
+    /// This step's well-dig requests, flat [x, z, …] — JS places a well that it then feeds back as a drink source.
+    pub fn wells(&self) -> &[f32] {
+        &self.wells
     }
 
     /// This step's telemetry events, flat [code, kind, x, z, …] — JS posts them to /api/telemetry.
@@ -2156,9 +2169,20 @@ impl World {
                 continue;
             }
             let (bx, bz) = (m.agent.x as f32, m.agent.z as f32);
-            self.builds.push(bx);
-            self.builds.push(bz);
-            self.events.extend_from_slice(&[EV_BUILD, Kind::Person as usize as f32, bx, bz]);
+            // WATER BEFORE SHELTER — an industrious settler with no water edge within WELL_NEED_R digs a WELL instead
+            // of a house this cycle. JS places the well + feeds it back as a drink source, so next time nearest_water
+            // finds it (dry=false) and the household builds homes around the water it made. Emergent jobs + towns.
+            let industrious = m.weights.industry > WELL_INDUSTRY;
+            let dry = self.nearest_water(m.agent.x, m.agent.z).map_or(true, |(_, _, d)| d > WELL_NEED_R);
+            if industrious && dry {
+                self.wells.push(bx);
+                self.wells.push(bz);
+                self.events.extend_from_slice(&[EV_WELL, Kind::Person as usize as f32, bx, bz]);
+            } else {
+                self.builds.push(bx);
+                self.builds.push(bz);
+                self.events.extend_from_slice(&[EV_BUILD, Kind::Person as usize as f32, bx, bz]);
+            }
             self.agents[i].energy -= BUILD_COST;
             self.agents[i].build_cd = BUILD_COOLDOWN;
         }
@@ -4556,5 +4580,54 @@ mod tests {
         let p1 = alive(&w)[Kind::Rabbit as usize];
         eprintln!("[director drought] rabbits {p0}→{p1} in 4000 ticks at aridity 3.0");
         assert!(p1 <= p0 / 3, "a cranked drought should be culling fast ({p0}→{p1})");
+    }
+
+    // helper: an opposite-sex pair of industrious adult settlers, fed + ready to work, at the origin.
+    fn settle_industrious_couple(w: &mut World) -> (usize, usize) {
+        let a = spawn_kind(w, Kind::Person, 0.0, 0.0, 10); // even seed → female
+        let b = spawn_kind(w, Kind::Person, 1.5, 0.0, 11); // odd seed → male (within FAMILY_R)
+        for p in [a, b] {
+            w.set_genome(p, 1.0, 1.0, 1.0, 1.0, 1.6); // industry 1.6 > WELL_INDUSTRY → a digger
+            w.agents[p].age = w.agents[p].lifespan * 0.4; // adult
+            w.agents[p].energy = 1.0;
+            w.agents[p].build_cd = 0.0;
+        }
+        (a, b)
+    }
+
+    // SCENARIO (emergent · JOBS): an industrious settled couple with NO water in reach DIGS A WELL (emergent job →
+    // a self-made water source). The same couple WITH water already nearby builds a HOUSE instead — water before
+    // shelter only when water is missing. This is the loop that grows settlements around water they create.
+    #[test]
+    fn dry_industrious_settlers_dig_a_well_else_build() {
+        // DRY → they dig a well
+        let mut w = emergent_world();
+        w.set_seasons(false);
+        settle_industrious_couple(&mut w);
+        let mut dug = false;
+        for t in 1..=400 {
+            w.tick_once(t);
+            if !w.wells().is_empty() {
+                dug = true;
+                break;
+            }
+        }
+        assert!(dug, "an industrious adult couple with no water in reach should dig a well");
+
+        // WATERED → with a pond already in reach they DON'T dig (dry=false); the build pass raises a house instead
+        let mut w2 = emergent_world();
+        w2.set_seasons(false);
+        w2.set_water(&[0.0, 0.0, 5.0]); // a pond right where they stand → not dry
+        settle_industrious_couple(&mut w2);
+        let mut built = false;
+        for t in 1..=400 {
+            w2.tick_once(t);
+            if !w2.builds().is_empty() {
+                built = true;
+                break;
+            }
+        }
+        assert!(built, "with water in reach the couple should build a house");
+        assert!(w2.wells().is_empty(), "they should NOT dig a well when water is already in reach");
     }
 }
