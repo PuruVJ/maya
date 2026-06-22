@@ -35,6 +35,7 @@ interface RustSim {
 	set_pop_scale(s: number): void;
 	set_fish(xz: Float64Array): void;
 	set_refuges(xz: Float64Array): void;
+	set_water(xzr: Float64Array): void;
 	set_obstacles(flat: Float64Array): void;
 	set_behavior_mode(code: number): void; // 0 = Manual (hand-coded) · 1 = Emergent (needs+utility, the default)
 	age_means(): Float32Array; // mean age fraction (0..1) per kind → the HUD age readout
@@ -66,6 +67,7 @@ type InMsg =
 	| { type: 'init'; base: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
 	| { type: 'refuges'; xz: Float64Array }
+	| { type: 'water'; xzr: Float64Array }
 	| { type: 'behaviorMode'; code: number }
 	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 
@@ -127,6 +129,11 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 
 	if (d.type === 'refuges') {
 		sim.set_refuges(d.xz);
+		return;
+	}
+
+	if (d.type === 'water') {
+		sim.set_water(d.xzr);
 		return;
 	}
 

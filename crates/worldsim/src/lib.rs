@@ -259,6 +259,11 @@ mod wasm_api {
             self.world.set_fish(xz);
         }
 
+        /// Replace the DRINKABLE water sources (thirst) from a flat [x0,z0,r0,x1,z1,r1,…] buffer (pond centre+radius).
+        pub fn set_water(&mut self, xzr: &[f64]) {
+            self.world.set_water(xzr);
+        }
+
         /// Replace the REFUGE points (house centres) a threatened woman/child flees toward, flat [x0,z0,x1,z1,…].
         pub fn set_refuges(&mut self, xz: &[f64]) {
             self.world.set_refuges(xz);

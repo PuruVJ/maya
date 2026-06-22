@@ -39,7 +39,7 @@
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { drainBirths, drainBuilds, rustTick } from '$lib/rustSim';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
-	import { setRustObstacles, setRustPopScale, setRustRefuges } from '$lib/rustSim';
+	import { setRustObstacles, setRustPopScale, setRustRefuges, setRustWater } from '$lib/rustSim';
 	import { worldAreaScale } from '$lib/world';
 	import { streamRegions, regionOf, fastForwardDormant } from '$lib/streaming';
 	import { playerState } from '$lib/playerState.svelte';
@@ -159,6 +159,9 @@
 			.map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
 		baseObstacles = [...props, ...ponds];
 		feedObstacles(playerState.pos[0], playerState.pos[2]); // re-feed with the current near-forest
+		// WATER SOURCES (thirst): the same ponds are where animals drink — every creature must reach a bank to slake
+		// hydration or it dies of thirst. Changes only when a pond is added/removed.
+		setRustWater(ponds);
 		// REFUGES (flee-to-safety): the houses are where a threatened woman/child runs for cover (and where the
 		// guard men cluster). Feed their centres to the Rust sim; it changes only when a building is raised/removed.
 		setRustRefuges(world.objects.filter((o) => BUILDING_KINDS.has(o.kind)).map((o) => ({ x: o.pos[0], z: o.pos[2] })));

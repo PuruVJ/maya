@@ -397,6 +397,17 @@ const SCAVENGE_GAIN: f64 = 0.5; // /s fullness a carnivore regains while feeding
 const SCAVENGE_DRAIN: f64 = 1.5; // /s extra meat consumed while being eaten (so a carcass feeds a few, not forever)
 const CARN_DRAIN_FRAC: f64 = 0.6; // carnivores burn fullness slower than grazers → they survive the gaps between kills (predators starved amid prey otherwise)
 
+// ── THIRST (the WATER resource — an independent survival pressure) ──────────────────────────────────────────────
+// Every animal carries `hydration`; it ebbs slowly, refills only at a water EDGE, and bleeds health when empty.
+// Gentle on purpose: thirst is a periodic ERRAND that pulls animals to water (spatial structure) — not a famine.
+const THIRST_DRAIN: f64 = 0.005; // /s hydration ebbs (~170 s from full to empty) — slower than the food drain
+const THIRSTY_AT: f64 = 0.4; // below this an animal breaks off to seek water (the drink-seek steer ramps in)
+const DRINK_REACH: f64 = 5.0; // metres beyond a pond's radius an animal can lap from the bank (ponds are solid)
+const DRINK_RATE: f64 = 0.5; // /s hydration refilled while at a water edge (~2 s to top up — a quick drink)
+const THIRST_DAMAGE: f64 = 0.04; // /s health bleeds while parched (slightly gentler than starvation; recoverable)
+const THIRST_SEEK_W: f64 = 1.3; // steering weight pulling a thirsty animal toward the nearest water (ramps with thirst)
+const BREED_HYDRATION: f64 = 0.3; // a parched animal (below this) can't breed → thirst regulates population, not just kills
+
 // ── GENETICS (evolution) ────────────────────────────────────────────────────────────────────────────────────
 // A baby's VIGOR gene = the average of its parents' genes, ± a small mutation. Vigor scales max speed, so
 // selection has something to act on: faster prey survive predators, faster predators catch prey → the
@@ -540,6 +551,7 @@ pub struct ManagedAgent {
     pub aggressive: bool, // people only — hunts its own kind
     pub seed_id: i32,
     pub stamina: f64, // 0..1 sprint resource (drained by running, recovered by resting)
+    pub hydration: f64, // 0..1 WATER — drains slowly; refill by reaching a water EDGE; ≤0 bleeds health (thirst death)
     pub energy: f64,  // 0..1 NUTRITION / fullness — drains over time; refuel by EATING (herbivores graze,
     // carnivores kill). Hits 0 → starvation (health bleeds). Separate from stamina so a fed animal can still be
     // sprint-tired, and a rested animal can still be starving. This is the bottom-up population regulator.
@@ -687,6 +699,7 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         aggressive: matches!(kind, Kind::Person) && eco::aggressive(seed_id),
         seed_id,
         stamina: if matches!(e.hunts, Hunts::Lower) { 0.45 } else { 1.0 }, // carnivores start a touch hungry
+        hydration: 0.85, // start well-watered → thirst is a periodic errand, not an instant crisis
         energy: 0.8, // start well-fed but not full → must eat to thrive + breed
         health: 1.0,
         gene: 1.0, // founders are baseline vigor; evolution emerges as mutation accumulates across births
@@ -824,6 +837,9 @@ pub struct World {
     kills: Vec<usize>,             // prey caught this tick → turned to corpses after the behaviour pass
     slept: Vec<bool>,              // was asleep AT TICK START → handled by the sleep pass, skipped elsewhere
     fish: Vec<(f64, f64)>,         // lake-fish lure points (fed from the JS view; cats pad to the bank after them)
+    water_src: Vec<(f64, f64, f64)>, // DRINKABLE water sources (x, z, radius) fed from the JS pond view → every animal
+    // must periodically reach a water EDGE to refill hydration or it dies of thirst. An INDEPENDENT survival pressure
+    // (distinct from food/predation) → the substrate for water-bound niches/jobs (docs: emergence economy rung).
     refuges: Vec<(f64, f64)>,      // house/settlement centres (fed from JS) → a threatened woman/child FLEES toward the nearest (home = safety)
     refuge_pop: Vec<u32>,          // per-refuge occupancy (people within SETTLE_R), recomputed each tick → drives sparse-settlement MIGRATION
     obstacles: Vec<Obstacle>,      // solid props/buildings/ponds → agents are pushed out (no tunnelling)
@@ -869,6 +885,7 @@ impl World {
             kills: Vec::new(),
             slept: Vec::new(),
             fish: Vec::new(),
+            water_src: Vec::new(),
             refuges: Vec::new(),
             refuge_pop: Vec::new(),
             obstacles: Vec::new(),
@@ -1019,6 +1036,31 @@ impl World {
     pub fn set_fish(&mut self, xz: &[f64]) {
         self.fish.clear();
         self.fish.extend(xz.chunks_exact(2).map(|c| (c[0], c[1])));
+    }
+
+    /// Replace the DRINKABLE water sources (pond centres + radius) every animal must reach to slake thirst.
+    /// `xzr` is a flat [x0,z0,r0,x1,z1,r1,…] buffer (fed from the JS pond view, same zones used as obstacles).
+    pub fn set_water(&mut self, xzr: &[f64]) {
+        self.water_src.clear();
+        self.water_src.extend(xzr.chunks_exact(3).map(|c| (c[0], c[1], c[2])));
+    }
+
+    /// Nearest water EDGE to (x,z): returns (edge_dx, edge_dz, dist_to_edge) of the closest pond, or None if the
+    /// world has no water. The vector points from the animal toward the bank; dist_to_edge ≤ 0 means it's already
+    /// within drinking reach. Linear scan — ponds are few.
+    fn nearest_water(&self, x: f64, z: f64) -> Option<(f64, f64, f64)> {
+        let mut best: Option<(f64, f64, f64)> = None;
+        let mut best_d = f64::INFINITY;
+        for &(wx, wz, r) in &self.water_src {
+            let (dx, dz) = (wx - x, wz - z);
+            let d_center = dx.hypot(dz);
+            let d_edge = d_center - (r + DRINK_REACH); // ≤0 → within reach of the bank
+            if d_edge < best_d {
+                best_d = d_edge;
+                best = Some((dx, dz, d_edge));
+            }
+        }
+        best
     }
 
     /// Replace the REFUGE points (house/settlement centres) a threatened woman/child flees toward — home is safety,
@@ -1852,14 +1894,27 @@ impl World {
                 }
                 self.agents[i].energy = en.clamp(0.0, 1.0);
             }
-            // health heals when fed, but BLEEDS when the belly's empty (starvation) → overpopulation dies back
-            if self.agents[i].energy > 0.0 {
+            // THIRST — hydration ebbs; top up at a water EDGE. No water defined (a bare test world) → thirst is
+            // inert, so every pre-water scenario stays valid. The companion never thirsts (magically tended).
+            let has_water = !self.water_src.is_empty();
+            if self.agents[i].companion {
+                self.agents[i].hydration = 1.0;
+            } else if has_water {
+                let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
+                let at_water = matches!(self.nearest_water(ax, az), Some((_, _, d)) if d <= 0.0);
+                let h = self.agents[i].hydration + if at_water { DRINK_RATE } else { -THIRST_DRAIN } * DT;
+                self.agents[i].hydration = h.clamp(0.0, 1.0);
+            }
+            let parched = has_water && !self.agents[i].companion && self.agents[i].hydration <= 0.0;
+            // health heals when fed AND watered, but BLEEDS when the belly's empty (starvation) or parched (thirst)
+            if self.agents[i].energy > 0.0 && !parched {
                 self.agents[i].health = (self.agents[i].health + HEAL * DT).min(1.0);
             } else {
-                self.agents[i].health = (self.agents[i].health - STARVE_DAMAGE * DT).max(0.0);
+                let dmg = (if self.agents[i].energy <= 0.0 { STARVE_DAMAGE } else { 0.0 }) + if parched { THIRST_DAMAGE } else { 0.0 };
+                self.agents[i].health = (self.agents[i].health - dmg * DT).max(0.0);
                 if self.agents[i].health <= 0.0 {
                     let (k, ax, az) = (self.agents[i].kind as usize as f32, self.agents[i].agent.x as f32, self.agents[i].agent.z as f32);
-                    self.events.extend_from_slice(&[EV_STARVE, k, ax, az]); // famine claimed it (dies next tick)
+                    self.events.extend_from_slice(&[EV_STARVE, k, ax, az]); // famine/thirst claimed it (dies next tick)
                 }
             }
             if self.agents[i].spooked > 0.0 {
@@ -2093,6 +2148,9 @@ impl World {
             && m.age >= m.lifespan * JUVENILE_FRAC // matured to sexual maturity (scales with lifespan — see JUVENILE_FRAC)
             && m.age < m.fertile_until // …and within its fertile window (female menopause / near-death for males)
             && (!matches!(m.kind, Kind::Person) || m.fed_meat > 0.0) // PEOPLE need a recent MEAT meal (a rabbit) to breed
+            && (self.water_src.is_empty() || m.hydration > BREED_HYDRATION) // a PARCHED animal can't reproduce → thirst
+            // actually regulates the population (else a herd out-breeds the slow thirst-death on a "breed-then-die"
+            // treadmill). Only bites when the world HAS water, so pre-water scenarios are untouched.
 
             && m.pregnant <= 0.0 // not already carrying a litter
             && !m.mobbed
@@ -2447,6 +2505,20 @@ impl World {
                     // only pull when they've drifted apart (so they don't crowd-shove on top of each other)
                     fx += dx / d * a_max * pull;
                     fz += dz / d * a_max * pull;
+                }
+            }
+        }
+
+        // THIRST-SEEK — a parched animal breaks for the nearest water, harder the thirstier it is. Lives in the
+        // SHARED flock pass so both brains get it for free; it's just a steering pull, so fleeing/hunting (which
+        // drive the speed boost) still take spatial priority when they fire. No water in the world → no pull.
+        if m.hydration < THIRSTY_AT {
+            if let Some((dx, dz, d_edge)) = self.nearest_water(ax, az) {
+                if d_edge > 0.0 {
+                    let d = dx.hypot(dz).max(0.1);
+                    let urgency = (1.0 - m.hydration / THIRSTY_AT).clamp(0.0, 1.0); // 0 at the threshold → 1 bone-dry
+                    fx += dx / d * a_max * THIRST_SEEK_W * urgency;
+                    fz += dz / d * a_max * THIRST_SEEK_W * urgency;
                 }
             }
         }
@@ -4217,4 +4289,48 @@ mod tests {
         );
     }
 
+    // THIRST: an animal at a water edge drinks its hydration back up.
+    #[test]
+    fn a_thirsty_animal_drinks_at_the_water_edge() {
+        let mut w = emergent_world();
+        let r = spawn_kind(&mut w, Kind::Rabbit, 3.0, 0.0, 7);
+        w.set_water(&[0.0, 0.0, 2.0]); // pond r=2 at origin → drink reach to 7 m; the rabbit at x=3 is at the edge
+        w.agents[r].hydration = 0.2;
+        for _ in 0..60 {
+            w.step(DT);
+        }
+        assert!(w.agents[r].hydration > 0.5, "a rabbit at the bank should drink back up (h={:.2})", w.agents[r].hydration);
+    }
+
+    // THIRST: with no reachable water, a population is culled by thirst — proof it's a REAL, independent pressure
+    // (distinct from food/predation). The same world WITH water (next test) sustains, so it isn't just lethal.
+    #[test]
+    fn thirst_culls_a_population_with_no_reachable_water() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 40, 0.0, 0.0, 20.0, 1000);
+        w.set_water(&[100_000.0, 100_000.0, 5.0]); // water exists but is unreachably far → nobody can drink
+        let p0 = alive(&w)[Kind::Rabbit as usize];
+        run_pop(&mut w, 9000); // 300 s ≫ the ~225 s a full animal lasts before thirst turns fatal
+        let p1 = alive(&w)[Kind::Rabbit as usize];
+        eprintln!("[thirst no-water] rabbits {p0}→{p1}");
+        assert!(p1 <= p0 / 5, "thirst should have culled the unwatered population ({p0}→{p1})");
+    }
+
+    // THIRST: the SAME setup WITH a pond among the herd sustains the population — thirst is a survivable errand, the
+    // thirst-seek steer pulls them to the bank in time. (Pair with the test above: pressure is real but not a wipe.)
+    #[test]
+    fn scenario_emergent_population_survives_with_water() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 40, 0.0, 0.0, 30.0, 1000);
+        w.set_water(&[0.0, 0.0, 8.0]); // a pond in the middle of the range → reachable by the whole herd
+        let seeds: Vec<i32> = w.agents.iter().map(|m| m.seed_id).collect();
+        for (i, s) in seeds.into_iter().enumerate() {
+            w.randomize_start_age(i, s);
+        }
+        let p0 = alive(&w)[Kind::Rabbit as usize];
+        run_pop(&mut w, 9000);
+        let p1 = alive(&w)[Kind::Rabbit as usize];
+        eprintln!("[thirst with-water] rabbits {p0}→{p1}");
+        assert!(p1 >= p0 / 3, "a watered herd should NOT collapse to thirst ({p0}→{p1}) — the seek/drink loop is failing");
+    }
 }
