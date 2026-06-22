@@ -525,8 +525,9 @@
 		}
 
 		// MACRO-DIRECTOR climate shock (nature.directClimate, the LLM seam): on a slow timer read the world's pulse
-		// (live headcount) and steer the DROUGHT level — a boom brings a drought that thins the herds at the
-		// shrinking water; a crash brings the rains. Feeds the sim's set_aridity. Banner only on a real shift.
+		// and steer the DROUGHT level — a boom brings a drought that thins the herds at the shrinking water; a
+		// crash brings the rains. WHOLE-WORLD headcount (live + dormant aggregates), so streaming-away most of the
+		// world doesn't fool the director into thinking it's empty. Feeds set_aridity; banner only on a real shift.
 		climateT -= dt;
 		if (climateT <= 0) {
 			climateT = CLIMATE_PERIOD;
@@ -534,6 +535,7 @@
 			agentManager.forEach((m) => {
 				if (!m.dead) pop++;
 			});
+			if (world.regions) for (const key in world.regions) for (const k in world.regions[key].counts) pop += world.regions[key].counts[k];
 			const c = nature.directClimate(pop);
 			setRustAridity(c.aridity);
 			if (c.banner) nature.announce(c.banner);
