@@ -51,7 +51,7 @@
 	let sexF = $state<Record<string, number>>({}); // live females per species (seedId even = female, matches Rust)
 	let sexM = $state<Record<string, number>>({});
 	let migrating = $state<Record<string, number>>({}); // per species: roamers en route to another settlement (Rust flag)
-	let strategies = $state<{ bold: number; cautious: number; sampled: number }>({ bold: 0, cautious: 0, sampled: 0 }); // boldness-niche split (evolved) across locally-bred agents
+	let strategies = $state<{ bold: number; cautious: number; herd: number; loner: number; sampled: number }>({ bold: 0, cautious: 0, herd: 0, loner: 0, sampled: 0 }); // evolved niche splits across locally-bred agents
 	let structures = $state<Record<string, number>>({}); // structure kind → count (near + dormant)
 	let settlements = $state(0); // clumps of ≥3 buildings (a "decently sized" settlement)
 	let liveByKind = $state<Record<string, number>>({}); // LIVE (individually simulated) per species — sex is only known for these
@@ -74,6 +74,8 @@
 			const mig: Record<string, number> = {};
 			let bold = 0; // boldness niche tally (genome[1] = safety weight): bold = flees late, breeds fast
 			let cautious = 0;
+			let herd = 0; // social niche tally (genome[2] = social weight): herd = gregarious, loner = solitary
+			let loner = 0;
 			let stratN = 0; // agents with a known genome (locally bred) → the sample the split is drawn from
 			agentManager.forEach((m) => {
 				if (m.dead) return; // live only (corpses excluded)
@@ -87,10 +89,12 @@
 					stratN++;
 					if (m.genome[1] < 0.85) bold++; // low safety weight → bold lineage
 					else if (m.genome[1] > 1.15) cautious++; // high safety weight → cautious lineage
+					if (m.genome[2] > 1.15) herd++; // high social weight → gregarious
+					else if (m.genome[2] < 0.85) loner++; // low social weight → solitary
 				}
 				live++;
 			});
-			strategies = { bold, cautious, sampled: stratN };
+			strategies = { bold, cautious, herd, loner, sampled: stratN };
 			sexF = f;
 			sexM = mle;
 			liveByKind = { ...c }; // snapshot LIVE counts (with sex) before the dormant aggregates are folded in below
@@ -228,8 +232,9 @@
 				     predation BOTH a bold lineage (flees late, breeds fast) and a cautious one (flees early, survives)
 				     persist. A healthy spread here = emergence working; all-one-side = a sweep. Sampled from bred agents. -->
 				{#if strategies.sampled > 0}
-					<div class="text-white/70" title="evolved boldness split across {strategies.sampled} locally-bred agents (genome safety weight)">
-						🧬 strategies: <span class="tabular-nums text-rose-300/90">bold {strategies.bold}</span> · <span class="tabular-nums text-sky-300/90">cautious {strategies.cautious}</span>
+					<div class="text-white/70" title="evolved niche splits across {strategies.sampled} locally-bred agents (genome weights)">
+						🧬 <span class="tabular-nums text-rose-300/90">bold {strategies.bold}</span>·<span class="tabular-nums text-sky-300/90">cautious {strategies.cautious}</span>
+						<span class="text-white/30">|</span> <span class="tabular-nums text-amber-300/90">herd {strategies.herd}</span>·<span class="tabular-nums text-emerald-300/90">loner {strategies.loner}</span>
 						<span class="text-white/40">/ {strategies.sampled}</span>
 					</div>
 				{/if}
