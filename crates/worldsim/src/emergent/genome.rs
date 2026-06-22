@@ -68,10 +68,14 @@ impl Genome {
         (1.6 - 0.6 * self.safety).clamp(0.7, 1.6)
     }
 
-    // NOTE (social niche, deferred): a SOCIAL axis (herd↔loner) coexists on its own, but when it ALSO spends
-    // reproductive rate it COUPLES with `breed_haste` through population turnover and destabilises the boldness
-    // polymorphism (one axis collapses). A second niche axis needs a DECOUPLED fitness currency (e.g. herd
-    // dilution = predator straggler-targeting on the survival side, not more breeding). Design with the user.
+    // NOTE (social niche, deferred — measured, not guessed): the SOCIAL axis (herd↔loner) does NOT robustly
+    // co-exist alongside boldness under predation. Tried both a position-based straggler bias and a gene-based
+    // herd-dilution, scanning the strength 0.3‥1.6: at every value ONE axis collapsed (boldness swept to all-bold
+    // the moment any dilution existed; social flipped chaotically herd↔loner with the weight). Root cause: BOTH
+    // axes spend the SAME currencies — one predator pressure + one breeding bottleneck — so the system finds a
+    // single joint optimum instead of two independent polymorphisms. A second axis needs a genuinely INDEPENDENT
+    // selective pressure (a distinct resource or hazard) — its natural home is the multi-resource economy rung,
+    // NOT a standalone tuning knob. `social` still biases the Follow primitive; it's just not yet a fitness niche.
 
     /// A litter's inherited genome: the average of both parents' weights, ± a seeded mutation per weight,
     /// clamped to a sane band. Same shape as the vigor gene's inheritance, so the two evolve in lockstep.
