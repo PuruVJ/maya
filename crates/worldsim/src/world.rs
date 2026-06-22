@@ -357,10 +357,9 @@ const GENE_MUT: f64 = 0.05; // ± mutation magnitude per birth
 const CH_GENE: i32 = 20; // RNG channel for the mutation roll (distinct from eco/steering channels)
 
 // ── AGING (generational turnover) ───────────────────────────────────────────────────────────────────────────
-// Every animal accrues `age`; past SENESCENCE_FRAC of its lifespan it's an infertile elder, and at its lifespan
-// it dies of old age (most are eaten / starve first — this is the backstop that keeps lineages cycling). Lifespan
-// is per-kind × a seeded ±35% so a cohort dies spread out, not all at once. Game-scaled seconds, not real years.
-const SENESCENCE_FRAC: f64 = 0.75; // past this fraction of lifespan → too old to breed
+// Every animal accrues `age`; its fertile window ends at `fertile_until` (per-individual — female menopause /
+// near-death for males), and at its lifespan it dies of old age (most are eaten / starve first — this is the
+// backstop that keeps lineages cycling). Lifespan is per-kind × a seeded ±35% so a cohort dies spread out.
 const CH_AGE: i32 = 21; // RNG channel for the lifespan-variation roll
 
 // ── EMERGENT CITIES — people build houses ───────────────────────────────────────────────────────────────────
@@ -392,13 +391,15 @@ fn gestation(kind: Kind) -> f64 {
     // TROPHIC PYRAMID via breed SPEED: prey are r-strategists (breed fast), PREDATORS are K-strategists (breed
     // SLOWLY) so apex populations stay rare without a hard cap. Predators MUST out-gestate prey here, else they
     // out-reproduce their food (user: "lions reproduce faster, 25 lions vs 40 humans") and over-predate the world.
+    // REAL-WORLD proportions (user), anchored at rabbit ≈ 31 days → 8 s (~0.26 s/day). The trophic pyramid still
+    // holds because soft_target (not gestation) is now the population regulator, so realistic spans are safe.
     match kind {
-        Kind::Rabbit => 8.0,
-        Kind::Kangaroo => 12.0,
-        Kind::Person => 36.0,    // gradual family growth
-        Kind::Cat => 30.0,       // meso-predator — slower than prey (was 12)
-        Kind::Lion => 60.0,      // apex — breeds SLOWLY so it stays rare (was 16, faster than people → overpopulated)
-        Kind::Dinosaur => 80.0,  // super-apex — slowest of all (was 20)
+        Kind::Rabbit => 8.0,     // ~31 days
+        Kind::Kangaroo => 9.0,   // ~33 days
+        Kind::Cat => 17.0,       // ~64 days
+        Kind::Lion => 28.0,      // ~110 days
+        Kind::Person => 72.0,    // ~280 days (9 months) — the longest among the mammals here
+        Kind::Dinosaur => 90.0,  // super-apex — a long egg incubation, slowest of all
     }
 }
 
@@ -419,13 +420,33 @@ fn litter_size(kind: Kind, seed_id: i32, tick: i32) -> u32 {
 
 /// Natural lifespan (seconds) by kind — small/fast prey are short-lived; big animals + people live longest.
 fn base_lifespan(kind: Kind) -> f64 {
+    // REAL-WORLD ratios (user) — anchored at rabbit ≈ 240 s (≈9 yr → ~27 s/year): a human outlives a rabbit ~7×,
+    // a cat/lion ~1.5×, a kangaroo ~2.4×, just as in our world. Predation/starvation still claim most before old
+    // age, so the long human/dino spans mostly mean adults persist (which also eases the breeding stagnation).
     match kind {
-        Kind::Rabbit => 240.0,
-        Kind::Kangaroo => 320.0,
-        Kind::Cat => 360.0,
-        Kind::Lion => 420.0,
-        Kind::Dinosaur => 540.0,
-        Kind::Person => 600.0,
+        Kind::Rabbit => 240.0,    // ~9 yr
+        Kind::Lion => 360.0,      // ~13 yr (wild)
+        Kind::Cat => 400.0,       // ~15 yr
+        Kind::Kangaroo => 560.0,  // ~21 yr
+        Kind::Person => 1600.0,   // ~60 yr (scaled a touch under 75 to keep some turnover visible in a session)
+        Kind::Dinosaur => 1800.0, // longest-lived — a large, slow-aging reptile
+    }
+}
+const JUVENILE_FRAC: f64 = 0.12; // sexual maturity at this fraction of lifespan → maturation SCALES with lifespan
+// (a long-lived human matures slowly, a short-lived rabbit fast — realistic), not a flat time for every species.
+const CH_MENO: i32 = 31; // RNG channel for a female's seeded fertility-end age (human menopause variation)
+const YR: f64 = 240.0 / 9.0; // sim-seconds per "year" (rabbit ≈ 9 yr at 240 s) — anchors real-world age windows
+
+/// Age at which agent `seed_id` stops breeding. Per the real world (user): a human FEMALE hits menopause at a
+/// seeded 45–50 yr; other females stay fertile to near old age; MALES of every kind breed essentially until death.
+fn fertile_until(kind: Kind, seed_id: i32, lifespan: f64) -> f64 {
+    if is_female(seed_id) {
+        match kind {
+            Kind::Person => (45.0 + 5.0 * crate::simrng::rand(&[seed_id, CH_MENO])) * YR, // 45–50 yr, fixed at birth
+            _ => lifespan * 0.85,                                                          // animals: fertile to near old age
+        }
+    } else {
+        lifespan * 0.97 // males: fertile right up to death
     }
 }
 const HEAL: f64 = 0.04; // health/s regained while unharmed
@@ -478,6 +499,8 @@ pub struct ManagedAgent {
     // predators, faster predators catch prey). The whole point of breeding being more than cloning.
     pub age: f64,      // seconds lived → drives senescence (infertile elder) + old-age death
     pub lifespan: f64, // this individual's natural lifespan (per-kind base ± seeded variation); age ≥ this = dies of old age
+    pub fertile_until: f64, // age at which it can no longer breed — per-INDIVIDUAL: a human female's menopause (~45–50 yr,
+    // seeded at birth), other females near old age, MALES essentially until death (user: real-world breeding windows)
     pub pregnant: f64, // gestation remaining (s); >0 = a female carrying a litter (delivers at 0). Males stay 0.
     pub unborn_gene: f64, // the vigor the carried litter will inherit (averaged from both parents at conception)
     pub meals: u32,
@@ -583,6 +606,7 @@ impl Snapshot {
 pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> ManagedAgent {
     let e = eco(kind);
     let sm = slash_max(kind, seed_id);
+    let lifespan = base_lifespan(kind) * (0.65 + 0.7 * crate::simrng::rand(&[seed_id, CH_AGE])); // ±35% per-individual → deaths spread out, not synchronized
     ManagedAgent {
         agent,
         kind,
@@ -596,7 +620,8 @@ pub fn make_managed(agent: Agent, kind: Kind, radius: f64, seed_id: i32) -> Mana
         health: 1.0,
         gene: 1.0, // founders are baseline vigor; evolution emerges as mutation accumulates across births
         age: 0.0,
-        lifespan: base_lifespan(kind) * (0.65 + 0.7 * crate::simrng::rand(&[seed_id, CH_AGE])), // ±35% per-individual → deaths spread out, not synchronized
+        lifespan,
+        fertile_until: fertile_until(kind, seed_id, lifespan),
         pregnant: 0.0,
         unborn_gene: 1.0,
         meals: 0,
@@ -1876,7 +1901,8 @@ impl World {
             && !m.asleep
             && m.breed_cd <= 0.0
             && m.energy > BREED_ENERGY / self.vitality[m.kind as usize] // well-fed bar, EASED for a species the director is boosting
-            && m.age < m.lifespan * SENESCENCE_FRAC // fertile window: matured, not yet an elder
+            && m.age >= m.lifespan * JUVENILE_FRAC // matured to sexual maturity (scales with lifespan — see JUVENILE_FRAC)
+            && m.age < m.fertile_until // …and within its fertile window (female menopause / near-death for males)
             && m.pregnant <= 0.0 // not already carrying a litter
             && !m.mobbed
             && m.spooked <= 0.0
@@ -2871,8 +2897,10 @@ mod tests {
     fn a_pair_gestates_then_delivers_a_litter() {
         let mut w = mw();
         w.set_player(1e4, 1e4); // park the player far
-        w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // seeds 1,2 → an opposite-sex pair
-        w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2); // adjacent (< BREED_R2), well-fed
+        let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // seeds 1,2 → an opposite-sex pair
+        let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2); // adjacent (< BREED_R2), well-fed
+        w.agents[a].age = w.agents[a].lifespan * 0.4; // mature adults (past the maturation gate, within the fertile window)
+        w.agents[b].age = w.agents[b].lifespan * 0.4;
         // they conceive within a few ticks; rabbit gestation is 8 s → run well past it (tick_once accumulates births)
         for t in 1..=320 {
             w.tick_once(t);
@@ -2891,8 +2919,10 @@ mod tests {
         // 0 births / 0 kills over 8000 ticks, a frozen stalemate). Breeding now only balks at a hunter ≤14 m.
         let mut w = mw();
         w.set_player(1e4, 1e4);
-        w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // seeds 1,2 → an opposite-sex, well-fed pair
-        w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
+        let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1); // seeds 1,2 → an opposite-sex, well-fed pair
+        let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
+        w.agents[a].age = w.agents[a].lifespan * 0.4; // mature adults
+        w.agents[b].age = w.agents[b].lifespan * 0.4;
         w.spawn(animal(25.0, 0.0, 3), Kind::Cat, 0.35, 3); // a hunter in view (sets threat) but 25 m off, not on top of them
         // they should conceive almost immediately — before the cat can close the gap
         let mut conceived = false;
@@ -2912,8 +2942,9 @@ mod tests {
         w.set_player(1e4, 1e4);
         let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
         let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
-        w.agents[a].energy = 0.3; // hungry → not breed-ready
-        w.set_breed_cooldown(b, JUVENILE_CD); // a juvenile, still maturing
+        w.agents[a].age = w.agents[a].lifespan * 0.4; // a mature adult, but…
+        w.agents[a].energy = 0.3; // …hungry → not breed-ready
+        w.set_breed_cooldown(b, JUVENILE_CD); // the mate is a juvenile, still maturing (age reset to 0)
         for t in 1..=6 {
             w.tick_once(t);
         }
@@ -2966,6 +2997,8 @@ mod tests {
         let b = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
         w.agents[a].gene = 1.4; // a fast lineage
         w.agents[b].gene = 1.4;
+        w.agents[a].age = w.agents[a].lifespan * 0.4; // mature adults
+        w.agents[b].age = w.agents[b].lifespan * 0.4;
         for t in 1..=320 {
             w.tick_once(t); // conceive, then gestate (rabbit 8 s) → the litter delivers
         }
@@ -2993,13 +3026,17 @@ mod tests {
     fn an_elder_is_infertile() {
         let mut w = mw();
         w.set_player(1e4, 1e4);
-        let a = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
-        w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2); // a fertile would-be mate
-        w.agents[a].age = w.agents[a].lifespan * 0.9; // past senescence (0.75) → an infertile elder
+        // seed 2 = FEMALE (even). Age her past her menopause/fertility end (rabbit female = 0.85·lifespan) → infertile,
+        // even though males now stay fertile to death. The male mate (seed 1) is a fertile adult, so the ONLY blocker
+        // is her age → no birth.
+        let male = w.spawn(animal(0.0, 0.0, 1), Kind::Rabbit, 0.35, 1);
+        let female = w.spawn(animal(1.5, 0.0, 2), Kind::Rabbit, 0.35, 2);
+        w.agents[male].age = w.agents[male].lifespan * 0.4; // a fertile adult would-be mate
+        w.agents[female].age = w.agents[female].lifespan * 0.9; // past her fertile window → an infertile elder
         for t in 1..=6 {
             w.tick_once(t);
         }
-        assert_eq!(w.births().len(), 0, "no fertile pair (the only mate is a senescent elder) → no birth");
+        assert_eq!(w.births().len(), 0, "the only mate is a post-fertile female elder → no birth");
     }
 
     #[test]
