@@ -657,6 +657,9 @@ impl Snapshot {
             if m.migrating {
                 f |= 16; // bit4 → the HUD counts who's migrating between settlements
             }
+            if m.pregnant > 0.0 {
+                f |= 32; // bit5 → carrying a litter → the view shows a rounded belly
+            }
             self.flags[i] = f;
             self.behaviors[i] = m.agent.behavior.code();
             self.progress[i] = (m.agent.elapsed / m.agent.duration).min(1.0) as f32;

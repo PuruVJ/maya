@@ -84,6 +84,7 @@
 	let legR = $state<THREE.Group>();
 	let armL = $state<THREE.Group>();
 	let armR = $state<THREE.Group>();
+	let pregnant = $state(false); // mirrored from the sim each frame → toggles the belly (females only)
 
 	const lean = new Spring(0, 9, 0.7);
 	const headYaw = new Spring(0, 6, 0.85);
@@ -154,6 +155,8 @@
 
 		// (far living agents already returned above; corpses fell through the dead branch)
 
+		if (pregnant !== managed.pregnant) pregnant = managed.pregnant; // surfaced to the belly mesh (write only on flip)
+
 		// ASLEEP → lie down and rest (people rarely tire — only predators sleep — but handle it safely)
 		if (managed.asleep) {
 			core.rotation.x = flop.step(dt, Math.PI / 2);
@@ -201,6 +204,10 @@
 		<T.Group bind:ref={core}>
 		<!-- torso · SHARED geometry + cached material -->
 		<T.Mesh position={[0, 1.05, 0]} geometry={NPC.torso} material={creatureMat(SHIRT)} castShadow />
+		<!-- PREGNANT → a rounded belly bulging forward (females only; mirrored from the sim's gestation) -->
+		{#if female && pregnant}
+			<T.Mesh geometry={PRIM.sphere} scale={[0.34, 0.32, 0.36]} position={[0, 0.92, 0.18]} material={creatureMat(SHIRT)} castShadow />
+		{/if}
 		<!-- head pivot -->
 		<T.Group bind:ref={head} position={[0, 1.62, 0]}>
 			<T.Mesh geometry={NPC.head} material={creatureMat(SKIN)} castShadow />
