@@ -129,6 +129,38 @@ const MIGRATE_R: f64 = 320.0; // a roamer perceives + heads for sparse settlemen
 const MIGRATE_R2: f64 = MIGRATE_R * MIGRATE_R;
 const MIGRATE_W: f64 = 0.55; // travel drive toward the chosen settlement (gentle — below flee/dispersal, like BAND_SEEK_W)
 const CH_MIGRATE: i32 = 30; // RNG channel for the per-(agent,settlement) jitter that decorrelates who goes where
+const CH_WANDERLUST: i32 = 32; // RNG channel for the per-person "restless wanderer" trait roll
+const WANDER_FRAC: f64 = 0.2; // base RESTLESS share (× the per-kind weight below) — wanderers leave even a comfortable
+// spot to found/join a sparser one elsewhere and breed there (gene flow + spread). The rest settle + anchor.
+
+/// Per-kind MIGRATION tendency (user: "highest for humans, different for all animals"). Scales both the restless
+/// WANDERER share and the travel drive, so humans roam between settlements the most, kangaroos rove as nomads, and
+/// rabbits stick close. Migration applies to EVERY organism — people toward sparser settlements, animals to fresh range.
+fn migrate_weight(kind: Kind) -> f64 {
+    match kind {
+        Kind::Person => 1.0,    // most migratory — founds + moves between settlements
+        Kind::Kangaroo => 0.7,  // nomadic rovers
+        Kind::Dinosaur => 0.6,  // wide-ranging
+        Kind::Lion => 0.55,     // ranges for territory/prey
+        Kind::Cat => 0.4,
+        Kind::Rabbit => 0.3,    // stays near its warren
+    }
+}
+
+/// How strongly age modulates the urge to migrate (user): ~0 in childhood, ramps to a PEAK through prime
+/// adulthood, holds, then eases down in old age — an elder CAN still move, just far less likely (never 0).
+fn age_migrate_factor(age: f64, lifespan: f64) -> f64 {
+    let f = (age / lifespan.max(1.0)).clamp(0.0, 1.0); // life fraction
+    if f < JUVENILE_FRAC {
+        0.0 // children stay home
+    } else if f < 0.25 {
+        (f - JUVENILE_FRAC) / (0.25 - JUVENILE_FRAC) // ramp up to the prime
+    } else if f < 0.6 {
+        1.0 // prime adulthood — peak wanderlust
+    } else {
+        1.0 - 0.7 * ((f - 0.6) / 0.4) // ease down to ~0.3 by death (elders rarely, but can, move)
+    }
+}
 
 /// A solid the agents can't walk through — a CIRCLE (props/ponds) or an ORIENTED BOX (buildings, so animals hug
 /// walls / use streets like the player). Port of the JS `Obstacle`; `is_box` picks the resolve path.
@@ -1051,6 +1083,21 @@ impl World {
         best
     }
 
+    /// Occupancy of the nearest settlement within SETTLE_R of (x,z) — i.e. "how full is the town I'm standing in",
+    /// or None if I'm out in the wild (no settlement near). Drives the migration "am I comfortable here?" check.
+    fn here_occupancy(&self, x: f64, z: f64) -> Option<u32> {
+        let mut best = SETTLE_R2;
+        let mut pop = None;
+        for (ri, &(rx, rz)) in self.refuges.iter().enumerate() {
+            let d2 = (rx - x).powi(2) + (rz - z).powi(2);
+            if d2 < best {
+                best = d2;
+                pop = self.refuge_pop.get(ri).copied();
+            }
+        }
+        pop
+    }
+
     /// Nearest refuge (house) within `r` of (x,z), or None — a fleeing woman/child heads here for safety.
     fn nearest_refuge(&self, x: f64, z: f64, r: f64) -> Option<(f64, f64)> {
         let mut best: Option<(f64, f64)> = None;
@@ -1078,8 +1125,8 @@ impl World {
                 continue; // already full → not a migration draw
             }
             let d2 = (rx - x).powi(2) + (rz - z).powi(2);
-            if d2 > MIGRATE_R2 {
-                continue;
+            if d2 > MIGRATE_R2 || d2 < SETTLE_R2 {
+                continue; // out of perception, OR it's the town I'm already in (migrate means going ELSEWHERE)
             }
             // jitter the effective distance ±~25% by a seed stable per (agent, this settlement's location)
             let j = 0.75 + 0.5 * crate::simrng::rand(&[seed_id, (rx as i32).wrapping_mul(73) ^ (rz as i32), CH_MIGRATE]);
@@ -2213,18 +2260,36 @@ impl World {
         // toward the nearest UNDER-populated town it can perceive: brings fresh UNRELATED blood so an isolated all-
         // kin settlement can breed again past the incest rule, and fills thin towns. Decentralised (each picks from
         // its own spot + a seeded jitter; a town stops drawing once it's full) → no "everyone to the one empty spot".
-        if is_person && !self.refuges.is_empty() && m.age >= m.lifespan * 0.15 {
-            let settled = self.nearest_refuge(ax, az, SETTLE_R).is_some();
-            if !settled {
-                if let Some((tx, tz)) = self.nearest_sparse_refuge(ax, az, m.seed_id) {
-                    let dx = tx - ax;
-                    let dz = tz - az;
-                    let d = dx.hypot(dz).max(0.001);
-                    let w = a_max * MIGRATE_W;
-                    fx += dx / d * w;
-                    fz += dz / d * w;
-                    migrating = true; // surfaced to the HUD (snapshot flag) → "in process of migrating"
+        // MIGRATION — EVERY organism (per-kind weight × age curve; user). Tendency is ~0 in youth, peaks in prime
+        // adulthood, eases in old age. PEOPLE head for a sparser SETTLEMENT (wild/over-full always; a restless
+        // wanderer subset leaves even a comfortable town → gene flow past the incest rule). ANIMALS strike outward
+        // to fresh range (nomadic relocation). Decentralised + occupancy-aware → no "everyone to one spot".
+        let mig_t = migrate_weight(m.kind) * age_migrate_factor(m.age, m.lifespan);
+        if mig_t > 0.0 {
+            let wanderer = crate::simrng::rand(&[m.seed_id, CH_WANDERLUST]) < WANDER_FRAC * mig_t;
+            let w = a_max * MIGRATE_W * migrate_weight(m.kind);
+            if is_person && !self.refuges.is_empty() {
+                let want = match self.here_occupancy(ax, az) {
+                    None => true,                              // out in the wild → seek a town
+                    Some(pop) => pop > SETTLE_TARGET || wanderer, // over-full town, or a restless soul → leave
+                };
+                if want {
+                    if let Some((tx, tz)) = self.nearest_sparse_refuge(ax, az, m.seed_id) {
+                        let (dx, dz) = (tx - ax, tz - az);
+                        let d = dx.hypot(dz).max(0.001);
+                        fx += dx / d * w;
+                        fz += dz / d * w;
+                        migrating = true; // surfaced to the HUD (snapshot flag)
+                    }
                 }
+            } else if !is_person && wanderer {
+                // animal NOMAD: commit to a seeded OUTWARD heading (fanned ±90°) → relocate the herd to fresh range
+                let rng = crate::simrng::rand(&[m.seed_id, CH_DISPERSE]);
+                let r0 = (ax * ax + az * az).sqrt();
+                let ang = if r0 > 1.0 { az.atan2(ax) + (rng - 0.5) * std::f64::consts::PI } else { rng * std::f64::consts::TAU };
+                fx += ang.cos() * w;
+                fz += ang.sin() * w;
+                migrating = true;
             }
         }
 
