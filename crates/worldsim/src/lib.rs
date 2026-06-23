@@ -110,6 +110,20 @@ mod wasm_api {
         [Rabbit, Cat, Kangaroo, Person, Lion, Dinosaur].map(crate::world::migrate_weight).to_vec()
     }
 
+    /// The RENDER slice of the eco table — [rank, speed_lo, speed_hi] per kind, by Kind order. Rust owns the full
+    /// canonical eco.rs; the renderer reads ONLY what it needs (gait speed range + rank) from here, no JS copy.
+    #[wasm_bindgen]
+    pub fn eco_render() -> Vec<f64> {
+        use crate::eco::{eco, Kind::*};
+        [Rabbit, Cat, Kangaroo, Person, Lion, Dinosaur]
+            .iter()
+            .flat_map(|&k| {
+                let e = eco(k);
+                [e.rank as f64, e.speed_lo, e.speed_hi]
+            })
+            .collect()
+    }
+
     /// THE ENGINE (no JS engine): apply `ops_json` to `world_json` for a player at (px,pz,yaw). Returns a JSON
     /// string `{"world": <new world>, "conflicts": [...]}`. The world DOM round-trips unknown fields untouched.
     /// Faithful port of the old engine.ts applyOps — see crate::engine (parity-tested against the JS originals).

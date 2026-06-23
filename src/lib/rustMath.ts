@@ -14,6 +14,7 @@ interface MathGlue {
 	band_spread: (count: number, ax: number, az: number, r: number) => Float64Array;
 	ponds_near: (px: number, pz: number, reach: number) => Float64Array;
 	migrate_weights: () => Float64Array;
+	eco_render: () => Float64Array;
 	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
 }
 
@@ -77,6 +78,12 @@ export function rustPondsNear(px: number, pz: number, reach: number): Float64Arr
  *  dinosaur]. The HUD reads this instead of hard-coding a duplicate. Null until the wasm math instance is loaded. */
 export function rustMigrateWeights(): Float64Array | null {
 	return glue ? glue.migrate_weights() : null;
+}
+
+/** The render slice of the eco table — [rank, speed_lo, speed_hi] per kind, by Kind order. Rust is the source of
+ *  truth (eco.rs); the renderer reads gait-speed + rank from here. Null until the wasm math instance is loaded. */
+export function rustEcoRender(): Float64Array | null {
+	return glue ? glue.eco_render() : null;
 }
 
 /** THE ENGINE — apply `ops` to a world (both JSON strings) for a player at (px,pz,yaw). Returns the new world +

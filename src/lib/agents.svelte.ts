@@ -14,6 +14,7 @@
 // render storms. See docs/npc-movement.md.
 import { Agent, type Behavior } from './steering';
 import { Rng } from './rng';
+import { rustEcoRender } from './rustMath';
 
 // Deterministic per-individual trait RNG (docs/self-sustaining-world.md §1.6): every birth-time draw is keyed
 // by the agent's stable `seedId` + a CHANNEL, so spawns are reproducible (same obj.id ⇒ same traits → a shared
@@ -21,25 +22,32 @@ import { Rng } from './rng';
 const rng = new Rng('worldgen-agents');
 const CH = { speed: 2 } as const; // only the render-gait speed roll is still done JS-side (Rust owns the sim rolls)
 
-// ── Per-kind RENDER trait mirror ────────────────────────────────────────────────────────────────────
-// The Rust core (crates/worldsim/src/eco.rs) owns the CANONICAL, full ecosystem table and runs ALL the sim
-// (movement / food-chain / combat / metabolism). JS keeps ONLY what RENDERING needs: each kind's `speed` range →
-// a per-agent maxSpeed that scales the leg-swing GAIT, and `rank` (the player-stun check in Player.svelte). The
-// sim-only fields that used to live here (endurance / hunts / fullAfter / sleepSecs / mobToll, and the per-agent
-// stamina/slash/rival/chase state in makeManaged) were JS-SIM-era residue — removed, since Rust is the one source
-// of truth now and the duplicate table was pure mirror-sync hazard (every balance tweak had to be edited twice).
-export const ECO: Record<string, { rank: number; speed: [number, number] }> = {
-	rabbit: { rank: 1, speed: [4.0, 5.2] },
-	cat: { rank: 2, speed: [3.5, 4.5] },
-	kangaroo: { rank: 2, speed: [3.4, 4.6] },
-	person: { rank: 3, speed: [1.8, 2.5] },
-	lion: { rank: 4, speed: [3.7, 4.8] },
-	dinosaur: { rank: 5, speed: [4.8, 6.2] }
-};
+// ── Per-kind RENDER trait, READ FROM RUST ──────────────────────────────────────────────────────────────
+// Rust (crates/worldsim/src/eco.rs) owns the CANONICAL eco table + runs ALL the sim. The renderer needs only two
+// fields — each kind's gait `speed` range and `rank` (player-stun check) — and reads them FROM Rust (rustEcoRender,
+// the source of truth) instead of keeping a duplicate copy here (which had to be edited twice on every tweak).
+// Cached after the first successful read; a generic placeholder covers the rare pre-wasm-load call (render-only,
+// self-correcting — an agent's real sim speed always comes from Rust regardless).
+const KIND_ORDER = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] as const; // = Rust Kind order
+let ecoCache: Record<string, { rank: number; speed: [number, number] }> | null = null;
+function ecoTable(): Record<string, { rank: number; speed: [number, number] }> | null {
+	if (ecoCache) return ecoCache;
+	const d = rustEcoRender(); // [rank, speed_lo, speed_hi] × 6, by Kind order
+	if (!d) return null; // wasm not ready yet → callers use a placeholder
+	ecoCache = {};
+	KIND_ORDER.forEach((k, i) => (ecoCache![k] = { rank: d[i * 3], speed: [d[i * 3 + 1], d[i * 3 + 2]] }));
+	return ecoCache;
+}
 
-/** A random max speed in this kind's range (varies every individual; deterministic per seedId) — for the gait. */
+/** A kind's RANK (player-stun check) — from Rust's eco table. 2 (mid) until the wasm has loaded. */
+export function ecoRank(kind: string): number {
+	return ecoTable()?.[kind]?.rank ?? 2;
+}
+
+/** A random max speed in this kind's range (varies every individual; deterministic per seedId) — for the gait.
+ *  Speed range comes from Rust; the per-agent ROLL stays JS (render gait only). Generic [3,4] before wasm loads. */
 export function speedFor(kind: string, seedId: number): number {
-	const s = (ECO[kind] ?? ECO.cat).speed;
+	const s = ecoTable()?.[kind]?.speed ?? [3, 4];
 	return rng.range(s[0], s[1], seedId, CH.speed);
 }
 
@@ -113,7 +121,7 @@ export function makeManaged(agent: Agent, kind: string, radius: number, menu: Be
 		lod: 0,
 		castShadow: true,
 		dist: 0,
-		rank: (ECO[kind] ?? ECO.cat).rank, // the player-stun check reads this; rest of the food-chain is Rust's
+		rank: ecoRank(kind), // the player-stun check reads this (from Rust's eco table); rest of the food-chain is Rust's
 		seedId,
 		health: 1,
 		dead: false,
