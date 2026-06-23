@@ -44,7 +44,7 @@
 	import { streamRegions, regionOf, fastForwardDormant } from '$lib/streaming';
 	import { playerState } from '$lib/playerState.svelte';
 	import { heightAt } from '$lib/terrain';
-	import { inWater, waterSurfaceY } from '$lib/water';
+	import { inWater, waterSurfaceY, waterEdgeFactor } from '$lib/water';
 	import { nature } from '$lib/nature.svelte';
 	import { wind } from '$lib/wind';
 	import { weather } from '$lib/weather';
@@ -115,7 +115,25 @@
 	// for all ~16 nearby ponds was a real mount-storm (the grey flicker on load) for zero gain at distance/in fog.
 	const POND_RENDER_R = 360; // draw natural ponds within this (near = Water, far = blob); beyond is fogged out
 	const POND_NEAR_R2 = 130 * 130; // within this → full Water; beyond → the cheap flat blob
-	const POND_BLOB_GEO = new THREE.CircleGeometry(1, 18).rotateX(-Math.PI / 2); // a flat unit disc laid on the ground
+	// a flat unit disc laid on the ground, with an ORGANIC rim (one shared blob shape, scaled per pond) so far ponds
+	// read as natural water — not perfect circles — at near-zero cost (vs a per-pond geometry). Matches the near
+	// <Water> blob's silhouette so the LOD swap doesn't pop from "round" to "blob".
+	const POND_BLOB_GEO = (() => {
+		const SEG = 22;
+		const seed = 5.0; // a fixed seed → all far blobs share this outline (unnoticeable at distance, but not a circle)
+		const pos: number[] = [0, 0, 0];
+		const idx: number[] = [];
+		for (let i = 0; i <= SEG; i++) {
+			const a = (i / SEG) * Math.PI * 2;
+			const rr = waterEdgeFactor(seed, a);
+			pos.push(Math.cos(a) * rr, 0, Math.sin(a) * rr);
+		}
+		for (let i = 1; i <= SEG; i++) idx.push(0, i + 1, i);
+		const g = new THREE.BufferGeometry();
+		g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+		g.setIndex(idx);
+		return g;
+	})();
 	const POND_BLOB_MAT = new THREE.MeshBasicMaterial({ color: '#3f6f9e' }); // flat water-blue; cheap, no lighting
 	type PondZone = { id: string; material: string; shape: string; pos: [number, number, number]; size: number };
 	let nearPonds = $state<PondZone[]>([]); // full Water shader (the few right next to you)
