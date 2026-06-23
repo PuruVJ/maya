@@ -4,7 +4,26 @@
 //! is preserved exactly — the same PRNG (mulberry32) and the same GLSL-style hash — and parity with the former JS
 //! is pinned by tests (src/lib/worldgen.test.ts) so a port can't silently change a generated city/town.
 
+use crate::engine::{in_water, wzones_of};
 use jzon::{array, object, JsonValue};
+
+// ── shared helpers ────────────────────────────────────────────────────────────────────────────────────────────
+fn f(v: &JsonValue) -> f64 {
+    v.as_f64().unwrap_or(0.0)
+}
+/// (x, z) of an object/zone's `pos` (the world is XZ-planar; pos[1] is height).
+fn pos_xz(o: &JsonValue) -> (f64, f64) {
+    (f(&o["pos"][0]), f(&o["pos"][2]))
+}
+/// The GLSL-style hash used by the city/forest generators — `fract(sin(i*12.9898+4.13)*43758.5453)`, byte-for-byte
+/// the JS `hash1`. f64 sin matches across the boundary to ~1e-12; the worldgen parity tests pin the result.
+fn hash1(i: f64) -> f64 {
+    let v = (i * 12.9898 + 4.13).sin() * 43758.5453;
+    v - v.floor()
+}
+fn zones_vec(world: &JsonValue) -> Vec<JsonValue> {
+    world["zones"].members().cloned().collect()
+}
 
 // ── mulberry32 — a tiny deterministic PRNG, BYTE-IDENTICAL to the JS `prng()` in settlementPlanner.ts ──────────
 // JS used signed `|0` adds + `Math.imul` + unsigned `>>>` shifts; u32 wrapping arithmetic reproduces every bit.
@@ -148,6 +167,88 @@ pub fn settlement_plan(cx: f64, cz: f64, size: &str, seed: u32, id_prefix: &str)
     }
 
     object! { "objects" => objects, "paths" => paths, "radius" => half + if p.fenced { 8.0 } else { 4.0 } }
+}
+
+// ── FOREST — plant/grow a wood ahead of the player (faithful port of city.ts forestOps) ──────────────────────
+const FOREST_KINDS: [&str; 3] = ["tree", "tree", "pine"];
+fn is_tree(k: &str) -> bool {
+    k == "tree" || k == "pine"
+}
+
+/// Ops that plant (or grow) a forest. Centre = nearby trees' centroid (grows the same wood), else ahead of the
+/// player; fills the next annulus outward with golden-spiral-spread, jittered trees. Returns an ops JSON array.
+pub fn forest_ops(world: &JsonValue, px: f64, pz: f64, yaw: f64) -> JsonValue {
+    let mut ops = JsonValue::new_array();
+    let (fx, fz) = (yaw.sin(), -yaw.cos());
+    let (tx, tz) = (px + fx * 14.0, pz + fz * 14.0);
+    let near: Vec<(f64, f64)> = world["objects"]
+        .members()
+        .filter(|o| is_tree(o["kind"].as_str().unwrap_or("")))
+        .map(pos_xz)
+        .filter(|&(x, z)| (x - tx).hypot(z - tz) < 40.0)
+        .collect();
+
+    let (cx, cz) = if near.is_empty() {
+        (tx, tz)
+    } else {
+        let n = near.len() as f64;
+        (near.iter().map(|p| p.0).sum::<f64>() / n, near.iter().map(|p| p.1).sum::<f64>() / n)
+    };
+    let mut inner_r = 0.0f64;
+    for &(x, z) in &near {
+        inner_r = inner_r.max((x - cx).hypot(z - cz));
+    }
+    let outer_r = inner_r + if near.is_empty() { 14.0 } else { 16.0 };
+
+    let area = std::f64::consts::PI * (outer_r * outer_r - inner_r * inner_r);
+    let count = (area / 16.0).round().clamp(8.0, 32.0) as i32;
+    let ga = std::f64::consts::PI * (3.0 - 5.0f64.sqrt()); // golden angle
+    let zones = wzones_of(&zones_vec(world));
+    for i in 0..count {
+        let t = (i as f64 + 0.5) / count as f64;
+        let r = (inner_r * inner_r + t * (outer_r * outer_r - inner_r * inner_r)).sqrt();
+        let a = i as f64 * ga + hash1(i as f64) * 0.6;
+        let jr = 1.0 + (hash1(i as f64 + 99.0) - 0.5) * 4.0;
+        let x = cx + a.cos() * (r + jr);
+        let z = cz + a.sin() * (r + jr);
+        if in_water(&zones, x, z) {
+            continue; // trees don't grow in the lake
+        }
+        let kind = FOREST_KINDS[(hash1(i as f64 + 7.0) * FOREST_KINDS.len() as f64) as usize];
+        let s = 0.8 + hash1(i as f64 + 31.0) * 0.7;
+        let _ = ops.push(object! { "op" => "add", "kind" => kind, "pos" => array![x, 0.0, z], "scale" => array![s, s, s], "rot" => hash1(i as f64 + 51.0) * 360.0 });
+    }
+    ops
+}
+
+// ── LAKE — dig/enlarge a pond ahead of the player (faithful port of city.ts lakeOps) ──────────────────────────
+/// Ops to dig (or grow) a lake: a fresh organic pond ahead of you, or — if you're at an existing one — remove it
+/// and re-add a bigger zone centred the same. Returns an ops JSON array.
+pub fn lake_ops(world: &JsonValue, px: f64, pz: f64, yaw: f64) -> JsonValue {
+    let mut ops = JsonValue::new_array();
+    let (fx, fz) = (yaw.sin(), -yaw.cos());
+    let (tx, tz) = (px + fx * 18.0, pz + fz * 18.0);
+    let mut best: Option<(String, f64, f64, f64)> = None; // (id, x, z, size)
+    let mut bd = f64::INFINITY;
+    for z in world["zones"].members() {
+        if z["material"].as_str() != Some("water") {
+            continue;
+        }
+        let (zx, zz) = pos_xz(z);
+        let size = f(&z["size"]);
+        let d = (zx - tx).hypot(zz - tz);
+        if d < size + 16.0 && d < bd {
+            bd = d;
+            best = Some((z["id"].as_str().unwrap_or("").to_string(), zx, zz, size));
+        }
+    }
+    if let Some((id, zx, zz, size)) = best {
+        let _ = ops.push(object! { "op" => "remove", "id" => id });
+        let _ = ops.push(object! { "op" => "addZone", "material" => "water", "shape" => "blob", "pos" => array![zx, 0.0, zz], "size" => size + 6.0 });
+    } else {
+        let _ = ops.push(object! { "op" => "addZone", "material" => "water", "shape" => "blob", "pos" => array![tx, 0.0, tz], "size" => 13.0 });
+    }
+    ops
 }
 
 #[cfg(test)]

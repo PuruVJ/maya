@@ -416,7 +416,7 @@ fn features_of(terrain: &[JsonValue]) -> Vec<Feature> {
         })
         .collect()
 }
-fn wzones_of(zones: &[JsonValue]) -> Vec<WZone> {
+pub fn wzones_of(zones: &[JsonValue]) -> Vec<WZone> {
     zones
         .iter()
         .map(|z| WZone {

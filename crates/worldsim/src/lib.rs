@@ -200,6 +200,22 @@ mod wasm_api {
         crate::worldgen::settlement_plan(cx, cz, size, seed, id_prefix).dump()
     }
 
+    /// FOREST generator — Rust owns the world-gen. Reads the world DOM (`world_json`) + player (px,pz,yaw), returns
+    /// an ops JSON array that plants/grows a wood. Ported from city.ts forestOps (parity-pinned by worldgen.test.ts).
+    #[wasm_bindgen]
+    pub fn forest_ops(world_json: &str, px: f64, pz: f64, yaw: f64) -> String {
+        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        crate::worldgen::forest_ops(&world, px, pz, yaw).dump()
+    }
+
+    /// LAKE generator — digs/grows a pond ahead of the player. Reads the world DOM, returns an ops JSON array.
+    /// Ported from city.ts lakeOps.
+    #[wasm_bindgen]
+    pub fn lake_ops(world_json: &str, px: f64, pz: f64, yaw: f64) -> String {
+        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        crate::worldgen::lake_ops(&world, px, pz, yaw).dump()
+    }
+
     // ───────────────────────── the agent-sim bridge ─────────────────────────
     // One `Sim` per world. JS spawns agents (by kind-code + seedId), drives it with `step(dt)` once per frame
     // (the Rust clock sub-steps to fixed DT internally), and reads transforms back as typed-array VIEWS over

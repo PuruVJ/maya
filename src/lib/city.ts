@@ -6,6 +6,7 @@
 import type { Op } from './engine';
 import type { World, Player } from './world';
 import { inWater } from './water';
+import { math } from './math';
 
 const BUILDINGS = ['house', 'cabin', 'tower'];
 // warm earthy wall tones → houses/cabins aren't all the same beige (towers keep their stone)
@@ -141,62 +142,18 @@ export function isCityCommand(cmd: string): boolean {
 	return /^(make|build|grow|add|create|generate|bigger|expand)?\s*(me\s+)?(a\s+|the\s+|my\s+)?(big(ger)?\s+|huge\s+)?(city|town|village)$/.test(cmd);
 }
 
-// ── Forest (same growth pattern as the city) ───────────────────────────────────────────────────────
-const FOREST_KINDS = ['tree', 'tree', 'pine']; // ~2:1 broadleaf : pine
-const isTree = (kind: string) => kind === 'tree' || kind === 'pine';
+// GLSL-style hash for the city generator's loose block/jitter variation (still JS until cityOps moves to Rust).
 const hash1 = (i: number) => {
 	const v = Math.sin(i * 12.9898 + 4.13) * 43758.5453;
 	return v - Math.floor(v);
 };
 
 /**
- * Ops that plant (or grow) a forest. Like `make city`: centre = existing trees' centroid (grows the same
- * wood), else ahead of the player. Each call fills the next annulus outward with naturally-jittered trees,
- * so repeating "make forest" thickens and widens it. Even area-fill via the golden angle + sqrt radius.
+ * Ops that plant (or grow) a forest. The generation compute now lives in RUST (worldgen.rs `forest_ops`); this
+ * delegates across the wasm boundary (parity-pinned by worldgen.test.ts). Empty until the wasm is loaded.
  */
 export function forestOps(world: World, player: Player): Op[] {
-	const ops: Op[] = [];
-	// plant AT the player; only grow a wood that's RIGHT HERE (don't drag back to the demo trees at origin)
-	const fx = Math.sin(player.yaw);
-	const fz = -Math.cos(player.yaw);
-	const tx = player.pos[0] + fx * 14;
-	const tz = player.pos[2] + fz * 14;
-	const near = world.objects.filter((o) => isTree(o.kind) && Math.hypot(o.pos[0] - tx, o.pos[2] - tz) < 40);
-
-	let cx: number;
-	let cz: number;
-	if (near.length) {
-		cx = near.reduce((s, o) => s + o.pos[0], 0) / near.length;
-		cz = near.reduce((s, o) => s + o.pos[2], 0) / near.length;
-	} else {
-		cx = tx;
-		cz = tz;
-	}
-
-	let innerR = 0;
-	for (const o of near) {
-		const d = Math.hypot(o.pos[0] - cx, o.pos[2] - cz);
-		if (d > innerR) innerR = d;
-	}
-	const outerR = innerR + (near.length ? 16 : 14);
-
-	// even area-fill of the annulus [innerR, outerR], capped so one call isn't a huge hang
-	const area = Math.PI * (outerR * outerR - innerR * innerR);
-	const count = Math.max(8, Math.min(32, Math.round(area / 16)));
-	const GA = Math.PI * (3 - Math.sqrt(5)); // golden angle → even spread
-	for (let i = 0; i < count; i++) {
-		const t = (i + 0.5) / count;
-		const r = Math.sqrt(innerR * innerR + t * (outerR * outerR - innerR * innerR)); // area-uniform radius
-		const a = i * GA + hash1(i) * 0.6; // golden spiral + a little jitter → natural, not gridded
-		const jr = 1 + (hash1(i + 99) - 0.5) * 4; // radial wobble
-		const x = cx + Math.cos(a) * (r + jr);
-		const z = cz + Math.sin(a) * (r + jr);
-		if (inWater(world.zones, x, z)) continue; // trees don't grow in the lake
-		const kind = FOREST_KINDS[Math.floor(hash1(i + 7) * FOREST_KINDS.length)];
-		const s = 0.8 + hash1(i + 31) * 0.7; // size variety
-		ops.push({ op: 'add', kind, pos: [x, 0, z], scale: [s, s, s], rot: hash1(i + 51) * 360 });
-	}
-	return ops;
+	return math.forestOps(JSON.stringify(world), player.pos[0], player.pos[2], player.yaw) ?? [];
 }
 
 /** Does this typed instruction mean "make/grow a forest"? (handled natively, not by the LLM). */
@@ -211,25 +168,7 @@ export function isForestCommand(cmd: string): boolean {
  * "make lake" grows it. The shader carves the organic blob shoreline; addZone keeps it off objects.
  */
 export function lakeOps(world: World, player: Player): Op[] {
-	const fx = Math.sin(player.yaw);
-	const fz = -Math.cos(player.yaw);
-	const tx = player.pos[0] + fx * 18;
-	const tz = player.pos[2] + fz * 18;
-
-	let best: { id: string; pos: [number, number, number]; size: number } | null = null;
-	let bd = Infinity;
-	for (const z of world.zones ?? []) {
-		if (z.material !== 'water') continue;
-		const d = Math.hypot(z.pos[0] - tx, z.pos[2] - tz);
-		if (d < z.size + 16 && d < bd) ((bd = d), (best = z));
-	}
-	if (best) {
-		return [
-			{ op: 'remove', id: best.id }, // grow in place: drop the old zone, lay a bigger one
-			{ op: 'addZone', material: 'water', shape: 'blob', pos: [best.pos[0], 0, best.pos[2]], size: best.size + 6 }
-		];
-	}
-	return [{ op: 'addZone', material: 'water', shape: 'blob', pos: [tx, 0, tz], size: 13 }];
+	return math.lakeOps(JSON.stringify(world), player.pos[0], player.pos[2], player.yaw) ?? [];
 }
 
 /** Does this typed instruction mean "make/grow a lake"? (handled natively, not by the LLM). */

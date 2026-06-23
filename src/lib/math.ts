@@ -9,6 +9,7 @@
 // null) if the wasm somehow isn't loaded yet (never a duplicated JS formula). Names say WHAT, not the technology.
 
 import type { WorldObject, Path } from './world';
+import type { Op } from './engine';
 
 interface MathGlue {
 	default: (input?: unknown) => Promise<unknown>;
@@ -28,6 +29,8 @@ interface MathGlue {
 	tick_hz: () => number;
 	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
 	settlement_plan: (cx: number, cz: number, size: string, seed: number, id_prefix: string) => string;
+	forest_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
+	lake_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
 }
 
 class WorldMath {
@@ -158,6 +161,16 @@ class WorldMath {
 	 *  `seed`. Returns the world-objects + road paths + footprint radius (or null pre-wasm-load). */
 	settlementPlan(cx: number, cz: number, size: string, seed: number, idPrefix: string): { objects: WorldObject[]; paths: Path[]; radius: number } | null {
 		return this.#call((g) => JSON.parse(g.settlement_plan(cx, cz, size, seed, idPrefix)) as { objects: WorldObject[]; paths: Path[]; radius: number });
+	}
+
+	/** FOREST generator — engine Ops that plant/grow a wood ahead of the player. Reads the world DOM (JSON). */
+	forestOps(worldJson: string, px: number, pz: number, yaw: number): Op[] | null {
+		return this.#call((g) => JSON.parse(g.forest_ops(worldJson, px, pz, yaw)) as Op[]);
+	}
+
+	/** LAKE generator — engine Ops that dig/grow a pond ahead of the player. Reads the world DOM (JSON). */
+	lakeOps(worldJson: string, px: number, pz: number, yaw: number): Op[] | null {
+		return this.#call((g) => JSON.parse(g.lake_ops(worldJson, px, pz, yaw)) as Op[]);
 	}
 
 	/** Closed-form VIGOR drift for a dormant region over `dtSec` away (Rust). Falls back to the unchanged gene. */
