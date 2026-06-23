@@ -177,6 +177,23 @@ pub fn natural_pond_in_cell(cx: i32, cz: i32) -> Option<(f64, f64, f64)> {
     Some((x, z, r))
 }
 
+/// Is (x,z) inside (or right at the lip of) a natural pond? Keeps ambient scatter (trees/bushes) OUT of the water —
+/// they were spawning in ponds. Checks the 3×3 pond cells around the point (a pond jitters within its own cell).
+pub fn in_natural_pond(x: f64, z: f64) -> bool {
+    let cx = (x / POND_CELL).floor() as i32;
+    let cz = (z / POND_CELL).floor() as i32;
+    for ci in (cx - 1)..=(cx + 1) {
+        for cj in (cz - 1)..=(cz + 1) {
+            if let Some((px, pz, r)) = natural_pond_in_cell(ci, cj) {
+                if (x - px).hypot(z - pz) < r + 1.5 {
+                    return true; // inside + a small shoreline margin so trunks aren't standing at the waterline
+                }
+            }
+        }
+    }
+    false
+}
+
 /// All natural ponds whose surface comes within `reach` of (px,pz) — for the RENDERER (draw the nearby water) and
 /// for seeding fish/etc. Flat-friendly tuple list; the caller maps it to whatever it needs.
 pub fn ponds_near(px: f64, pz: f64, reach: f64) -> Vec<(f64, f64, f64)> {
@@ -255,15 +272,13 @@ fn tree_in_cell(ci: i32, cj: i32) -> Option<(f64, f64, f64, f64, f64, f64)> {
     if forest(cell_x, cell_z) + (shash(ci, cj, 1.0) - 0.5) < 0.35 {
         return None; // forest clumps only
     }
+    let tx = cell_x + (shash(ci, cj, 2.0) - 0.5) * SCATTER_STEP;
+    let tz = cell_z + (shash(ci, cj, 3.0) - 0.5) * SCATTER_STEP;
+    if in_natural_pond(tx, tz) {
+        return None; // trees don't grow in the water
+    }
     let scale = 1.3 + shash(ci, cj, 4.0) * 1.6;
-    Some((
-        cell_x + (shash(ci, cj, 2.0) - 0.5) * SCATTER_STEP,
-        cell_z + (shash(ci, cj, 3.0) - 0.5) * SCATTER_STEP,
-        scale,
-        scale + shash(ci, cj, 6.0) * 0.8,
-        shash(ci, cj, 5.0) * 6.283,
-        color_hash(ci, cj),
-    ))
+    Some((tx, tz, scale, scale + shash(ci, cj, 6.0) * 0.8, shash(ci, cj, 5.0) * 6.283, color_hash(ci, cj)))
 }
 
 /// The bush in cell (ci,cj): (x, z, scale, rot, colorHash), or None. Mirrors scatter.ts `bushAt` (offset color hash).
@@ -277,13 +292,12 @@ fn bush_in_cell(ci: i32, cj: i32) -> Option<(f64, f64, f64, f64, f64)> {
     if bhash(cif, cjf, 1.0) > 0.2 {
         return None; // ~1 in 5 cells
     }
-    Some((
-        cell_x + (bhash(cif, cjf, 2.0) - 0.5) * BUSH_STEP,
-        cell_z + (bhash(cif, cjf, 3.0) - 0.5) * BUSH_STEP,
-        0.55 + bhash(cif, cjf, 4.0) * 0.75,
-        bhash(cif, cjf, 5.0) * 6.283,
-        color_hash(cif + 4.0, cjf - 7.0),
-    ))
+    let bx = cell_x + (bhash(cif, cjf, 2.0) - 0.5) * BUSH_STEP;
+    let bz = cell_z + (bhash(cif, cjf, 3.0) - 0.5) * BUSH_STEP;
+    if in_natural_pond(bx, bz) {
+        return None; // bushes don't grow in the water either
+    }
+    Some((bx, bz, 0.55 + bhash(cif, cjf, 4.0) * 0.75, bhash(cif, cjf, 5.0) * 6.283, color_hash(cif + 4.0, cjf - 7.0)))
 }
 
 /// All trees within `reach` of (px,pz) — flat [x, z, scale, scaleY, rot, colorHash] × n. The renderer + collision

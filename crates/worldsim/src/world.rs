@@ -2225,6 +2225,7 @@ impl World {
                 || m.age < m.lifespan * 0.15 // an adult, not a child
                 || self.transient[i].threat.is_some()
                 || !self.has_family(i) // only a pair-bonded household builds — no lone-wanderer houses
+                || (self.natural_water && crate::engine::in_natural_pond(m.agent.x, m.agent.z)) // never build IN a pond
             {
                 continue;
             }

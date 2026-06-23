@@ -167,9 +167,14 @@
 			if (onPath(paths, tr.x, tr.z)) return; // culled on roads → not drawn → don't collide
 			trees.push({ x: tr.x, z: tr.z, r: treeRadius(tr.scale) });
 		});
+		// NATURAL PONDS are solids too — feed the same ones the renderer draws so agents are pushed out to the BANK
+		// (where they drink) instead of wading through the water. Placed lake zones are already in baseObstacles.
+		const pondObs: Obstacle[] = [];
+		const np = math.pondsNear(px, pz, POND_RENDER_R);
+		if (np) for (let k = 0; k < np.length; k += 3) pondObs.push({ x: np[k], z: np[k + 1], r: np[k + 2] });
 		lastTreeFeedX = px;
 		lastTreeFeedZ = pz;
-		sim.setObstacles([...baseObstacles, ...trees]); // the Rust sim resolves these solids (push-out, no tunnelling)
+		sim.setObstacles([...baseObstacles, ...trees, ...pondObs]); // the Rust sim resolves these solids (push-out, no tunnelling)
 	}
 
 	// DRINK SOURCES = natural ponds + any WELLS settlers have dug. Re-run whenever a well is placed (emergent jobs),
