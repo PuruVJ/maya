@@ -13,6 +13,7 @@
 	import { T, useTask } from '@threlte/core';
 	import * as THREE from 'three';
 	import { playerState } from '$lib/playerState.svelte';
+	import { math } from '$lib/math';
 	import { agentManager } from '$lib/agents.svelte';
 	import { GROUND_COLOR } from '$lib/kinds';
 	import { WIND_GUST } from '$lib/wind';
@@ -280,6 +281,9 @@
 	// rebuild the feature/zone uniform arrays only when the world's terrain or zones change
 	let lastTerrain = -1;
 	let lastZones = -1;
+	const GRASS_POND_R = 130; // feed natural ponds within this of the player into the grass carve/reed uniforms
+	let lastPondSyncX = NaN; // re-sync the player-relative natural ponds when you walk this far
+	let lastPondSyncZ = NaN;
 	function syncWorldUniforms() {
 		const feats = world.terrain ?? [];
 		uniforms.uFeatCount.value = Math.min(feats.length, MAXF);
@@ -294,8 +298,17 @@
 			if (n >= MAXZ || !SKIP.has(z.material)) continue;
 			uniforms.uSkip.value[n++].set(z.pos[0], z.pos[2], z.size);
 		}
+		// NATURAL ponds (procedural, player-relative) carve grass + grow a reed bank too — feed the nearby ones into
+		// the remaining slots so grass doesn't grow in the water. Re-synced as the player walks (see useTask below).
+		const np = math.pondsNear(playerState.pos[0], playerState.pos[2], GRASS_POND_R);
+		if (np) for (let k = 0; k < np.length; k += 3) {
+			if (wr < MAXWR) uniforms.uWater.value[wr++].set(np[k], np[k + 1], np[k + 2]);
+			if (n < MAXZ) uniforms.uSkip.value[n++].set(np[k], np[k + 1], np[k + 2]);
+		}
 		uniforms.uSkipCount.value = n;
 		uniforms.uWaterCount.value = wr;
+		lastPondSyncX = playerState.pos[0];
+		lastPondSyncZ = playerState.pos[2];
 		// roads/rivers (paths) carve grass too — feed each segment + its half-width
 		let pc = 0;
 		for (const p of world.paths ?? []) {
@@ -345,7 +358,10 @@
 		uniforms.uWet.value = world.sky === 'fog' ? 1 : 0; // wet grass under the rainy sky (matches Terrain's uWet)
 		const tl = world.terrain?.length ?? 0;
 		const zl = world.zones?.length ?? 0;
-		if (tl !== lastTerrain || zl !== lastZones) {
+		// resync on a zone/terrain change OR once the player has walked far enough that the nearby NATURAL ponds
+		// (player-relative, sparse on a 300 m grid) may have changed — keeps grass carved out of the water you're near.
+		const movedPond = (playerState.pos[0] - lastPondSyncX) ** 2 + (playerState.pos[2] - lastPondSyncZ) ** 2 > 60 * 60;
+		if (tl !== lastTerrain || zl !== lastZones || movedPond) {
 			lastTerrain = tl;
 			lastZones = zl;
 			syncWorldUniforms();
