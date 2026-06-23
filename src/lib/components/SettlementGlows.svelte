@@ -18,10 +18,12 @@
 
 	const BUILDINGS = new Set(['house', 'cabin', 'tower']);
 	const MAX = 1200;
-	// fade in over NEAR…NEAR+FADE so a bloom is OFF where the real building reveals (matched to Scene BUILD_KEEP
-	// ≈340 m now that structures reveal far), then glows out to FAR on the horizon. Tunable.
-	const NEAR = 330;
+	// fade in over NEAR…NEAR+FADE so a bloom reaches FULL strength exactly as the real building culls — Scene unmounts
+	// structures at BUILD_KEEP (√(340²)=340 m), so NEAR+FADE === 340: the glow ramps up while the building is still
+	// shown (a soft crossfade — windows lighting up) and is fully lit the instant the block vanishes, no dark GAP
+	// between "structure gone" and "light shown". Beyond that it glows out to FAR on the horizon. Tunable.
 	const FADE = 90;
+	const NEAR = 340 - FADE; // = Scene BUILD_KEEP (340) − FADE → full glow at the cull distance
 	const FAR = 1700; // far HORIZON reveal (was 560) — distant settlements glow on the curved "wall" (user: show them far)
 	const FAR_FADE = 360; // glows fade out over the last FAR_FADE m → a soft band of city-lights at the horizon, not a hard cut
 
