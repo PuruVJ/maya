@@ -53,7 +53,6 @@ type OutMsg =
 	| { type: 'refuges'; xz: Float64Array }
 	| { type: 'water'; xzr: Float64Array }
 	| { type: 'aridity'; a: number }
-	| { type: 'behaviorMode'; code: number }
 	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 type WorkerMsg = { type: 'ready' } | { type: 'failed'; error: string } | Snap;
 
@@ -87,7 +86,6 @@ class WorldSim {
 	#pendingWater: Float64Array | null = null; // drinkable water sources [x,z,r]×n (thirst); survives load
 	#pendingAridity: number | null = null; // director drought level; survives load, flushed on 'ready'
 	#popScale = 1; // world-area multiplier for prey caps (Scene computes it), rides the tick msg
-	#behaviorCode = 1; // which decision brain: 0 Manual · 1 Emergent (the default, see Sim::new)
 	#lastAgeMeans = new Float32Array(6).fill(-1); // mean age fraction per kind from the latest snapshot (HUD)
 
 	#pendingBirths: Birth[] = [];
@@ -118,18 +116,6 @@ class WorldSim {
 		const out = this.#pendingLoves;
 		if (out.length) this.#pendingLoves = [];
 		return out;
-	}
-
-	/** Switch the agent decision brain at runtime. `emergent` true = needs+primitives+utility scorer (default);
-	 *  false = the hand-coded Manual sim. Survives worker load (re-sent on 'ready'). Returns the new mode. */
-	setEmergent(emergent: boolean): boolean {
-		this.#behaviorCode = emergent ? 1 : 0;
-		if (this.#worker && this.#status === 'ready') this.#worker.postMessage({ type: 'behaviorMode', code: this.#behaviorCode } satisfies OutMsg);
-		return emergent;
-	}
-	/** The decision brain the sim is currently running (true = Emergent, false = Manual) — for the HUD readout. */
-	isEmergent(): boolean {
-		return this.#behaviorCode === 1;
 	}
 
 	/** Mean AGE as a fraction of lifespan (0..1) per kind [rabbit,cat,kangaroo,person,lion,dino]; -1 = none alive. */
@@ -225,7 +211,6 @@ class WorldSim {
 						if (this.#pendingRefuges) w.postMessage({ type: 'refuges', xz: this.#pendingRefuges } satisfies OutMsg);
 						if (this.#pendingWater) w.postMessage({ type: 'water', xzr: this.#pendingWater } satisfies OutMsg);
 						if (this.#pendingAridity != null) w.postMessage({ type: 'aridity', a: this.#pendingAridity } satisfies OutMsg);
-						if (this.#behaviorCode !== 1) w.postMessage({ type: 'behaviorMode', code: this.#behaviorCode } satisfies OutMsg); // re-assert a non-default (Manual) choice
 						console.info('[sim] engine=rust ready (worker)');
 						resolve(true);
 					} else if (d.type === 'failed') {

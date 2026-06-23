@@ -1,9 +1,8 @@
-//! Emergent behaviour — the switchable AI MODE (design doc `docs/emergent-behavior.md`). This is the
-//! `BehaviorMode::Emergent` decision pass: a needs + primitives + utility-scorer brain that REPLACES only the
-//! manual behaviour pass (world.rs `tick_once` section 5). Everything else — perception/targeting, mobbing
-//! tally, sleep, flocking (sections 1–4) and metabolism, breeding, city-building, stepping, collision
-//! (sections 6–9) — is SHARED, untouched, and still tested by the 100+ manual tests. So both brains feed the
-//! identical downstream physics + the same SoA read-back; the render layer never knows which one ran.
+//! Emergent behaviour — the world's ONLY decision brain (design doc `docs/emergent-behavior.md`; the old
+//! hand-coded "Manual" pass was removed). This is the DECIDE pass: a needs + primitives + utility-scorer that
+//! drives world.rs `tick_once` section 5. Everything else — perception/targeting, mobbing tally, sleep, flocking
+//! (sections 1–4) and metabolism, breeding, city-building, stepping, collision (sections 6–9) — is SHARED and
+//! feeds the same SoA read-back; the render layer just reads transforms, never the decision logic.
 //!
 //! The novelty vs Manual is purely in HOW an agent picks its action: Manual runs a fixed priority chain
 //! (mob → bully → threat → rival → hunt-player → prey → carrion → fish → wander); Emergent SCORES each

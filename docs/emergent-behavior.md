@@ -1,11 +1,11 @@
-# Emergent Behavior — a switchable AI mode (design spec)
+# Emergent Behavior — the world's decision brain (design spec)
 
-> Status: **BUILT — Tier 1 + Tier 2 substrate, now the GAME DEFAULT** (2026-06-22). The needs+primitives+utility
-> brain ships in `crates/worldsim/src/emergent/` behind the `BehaviorMode` switch. It is the default for the
-> live game (`Sim::new` → Emergent); `World::new` still defaults to Manual so the 110+ manual unit tests keep
-> pinning the hand-coded brain. Emergent is validated **on par with Manual** by mirrored scenario tests
-> (`scenario_emergent_*`): predation (44 vs 34 kills/100 s), dispersal (148 vs 117 m), population (×1.7 sustain),
-> trophic pyramid (apex stays rare), and a settlement that builds homes. Flip live via the 🧠/⚙️ HUD toggle.
+> Status: **SHIPPED — now the ONLY brain** (2026-06-23). The needs+primitives+utility brain in
+> `crates/worldsim/src/emergent/` is the sole DECIDE pass; the old hand-coded "Manual" chain and the
+> `BehaviorMode` switch/HUD-toggle were **removed**. `World::new` (and the whole test-suite) run emergent
+> directly — all 140+ scenario tests pass against it, including the former Manual-pinned ones (they were robust
+> behavioural assertions the emergent brain satisfies too). The sections below are kept as the design rationale;
+> the dual-mode "switch" framing they describe is historical (there is one brain now).
 > **Still open:** true cross-birth genome inheritance (founders vary today; babies re-roll from their own seed —
 > needs the births buffer to carry the 5 weights) and **Tier 3** (the LLM director authoring primitives/weights).
 >

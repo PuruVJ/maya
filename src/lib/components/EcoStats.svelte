@@ -15,13 +15,6 @@
 	// glanceable read on whether the world is in a drought (water-stressed) or flush with rain.
 	const climate = $derived(nature.aridity >= 1.5 ? { icon: '☀️', label: 'drought', cls: 'text-amber-300/90' } : nature.aridity <= 0.7 ? { icon: '🌧️', label: 'rains', cls: 'text-sky-300/90' } : null);
 
-	// the decision BRAIN driving the agents (docs/emergent-behavior.md): Emergent (needs+primitives+utility, the
-	// default) vs Manual (the hand-coded sim). A dev A/B toggle — flip it live in the same world to compare.
-	let emergent = $state(sim.isEmergent());
-	function toggleBrain() {
-		emergent = sim.setEmergent(!emergent);
-	}
-
 	// the world — so the readout includes DORMANT region aggregates (streaming-offloaded creatures are still alive,
 	// just not individually simulated). Counting near + dormant gives the TRUE total, so streaming never reads as a crash.
 	let { world }: { world: World } = $props();
@@ -194,16 +187,6 @@
 		{#if climate}
 			<span class="ml-1 {climate.cls}" title="The macro-director's climate: a drought (water-stressed) or the rains returning">{climate.icon} {climate.label}</span>
 		{/if}
-		<button
-			type="button"
-			onclick={toggleBrain}
-			class="pointer-events-auto ml-1 rounded-full px-1.5 text-[12px] transition-colors"
-			class:text-fuchsia-300={emergent}
-			class:text-sky-300={!emergent}
-			title={emergent ? 'Brain: EMERGENT (needs + utility) — click to switch to Manual' : 'Brain: MANUAL (hand-coded) — click to switch to Emergent'}
-		>
-			{emergent ? '🧠 emergent' : '⚙️ manual'}
-		</button>
 		<button
 			type="button"
 			onclick={() => (detail = !detail)}

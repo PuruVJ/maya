@@ -40,7 +40,6 @@ interface RustSim {
 	set_water(xzr: Float64Array): void;
 	set_aridity(a: number): void;
 	set_obstacles(flat: Float64Array): void;
-	set_behavior_mode(code: number): void; // 0 = Manual (hand-coded) · 1 = Emergent (needs+utility, the default)
 	age_means(): Float32Array; // mean age fraction (0..1) per kind → the HUD age readout
 	set_player_immune(immune: number): void;
 	set_lineage(i: number, pfamA: number, pfamB: number): void; // newborn's parent lineage ids → incest avoidance
@@ -74,7 +73,6 @@ type InMsg =
 	| { type: 'refuges'; xz: Float64Array }
 	| { type: 'water'; xzr: Float64Array }
 	| { type: 'aridity'; a: number }
-	| { type: 'behaviorMode'; code: number }
 	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 
 let wasm: WasmExports | null = null;
@@ -150,10 +148,6 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 		return;
 	}
 
-	if (d.type === 'behaviorMode') {
-		sim.set_behavior_mode(d.code); // 0 Manual · 1 Emergent — live A/B of the decision brain
-		return;
-	}
 
 	// d.type === 'tick' — apply roster changes + inputs, advance one fixed step, post the snapshot back
 	// Retire old occupants before filling slots recycled in this same roster diff.

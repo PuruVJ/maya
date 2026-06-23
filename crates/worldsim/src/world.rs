@@ -16,30 +16,11 @@ use crate::steering::{Agent, AgentOpts, Behavior};
 
 // The EMERGENT brain (design doc docs/emergent-behavior.md) lives in a sibling directory but is declared HERE as a
 // CHILD of the `world` module, so it can read `World`'s private fields/methods (perception, the force buffers, the
-// nearest_* helpers) without widening their visibility. Manual's code is untouched; this is purely additive.
+// nearest_* helpers) without widening their visibility. It is the ONLY decision brain — the old hand-coded "Manual"
+// chain was removed (the world is fully emergent now); the scenario tests below run against it directly.
 #[path = "emergent/mod.rs"]
 pub mod emergent;
 use emergent::genome::Genome;
-
-/// Which decision brain drives the agents each tick — a switchable MODE (design doc §1). Only the per-tick
-/// *decision* differs; all perception, physics, metabolism, breeding + read-back are shared. `Manual` is the
-/// proven hand-coded brain (the default for `World::new`, so the existing test-suite pins it + stays the safety
-/// net); `Emergent` is the needs+primitives+utility scorer the game now runs by default (see `Sim::new`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BehaviorMode {
-    Manual,
-    Emergent,
-}
-
-impl BehaviorMode {
-    /// Map the wasm/JS toggle code (0 = Manual, 1 = Emergent) to a mode; anything else → Manual (safe default).
-    pub fn from_code(code: u8) -> BehaviorMode {
-        match code {
-            1 => BehaviorMode::Emergent,
-            _ => BehaviorMode::Manual,
-        }
-    }
-}
 
 const NEIGHBOR_RADIUS: f64 = 4.0; // also the grid cell size (flocking only)
 const DENSITY_THRESHOLD: f64 = 0.85; // gentle spread (0.4 was too aggressive → predators jitter-sprint to exhaustion)
@@ -893,7 +874,6 @@ pub struct World {
     // feeds back as a drink source (set_water). Emergent JOBS: an industrious settler with no water in reach digs
     // one → a self-made watering point → life congregates → the settlement grows around water it created.
     events: Vec<f32>,              // TELEMETRY: this step's events, flat [code, kind, x, z, …] → JS posts to /api/telemetry
-    behavior_mode: BehaviorMode,   // which decision brain runs the per-tick DECIDE pass (Manual default / Emergent)
     lineage_counter: u32,          // next unique family id to hand out (incest avoidance) — bumped per spawn
     player_immune: bool,           // true → NO predator hunts/menaces the player + the danger level stays 0 (the
     // game sets this on; the apex-hunts-player tests leave it off). Animals still give your body a berth + skittish
@@ -944,7 +924,6 @@ impl World {
             builds: Vec::new(),
             wells: Vec::new(),
             events: Vec::new(),
-            behavior_mode: BehaviorMode::Emergent, // the world runs the EMERGENT brain by default (user: "world should be emergent"); flip to Manual via set_behavior_mode (the unit tests that pin Manual's exact mechanics do so explicitly)
             lineage_counter: 1, // 0 is reserved for "unknown parent"; real ids start at 1
             player_immune: false, // OFF by default so the apex-hunts-player tests still fire; the game turns it ON (Sim::new)
         }
@@ -956,16 +935,6 @@ impl World {
         self.player_immune = immune;
     }
 
-    /// Switch the decision brain at runtime (the design's mode toggle). Both paths compile + run, so a world can
-    /// be A/B-flipped live; the choice persists on `World` (and is serialised in the world blob JS-side).
-    pub fn set_behavior_mode(&mut self, mode: BehaviorMode) {
-        self.behavior_mode = mode;
-    }
-
-    /// The brain currently driving the world (for the HUD readout / persistence).
-    pub fn behavior_mode(&self) -> BehaviorMode {
-        self.behavior_mode
-    }
 
     /// Mean AGE as a fraction of lifespan (0 newborn … 1 at death) per Kind, for the HUD's age readout — lets the
     /// player see a population's "oldness" + trends on one 0–100 scale across species. -1 for a kind with none alive.
@@ -1576,321 +1545,10 @@ impl World {
         self.kills.clear();
         let hunt2 = HUNT2 * (1.0 + 0.4 * self.night); // keener at night
         let mut danger_now = 0.0_f64; // peak imminence of any player-hunting predator this tick
-        // ── THE BEHAVIOUR SEAM (design doc §2): only the DECIDE pass differs between modes. Sections 1–4
-        // (perception/targeting/mobbing/sleep/flock) above and 6–9 (kills/metabolism/breeding/build/step/collide)
-        // below are SHARED. Emergent scores needs+primitives+utility; Manual runs the hand-coded chain that follows.
-        if let BehaviorMode::Emergent = self.behavior_mode {
-            danger_now = emergent::decide(self, px, pz, pspeed, danger2, hunt2);
-        } else {
-        for i in 0..n {
-            if self.agents[i].dead || self.slept[i] {
-                continue;
-            }
-            if self.agents[i].feeding > 0.0 {
-                self.behave[i] = (1.0, true); // hunkered over a fresh kill → settle + eat, don't fidget/re-target
-                continue;
-            }
-            let ax = self.agents[i].agent.x;
-            let az = self.agents[i].agent.z;
-            let a_max = self.agents[i].agent.max_speed;
-            let radius = self.agents[i].radius;
-            let rank = self.agents[i].rank;
-            let a_hunts = matches!(eco(self.agents[i].kind).hunts, Hunts::Lower);
-            let can_sprint = self.agents[i].stamina > CAN_SPRINT;
-            let threat_pos = self.transient[i].threat.map(|t| (self.agents[t].agent.x, self.agents[t].agent.z));
-            let prey_info = self.transient[i].prey.map(|p| (p, self.agents[p].agent.x, self.agents[p].agent.z, self.agents[p].radius));
-            let mobbed = self.agents[i].mobbed; // a hunter swarmed by ≥MOB_MIN prey (latched, §2c)
-            if !mobbed {
-                self.agents[i].slash_budget = self.agents[i].slash_max; // fresh ferocity for the next fight
-                self.agents[i].slash_cd = 0.0;
-            }
-
-            // HUNT-PLAYER — a LONE (crowd<3) apex (rank≥4) predator, hungry + not otherwise busy, stalks the
-            // player when you're within reach AND closer than its animal prey. Non-lethal (you're uncatchable);
-            // it pressures you + raises the danger level. Keener + farther-reaching at night.
-            let mut hunt_player = false;
-            if !self.player_immune
-                && rank >= 4
-                && self.forces[i].2 < 3 // crowd (flock neighbours) — a lone hunter stalks; a pack just wanders
-                && a_hunts
-                && self.agents[i].hungry
-                && can_sprint
-                && !mobbed
-                && self.agents[i].spooked <= 0.0
-                && threat_pos.is_none()
-            {
-                let dp2 = (px - ax).powi(2) + (pz - az).powi(2);
-                let reach = 15.0 * (1.0 + 0.6 * self.night);
-                let prey_d2 = prey_info.map_or(f64::INFINITY, |(_, prx, prz, _)| (prx - ax).powi(2) + (prz - az).powi(2));
-                if dp2 < reach * reach && dp2 < prey_d2 * 0.81 {
-                    hunt_player = true;
-                    danger_now = danger_now.max(1.0 - dp2.sqrt() / reach); // closer hunter → louder alarm
-                }
-            }
-            self.agents[i].hunting = hunt_player; // transient: surfaced to the view so the stalker's eyes glare
-
-            // TERRITORIAL TIMER — apex predators don't pack: accumulate time crowded by a same-rank rival (the
-            // targeting sets `rival`), cooling off quickly once apart; ≥RIVAL_PATIENCE → they pick a fight.
-            let rival = self.transient[i].rival;
-            let rival_alive = rival.map_or(false, |r| !self.agents[r].dead);
-            if rival_alive {
-                self.agents[i].rival_time = (self.agents[i].rival_time + DT).min(RIVAL_PATIENCE + 0.5);
-            } else {
-                self.agents[i].rival_time = (self.agents[i].rival_time - DT * 1.5).max(0.0);
-            }
-            let fighting_rival = rival_alive && self.agents[i].rival_time >= RIVAL_PATIENCE && !mobbed && threat_pos.is_none();
-            let rival_pos = if fighting_rival {
-                rival.map(|r| (r, self.agents[r].agent.x, self.agents[r].agent.z, self.agents[r].radius))
-            } else {
-                None
-            };
-            let bully_pos = if self.agents[i].spooked > 0.0 {
-                // guard the stored index — it can dangle if the agent buffer is ever compacted (the test harness's
-                // reap; the future unified buffer). In the live game slots are stable so b < len always holds.
-                self.agents[i].bully.filter(|&b| b < self.agents.len() && !self.agents[b].dead).map(|b| (self.agents[b].agent.x, self.agents[b].agent.z))
-            } else {
-                None
-            };
-            // FISH-LURE — an idle cat (nothing better on) is drawn to a lake fish; it pads to the water's edge
-            // and stalks the shallows. It never catches one: the pond is an obstacle the JS resolve-step halts
-            // it at, so this is just the pull. Lowest priority (last in the chain, so any real business wins).
-            let fish_pos = if self.agents[i].kind == Kind::Cat
-                && !mobbed
-                && threat_pos.is_none()
-                && !fighting_rival
-                && self.agents[i].spooked <= 0.0
-            {
-                self.nearest_fish(ax, az, LURE_R)
-            } else {
-                None
-            };
-            // SCAVENGE — a HUNGRY carnivore (nothing else pressing) pads to the nearest FRESH carcass and feeds, so
-            // a death (old age / starvation / another's kill) isn't wasted. The if-chain below ranks it AFTER live
-            // prey (a fresh kill beats leftovers) but ABOVE the idle fish-lure / wander.
-            let carrion_pos = if a_hunts
-                && self.agents[i].hungry
-                && !mobbed
-                && threat_pos.is_none()
-                && !fighting_rival
-                && self.agents[i].spooked <= 0.0
-            {
-                let mut scratch = std::mem::take(&mut self.seek_neighbors);
-                let found = self.nearest_carrion(ax, az, SCAVENGE_R, &mut scratch);
-                self.seek_neighbors = scratch;
-                found
-            } else {
-                None
-            };
-
-            // A HUNGRY hunter with prey in sight COMMITS through the swarm — it charges in for the kill while
-            // tanking the mob's damage, instead of always fleeing. Without this a dense crowd made predators
-            // totally impotent (measured: 6 lions, 60 people, 100 s → 0 kills): they'd flee the mob forever and
-            // never catch anyone. Now a crowd is DANGEROUS to a lion (it bleeds, can be dragged down) but never
-            // immune from it. It still breaks away when sated, badly wounded, or with no prey to grab.
-            let commit_through_mob = mobbed && self.agents[i].hungry && prey_info.is_some() && self.agents[i].health > HURT_AT;
-            // A mobbed hunter ALWAYS bleeds from attackers pressed on it + slashes back — whether it breaks away
-            // or commits — thinning the mob in real time until its ferocity is spent and the survivors drag it down.
-            if mobbed {
-                let attackers = self.transient[i].attackers;
-                if attackers >= MOB_MIN {
-                    self.agents[i].health = (self.agents[i].health - MOB_KILL_DPS * attackers as f64 * DT).max(0.0);
-                    self.agents[i].slash_cd -= DT;
-                    if self.agents[i].slash_cd <= 0.0 && self.agents[i].slash_budget > 0 {
-                        if let Some(victim) = self.nearest_attacker(i) {
-                            self.kills.push(victim); // slashed dead (corpse applied below)
-                            self.agents[i].slash_budget -= 1;
-                            self.agents[i].slash_cd = SLASH_CD;
-                        }
-                    }
-                }
-            }
-            if mobbed && !commit_through_mob {
-                // outnumbered + not committing → BREAK AWAY from the swarm's centre (a fast hunter shakes them off)
-                let mc = self.transient[i].mob_count.max(1) as f64;
-                let cx = self.transient[i].mob_x / mc;
-                let cz = self.transient[i].mob_z / mc;
-                let dx = ax - cx;
-                let dz = az - cz;
-                let d = dx.hypot(dz).max(0.1);
-                self.forces[i].0 += (dx / d) * a_max * FLEE_W;
-                self.forces[i].1 += (dz / d) * a_max * FLEE_W;
-                self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
-            } else if let Some((bx, bz)) = bully_pos {
-                // freshly bullied (lost a rival fight) → keep fleeing that bully while spooked
-                let dx = ax - bx;
-                let dz = az - bz;
-                let d = dx.hypot(dz).max(0.1);
-                self.forces[i].0 += (dx / d) * a_max * FLEE_W;
-                self.forces[i].1 += (dz / d) * a_max * FLEE_W;
-                self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
-            } else if let Some((tx, tz)) = threat_pos {
-                // if the hunter is MOBBED the herd has the numbers → CHARGE it (drive it off); else FLEE it.
-                let threat_mobbed = self.transient[i].threat.map_or(false, |t| self.agents[t].mobbed);
-                // VILLAGE GUARDS: an adult MALE person holds his ground + charges a predator threatening the
-                // community (rally count reached) instead of fleeing — defending the women + children, who flee.
-                let rally = self.transient[i].threat.map_or(0, |t| self.transient[t].mob_count);
-                let person_adult = matches!(self.agents[i].kind, Kind::Person) && self.agents[i].age >= self.agents[i].lifespan * 0.15;
-                let is_guard = person_adult && !is_female(self.agents[i].seed_id) && rally >= GUARD_RALLY;
-                // CORNERED: a predator deep inside a crowd → every adult (women too) turns and fights, no escape.
-                let cornered = person_adult && rally >= SURROUND_RALLY;
-                let (dx, dz, w) = if threat_mobbed || is_guard || cornered {
-                    (tx - ax, tz - az, MOB_W) // converge on the hunter (mob · guard men · or everyone, cornered)
-                } else {
-                    (ax - tx, az - tz, FLEE_W) // flee the hunter (women + children at the edge, prey)
-                };
-                let d = dx.hypot(dz).max(0.1);
-                let (mut ux, mut uz) = (dx / d, dz / d);
-                // FLEE TO SAFETY (C): a fleeing PERSON heads for the nearest house — home (and the guard men who
-                // cluster there) is safety. Blend the home-ward unit into her escape vector, but only if it doesn't
-                // turn her back toward the predator (then plain flight wins — never run INTO the hunter).
-                if w == FLEE_W && matches!(self.agents[i].kind, Kind::Person) {
-                    if let Some((hx, hz)) = self.nearest_refuge(ax, az, REFUGE_R) {
-                        let (rx, rz) = (hx - ax, hz - az);
-                        let rd = rx.hypot(rz).max(0.1);
-                        let (rux, ruz) = (rx / rd, rz / rd);
-                        if rux * ux + ruz * uz > -0.2 {
-                            // home isn't behind the predator → curve toward it
-                            let (bx, bz) = (ux + rux * REFUGE_PULL, uz + ruz * REFUGE_PULL);
-                            let bl = bx.hypot(bz).max(0.1);
-                            ux = bx / bl;
-                            uz = bz / bl;
-                        }
-                    }
-                }
-                self.forces[i].0 += ux * a_max * w;
-                self.forces[i].1 += uz * a_max * w;
-                self.behave[i] = (if can_sprint { FLEE_BOOST } else { 1.0 }, true);
-            } else if let Some((r, rx, rz, rr)) = rival_pos {
-                // TERRITORIAL FIGHT — charge the rival; on contact both bleed, so one breaks off wounded (then
-                // flees its bully via the spooked branch) or is dragged down. Apex hunters spread out, not pack.
-                let dx = rx - ax;
-                let dz = rz - az;
-                let d = dx.hypot(dz).max(0.1);
-                self.forces[i].0 += (dx / d) * a_max * CHASE_W;
-                self.forces[i].1 += (dz / d) * a_max * CHASE_W;
-                self.behave[i] = (if can_sprint { CHASE_BOOST } else { 1.0 }, true);
-                if d < radius + rr + CONTACT_PAD {
-                    self.agents[i].health = (self.agents[i].health - RIVAL_DPS * DT).max(0.0);
-                    if self.agents[i].health < HURT_AT {
-                        self.agents[i].spooked = self.agents[i].spooked.max(2.5);
-                        self.agents[i].bully = Some(r); // wounded → break off + flee
-                    }
-                }
-            } else if hunt_player {
-                // charge the player; sprint when close. Never catches — just bumps + pressures you.
-                let dx = px - ax;
-                let dz = pz - az;
-                let d = dx.hypot(dz).max(0.1);
-                let close = d * d < hunt2;
-                self.forces[i].0 += (dx / d) * a_max * CHASE_W;
-                self.forces[i].1 += (dz / d) * a_max * CHASE_W;
-                self.behave[i] = (if close || can_sprint { CHASE_BOOST } else { 1.0 }, true); // close → final lunge even if spent
-            } else if let Some((p, prx, prz, pr)) = prey_info {
-                // stalk toward prey; sprint once close; CATCH on contact
-                let dx = prx - ax;
-                let dz = prz - az;
-                let d = dx.hypot(dz).max(0.1);
-                let close = d * d < hunt2;
-                self.forces[i].0 += (dx / d) * a_max * CHASE_W;
-                self.forces[i].1 += (dz / d) * a_max * CHASE_W;
-                self.behave[i] = (if close || can_sprint { CHASE_BOOST } else { 1.0 }, true); // close → final lunge even if spent
-                if close && d < radius + pr + CONTACT_PAD {
-                    let finishing = self.agents[p].health <= STRIKE_DMG; // this strike kills it (else just a deep wound)
-                    self.agents[p].health = (self.agents[p].health - STRIKE_DMG).max(0.0);
-                    self.agents[p].spooked = self.agents[p].spooked.max(2.0); // wounded → it bolts (the struggle)
-                    if finishing {
-                        self.kills.push(p); // finishing blow — turned to a corpse below
-                        self.events.extend_from_slice(&[EV_KILL, self.agents[p].kind as usize as f32, self.agents[p].agent.x as f32, self.agents[p].agent.z as f32]);
-                        self.agents[i].meals += 1;
-                        self.agents[i].fed_meat = MEAT_SATED; // a meat meal → people can breed for a while (no-op for others)
-                        self.agents[i].feeding = FEED_SECS; // hunker down + eat (no fidget) for a few seconds
-                        self.agents[i].chase_ox = f64::NAN; // the chase ended in a kill
-                        self.agents[i].energy = (self.agents[i].energy + EAT_ENERGY).min(1.0); // the meal fills its belly
-                        // EAT — a kill refuels energy; once gorged (full_after kills) it drops into a food-coma
-                        if eco(self.agents[i].kind).full_after.map_or(false, |fa| self.agents[i].meals >= fa) {
-                            self.agents[i].stamina = self.agents[i].stamina.min(0.15);
-                            self.agents[i].asleep = true; // (takes effect next tick — this tick it's still awake)
-                            self.agents[i].sleep_timer = sleep_secs(self.agents[i].kind);
-                        } else {
-                            self.agents[i].stamina = (self.agents[i].stamina + EAT_GAIN).min(1.0);
-                        }
-                    }
-                }
-            } else if let Some((cx, cz, ci)) = carrion_pos {
-                // pad to the carcass at a WALK; FEED on contact — refuel fullness + drain the carcass's meat (so it
-                // feeds a few scavengers, then it's picked clean). No food-coma: scraps are a top-up, not a gorge.
-                let dx = cx - ax;
-                let dz = cz - az;
-                let d = dx.hypot(dz).max(0.1);
-                let contact = radius + self.agents[ci].radius + CONTACT_PAD + 0.3;
-                if d < contact {
-                    // AT the carcass → SETTLE and feed: no approach force (the overshoot-then-re-aim orbit made a
-                    // scavenger fidget ON the corpse), pursuing flag held so the idle FSM can't frolic on the body.
-                    self.behave[i] = (1.0, true);
-                    self.agents[i].energy = (self.agents[i].energy + SCAVENGE_GAIN * DT).min(1.0);
-                    self.agents[ci].carrion = (self.agents[ci].carrion - SCAVENGE_DRAIN * DT).max(0.0);
-                } else {
-                    self.forces[i].0 += (dx / d) * a_max * CHASE_W * 0.7;
-                    self.forces[i].1 += (dz / d) * a_max * CHASE_W * 0.7;
-                    self.behave[i] = (1.0, true);
-                }
-            } else if let Some((fx, fz)) = fish_pos {
-                // pad toward the fish at a curious WALK (no sprint) — the pond obstacle halts the cat at the bank
-                let dx = fx - ax;
-                let dz = fz - az;
-                let d = dx.hypot(dz).max(0.1);
-                self.forces[i].0 += (dx / d) * a_max * CHASE_W * 0.6;
-                self.forces[i].1 += (dz / d) * a_max * CHASE_W * 0.6;
-                self.behave[i] = (1.0, true);
-            }
-
-            // PLAYER REACTION (skipped for a predator deliberately coming for you, and for the player's own pet,
-            // which trusts you) — animals scatter from the player (skittishness falls with rank: rabbits bolt, an
-            // apex dino ignores you), scaring from FARTHER when you RUN; and every animal gives the player a berth.
-            if !hunt_player && !self.agents[i].companion {
-                let skittish = ((5.0 - rank as f64) / 4.0).max(0.0); // rabbit 1 → 1.0 … dinosaur 5 → 0
-                if skittish > 0.0 {
-                    let dx = ax - px;
-                    let dz = az - pz;
-                    let d = dx.hypot(dz);
-                    let scare_r = (2.5 + (pspeed - 3.0).max(0.0) * 0.5) * (0.6 + 0.7 * skittish) * (1.0 + 0.4 * self.night);
-                    if d < scare_r && d > 0.01 {
-                        let w = skittish * (1.0 - d / scare_r); // stronger the closer / more skittish
-                        self.forces[i].0 += (dx / d) * a_max * FLEE_W * w;
-                        self.forces[i].1 += (dz / d) * a_max * FLEE_W * w;
-                        self.behave[i].1 = true; // pursuing (keep moving)
-                        if can_sprint && w > 0.25 {
-                            self.behave[i].0 = self.behave[i].0.max(FLEE_BOOST); // a real bolt when truly spooked
-                        }
-                    }
-                }
-                let adx = ax - px;
-                let adz = az - pz;
-                let ad = adx.hypot(adz);
-                let avoid_r = radius + 1.5; // player body (~0.5) + a margin to round the corner early
-                if ad < avoid_r && ad > 0.01 {
-                    let w = 1.0 - ad / avoid_r;
-                    self.forces[i].0 += (adx / ad) * a_max * AVOID_W * w;
-                    self.forces[i].1 += (adz / ad) * a_max * AVOID_W * w;
-                }
-            }
-
-            // a wound makes it LIMP — caps every gait (flee / charge / walk) so a healthy hunter runs it down
-            if self.agents[i].health < HURT_AT {
-                self.behave[i].0 *= HURT_SPEED;
-            }
-            // FRAILTY — in the last stretch of life it slows (senescence), so predators naturally cull the old &
-            // weak and the generations turn over. Ramps from full speed at FRAIL_ONSET of lifespan to FRAIL_MIN at
-            // death. The player's pet is exempt (it never dies of age either). Multiplies the gait cap (boost).
-            if !self.agents[i].companion {
-                let life = self.agents[i].age / self.agents[i].lifespan.max(1.0);
-                if life > FRAIL_ONSET {
-                    let t = ((life - FRAIL_ONSET) / (1.0 - FRAIL_ONSET)).min(1.0);
-                    self.behave[i].0 *= 1.0 - t * (1.0 - FRAIL_MIN);
-                }
-            }
-        }
-        } // end Manual behaviour arm of the seam
+        // 5. DECIDE — the EMERGENT brain (needs + primitives + utility, design doc) scores each agent's move.
+        // Sections 1–4 (perception/targeting/mobbing/sleep/flock) above and 6–9 (kills/metabolism/breeding/build/
+        // step/collide) below are shared; this is the only behaviour pass.
+        danger_now = emergent::decide(self, px, pz, pspeed, danger2, hunt2);
 
         // ease the danger level toward this tick's peak → the UI vignette swells/fades smoothly
         self.danger += (danger_now - self.danger) * (6.0 * DT).min(1.0);
@@ -2907,13 +2565,10 @@ mod tests {
     use super::*;
     use crate::steering::AgentOpts;
 
-    /// A MANUAL-brain world for the unit + reference-scenario tests below. The world default is now Emergent
-    /// (the game runs that); these tests pin the hand-coded brain they were written to protect, so Manual stays
-    /// the verified safety net. (Emergent tests use `emergent_world()`, which flips it back on.)
+    /// A fresh world for the unit + scenario tests. The only decision brain is Emergent now (Manual was removed),
+    /// so this is just `World::new()`; kept as a named helper so the many call sites read clearly + stay stable.
     fn mw() -> World {
-        let mut w = World::new();
-        w.set_behavior_mode(BehaviorMode::Manual);
-        w
+        World::new()
     }
 
     fn animal(x: f64, z: f64, seed: i32) -> Agent {

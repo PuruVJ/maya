@@ -248,7 +248,7 @@ mod wasm_api {
     // WASM memory — NEVER a JS↔WASM call per agent. Pointers are stable between spawns; re-fetch them after any
     // `spawn` (the buffers may grow/reallocate) or if `memory.buffer` detaches on growth.
     use crate::steering::Agent;
-    use crate::world::{opts_for, BehaviorMode, Snapshot, World};
+    use crate::world::{opts_for, Snapshot, World};
 
     #[wasm_bindgen]
     pub struct Sim {
@@ -261,7 +261,6 @@ mod wasm_api {
         #[wasm_bindgen(constructor)]
         pub fn new() -> Sim {
             let mut world = World::new();
-            world.set_behavior_mode(BehaviorMode::Emergent); // the GAME runs the emergent brain by default
             world.set_player_immune(true); // the player is not prey (user: "give me immunity, no animals hunt me")
             world.set_natural_water(true); // Rust owns the world's water: an even procedural pond field everywhere
             Sim { world, snap: Snapshot::default() }
@@ -272,23 +271,9 @@ mod wasm_api {
             self.world.set_player_immune(immune != 0);
         }
 
-        /// Switch the decision brain (0 = Manual, the proven hand-coded sim · 1 = Emergent, needs+utility). The
-        /// chosen mode persists on the world; JS surfaces a dev toggle + serialises it in the world blob.
-        pub fn set_behavior_mode(&mut self, code: u8) {
-            self.world.set_behavior_mode(BehaviorMode::from_code(code));
-        }
-
         /// Mean age (fraction of lifespan, 0..1) per Kind [rabbit,cat,kangaroo,person,lion,dino]; -1 = none alive.
         pub fn age_means(&self) -> Vec<f32> {
             self.world.age_means()
-        }
-
-        /// The brain currently running (0 = Manual · 1 = Emergent) — for the HUD readout / persistence.
-        pub fn behavior_mode(&self) -> u8 {
-            match self.world.behavior_mode() {
-                BehaviorMode::Emergent => 1,
-                BehaviorMode::Manual => 0,
-            }
         }
 
         /// Spawn an agent from a kind-code (0 rabbit·1 cat·2 kangaroo·3 person·4 lion·5 dinosaur) + a stable
