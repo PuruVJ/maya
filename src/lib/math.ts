@@ -19,6 +19,8 @@ interface MathGlue {
 	bushes_near: (px: number, pz: number, reach: number) => Float64Array;
 	migrate_weights: () => Float64Array;
 	gestation_secs: () => Float64Array;
+	water_seed: (id: string) => number;
+	water_edge_factor: (seed: number, ang: number) => number;
 	eco_render: () => Float64Array;
 	gene_bounds: () => Float64Array;
 	tick_hz: () => number;
@@ -112,6 +114,16 @@ class WorldMath {
 	/** Per-kind GESTATION seconds by Kind order [rabbit,cat,kangaroo,person,lion,dinosaur] (prefer `personGestation`). */
 	gestationSecs(): Float64Array | null {
 		return this.#call((g) => g.gestation_secs());
+	}
+
+	/** Pond per-id SEED — Rust's source of truth for the shoreline (the render keeps a native copy; a test pins it). */
+	waterSeed(id: string): number | null {
+		return this.#call((g) => g.water_seed(id));
+	}
+
+	/** Pond SHORELINE radius factor at `ang` for `seed` — Rust's source of truth (render copy pinned by a test). */
+	waterEdgeFactor(seed: number, ang: number): number | null {
+		return this.#call((g) => g.water_edge_factor(seed, ang));
 	}
 
 	/** The render slice of the eco table — [rank, speed_lo, speed_hi] per kind, by Kind order (eco.rs is the truth). */

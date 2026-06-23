@@ -1,7 +1,9 @@
-// Pond geometry shared between the WATER SHADER (Water.svelte) and gameplay (Player wade/sink). The pond
-// isn't a circle — its shoreline is carved by angular noise (an organic blob), so collision must use the
-// SAME edge function as the shader or you'd slow on dry-looking land (pinches) and stand in visible water
-// without slowing (bulges). Keep `waterEdgeFactor` identical to the GLSL in Water.svelte.
+// Pond geometry shared between the WATER mesh (Water.svelte) and gameplay (Player wade/sink). The pond isn't a
+// circle — its shoreline is carved by angular noise (an organic blob), so collision must use the SAME edge function
+// as what's drawn, or you'd slow on dry-looking land (pinches) and stand in visible water without slowing (bulges).
+// `waterEdgeFactor`/`waterSeed` are a NATIVE copy of Rust's source of truth (engine.rs water_edge_factor/water_seed)
+// — kept native because the player's wade check runs every frame and before the wasm has loaded. The two copies are
+// pinned together by src/lib/water.test.ts (a parity test vs the wasm), so a typo in either can't silently desync.
 import type { Zone, TerrainFeature } from './world';
 import { heightAt } from './terrain';
 
@@ -22,14 +24,14 @@ export function waterSurfaceY(zone: Zone, terrain: TerrainFeature[] | undefined)
 	return Math.min(rim, centre + 0.4) + 0.08; // cover up to ~0.4 m of rim rise, no more (don't flood the player)
 }
 
-/** Per-pond seed from its id (matches Water.svelte's uSeed) → each shoreline wobbles differently. */
+/** Per-pond seed from its id (Rust's water_seed; Water.svelte builds its rim from it) → each shoreline wobbles differently. */
 export function waterSeed(id: string): number {
 	let s = 0;
 	for (let i = 0; i < id.length; i++) s = (s * 31 + id.charCodeAt(i)) % 1000;
 	return s * 0.013;
 }
 
-/** Shoreline radius as a fraction of `size` at this angle (≈0.80–1.03). Mirrors the GLSL `e`. */
+/** Shoreline radius as a fraction of `size` at this angle (≈0.80–1.03). Native copy of Rust's water_edge_factor (parity-tested). */
 export function waterEdgeFactor(seed: number, ang: number): number {
 	return (
 		0.8 +

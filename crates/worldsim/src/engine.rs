@@ -110,7 +110,9 @@ pub struct WZone {
     pub size: f64,
 }
 
-fn water_seed(id: &str) -> f64 {
+// `pub` so lib.rs can re-export these to JS as the SINGLE source of truth for the pond shoreline — the render
+// (water.ts) keeps a native copy for the player's per-frame wade check, and a vitest parity test pins it to these.
+pub fn water_seed(id: &str) -> f64 {
     let mut s: i64 = 0;
     for b in id.bytes() {
         s = (s * 31 + b as i64) % 1000; // ASCII ids → byte == JS charCodeAt
@@ -118,7 +120,7 @@ fn water_seed(id: &str) -> f64 {
     s as f64 * 0.013
 }
 
-fn water_edge_factor(seed: f64, ang: f64) -> f64 {
+pub fn water_edge_factor(seed: f64, ang: f64) -> f64 {
     0.8 + 0.11 * (ang * 3.0 + seed).sin() + 0.07 * (ang * 5.0 - seed * 1.7).sin() + 0.045 * (ang * 7.0 + seed * 2.3).sin()
 }
 

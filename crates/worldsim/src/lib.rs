@@ -137,6 +137,19 @@ mod wasm_api {
         [Rabbit, Cat, Kangaroo, Person, Lion, Dinosaur].map(crate::world::migrate_weight).to_vec()
     }
 
+    /// Pond per-id SEED (matches the render's waterSeed) — exposed so a parity test pins the JS copy to Rust.
+    #[wasm_bindgen]
+    pub fn water_seed(id: &str) -> f64 {
+        crate::engine::water_seed(id)
+    }
+
+    /// Pond SHORELINE radius factor at `ang` for a `seed` — the organic-blob edge. The render keeps a native copy
+    /// (player wade check runs per frame, pre-wasm-load), so this exists to PARITY-TEST that copy against Rust.
+    #[wasm_bindgen]
+    pub fn water_edge_factor(seed: f64, ang: f64) -> f64 {
+        crate::engine::water_edge_factor(seed, ang)
+    }
+
     /// Per-kind GESTATION seconds, by Kind order [rabbit, cat, kangaroo, person, lion, dinosaur] — the sim's source
     /// of truth (world::gestation), so the renderer paces the pregnancy belly-grow to the REAL delivery time instead
     /// of a duplicated guess (the belly hit full term well before/after delivery when JS hard-coded its own number).
