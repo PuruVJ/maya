@@ -5,7 +5,7 @@
 // seconds → same rate). Pure bookkeeping; no reactivity needed (EcoStats already polls on a 1 Hz timer).
 const WINDOW = 90; // sim-seconds of history kept — long enough to smooth a bursty, clumpy birth process
 
-class Vitals {
+export class Vitals {
 	#log: { t: number; kind: string }[] = [];
 
 	/** Record one birth (called from Scene on each drained birth). `now` = current sim seconds. */

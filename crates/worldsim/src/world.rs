@@ -2594,6 +2594,22 @@ mod tests {
     }
 
     #[test]
+    fn fertile_window_is_positive_and_tracks_lifespan() {
+        use Kind::*;
+        for k in [Rabbit, Cat, Kangaroo, Person, Lion, Dinosaur] {
+            let fw = fertile_window(k);
+            let ls = base_lifespan(k);
+            assert!(fw.is_finite() && fw > 0.0, "{:?} fertile window must be positive, got {}", k, fw);
+            assert!(fw < ls, "{:?} fertile window {} must be under its lifespan {}", k, fw, ls);
+            // matches the definition (maturity at JUVENILE_FRAC of life → menopause/old-age, representative female seed 0)
+            assert!((fw - (fertile_until(k, 0, ls) - JUVENILE_FRAC * ls)).abs() < 1e-9, "{:?} window != fertile_until - maturity", k);
+        }
+        // longer-lived species have longer fertile spans (the HUD's per-species TFR scales by this — guards the order)
+        assert!(fertile_window(Rabbit) < fertile_window(Kangaroo));
+        assert!(fertile_window(Kangaroo) < fertile_window(Person));
+    }
+
+    #[test]
     fn despawned_slot_is_recycled_without_growing_world() {
         let mut w = mw();
         let old = w.spawn(animal(1.0, 2.0, 1), Kind::Rabbit, 0.35, 1);
