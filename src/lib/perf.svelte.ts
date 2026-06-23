@@ -21,6 +21,9 @@ class PerfScaler {
 	#ema = 1 / 60; // smoothed frame time (s)
 	#minDt = 1 / 120; // fastest frame seen (≈ the vsync interval → the display refresh), slowly decays up
 	#cooldown = 60; // frames until the next adjustment (warm-up before touching anything)
+	#probeWait = 150; // frames between upward probes; BACKS OFF (×2, capped) each time a probe breaks budget + reverts
+	#probedUp = false; // last change was an upward probe → if the very next adjustment is a drop, that probe FAILED
+	#PROBE_MAX = 3600; // ~60 s ceiling on the probe interval — at the converged edge, probing (and its flash) goes rare
 
 	constructor() {
 		const full = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1.5;
@@ -54,11 +57,20 @@ class PerfScaler {
 		const refresh = 1 / this.#minDt; // achievable ceiling (Hz)
 		const budget = 1 / Math.min(this.target, refresh); // seconds/frame we're aiming to stay under
 		if (this.#ema > budget * 1.15 && this.dpr > this.#min) {
-			this.dpr = Math.max(this.#min, this.dpr - 0.09); // over budget → shed pixels fast
+			this.dpr = Math.max(this.#min, this.dpr - 0.09); // over budget → shed pixels fast (stays responsive)
 			this.#cooldown = 24;
+			// if this drop is undoing a probe we JUST made, that probe broke the budget → wait (much) longer before the
+			// next one. At the converged edge this pushes the probe interval out toward a minute, so the framebuffer
+			// realloc — and its 1-frame grey flash — stops happening every few seconds while you stand still.
+			if (this.#probedUp) this.#probeWait = Math.min(this.#probeWait * 2, this.#PROBE_MAX);
+			this.#probedUp = false;
 		} else if (this.#ema < budget * 1.05 && this.dpr < this.#max) {
 			this.dpr = Math.min(this.#max, this.dpr + 0.06); // meeting it with room → probe crisper (revert-safe)
-			this.#cooldown = 150; // …but rarely, so steady-state oscillation is at most one small step / few sec
+			this.#cooldown = this.#probeWait; // backed-off interval → fewer probes → fewer resize flashes at steady state
+			this.#probedUp = true;
+		} else if (this.#probedUp) {
+			this.#probeWait = 150; // a probe HELD (no revert) → conditions are good; reset so real headroom is found fast
+			this.#probedUp = false;
 		}
 	}
 }
