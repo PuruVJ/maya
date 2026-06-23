@@ -15,6 +15,7 @@
  */
 import { asset } from '$app/paths';
 import { agentManager, type ManagedAgent } from './agents.svelte';
+import { eventLog } from './eventLog.svelte';
 import { fishRegistry } from './fish.svelte';
 import { playerState } from './playerState.svelte';
 
@@ -273,10 +274,11 @@ class WorldSim {
 			for (let k = 0; k < nbd; k++) this.#pendingBuilds.push({ x: s!.builds[k * 2], z: s!.builds[k * 2 + 1] });
 			const nw = s!.wells.length / 2;
 			for (let k = 0; k < nw; k++) this.#pendingWells.push({ x: s!.wells[k * 2], z: s!.wells[k * 2 + 1] });
-			// drain CONCEIVE events (a pair just bonded) → Scene floats a heart at the spot. Events are [code,kind,x,z]×n.
+			// drain events ([code,kind,x,z]×n): feed the human-readable LOG, and float a heart on a CONCEIVE.
 			const ne = s!.events.length / 4;
 			for (let k = 0; k < ne; k++) {
 				const o = k * 4;
+				eventLog.add(s!.events[o], s!.events[o + 1]);
 				if (s!.events[o] === 6 /* EV_CONCEIVE */) this.#pendingLoves.push({ x: s!.events[o + 2], z: s!.events[o + 3] });
 			}
 		}

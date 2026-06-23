@@ -12,6 +12,7 @@
 	import BuildBar from '$lib/components/BuildBar.svelte';
 	import FpsPanel from '$lib/components/FpsPanel.svelte';
 	import EcoStats from '$lib/components/EcoStats.svelte';
+	import EventLog from '$lib/components/EventLog.svelte';
 	import { nature } from '$lib/nature.svelte';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
@@ -369,6 +370,7 @@
 <!-- live FPS / frame-time meter, top-centre -->
 <FpsPanel />
 <EcoStats {world} />
+<EventLog />
 
 <!-- MOTHER NATURE wildcard announcement — a dramatic banner when she sends in a pack/herd/boom -->
 {#if nature.banner}

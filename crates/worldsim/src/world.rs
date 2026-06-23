@@ -1556,6 +1556,8 @@ impl World {
             self.agents[p].agent.vx = 0.0;
             self.agents[p].agent.vz = 0.0;
             self.agents[p].carrion = CARRION_MEAT; // a fresh carcass — scavengeable until it rots / is picked clean
+            // emit a KILL event (the prey's kind + spot) → the JS event log ("a lion caught a rabbit")
+            self.events.extend_from_slice(&[EV_KILL, self.agents[p].kind as usize as f32, self.agents[p].agent.x as f32, self.agents[p].agent.z as f32]);
         }
 
         // 7. metabolism (AWAKE agents) — sprinting + a carnivore's basal drain ebb stamina; prey/people
