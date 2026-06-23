@@ -86,6 +86,7 @@
 	let armR = $state<THREE.Group>();
 	let pregnant = $state(false); // mirrored from the sim each frame → toggles the belly (females only)
 	let guardian = $state(false); // her mate (expectant father) → carries a machete, mirrored from the sim
+	let drinking = $state(false); // mirrored from the sim → folds forward to lap at a water edge (watering hole)
 	let bellyGrow = $state(0); // 0→1 ramp over the gestation window → the belly visibly grows as she progresses
 	const PREG_GROW_SECS = 60; // seconds for the belly to swell from first-trimester to full (≈ a person's gestation)
 	const bellyScale = $derived(0.5 + 0.5 * bellyGrow); // small bump → full term
@@ -93,6 +94,7 @@
 	const lean = new Spring(0, 9, 0.7);
 	const headYaw = new Spring(0, 6, 0.85);
 	const flop = new Spring(0, 8, 0.55); // collapse flat when killed
+	const drinkBend = new Spring(0, 7, 0.7); // fold forward at the waist to the water's edge (eases in/out)
 
 	const idlePhase = (H % 628) / 100; // 0–6.28, per-person → standing-idle sway/breath is desynchronised across a crowd
 	let phase = 0;
@@ -161,6 +163,7 @@
 
 		if (pregnant !== managed.pregnant) pregnant = managed.pregnant; // surfaced to the belly mesh (write only on flip)
 		if (guardian !== managed.guardian) guardian = managed.guardian; // surfaced to the machete mesh
+		if (drinking !== managed.drinking) drinking = managed.drinking; // surfaced to the drink crouch
 		// belly grows over gestation (render-side ramp; resets the moment she's no longer carrying — i.e. delivered)
 		if (pregnant) bellyGrow = Math.min(1, bellyGrow + dt / PREG_GROW_SECS);
 		else if (bellyGrow !== 0) bellyGrow = 0;
@@ -198,6 +201,12 @@
 		core.position.y = bob + idle * Math.sin(t * 1.4 + idlePhase) * 0.015;
 		core.rotation.z = lean.step(dt, -agent.turnRate * 0.1 + Math.sin(phase) * 0.03 * gait + idle * Math.sin(t * 0.6 + idlePhase) * 0.05);
 
+		// DRINKING → fold forward at the waist + crouch down to lap at the water's edge (people drink too). Blends in
+		// and out via the spring, so they ease down to the bank and rise back up; the head dip is layered on below.
+		const drinkX = drinkBend.step(dt, drinking ? 0.95 : 0);
+		core.rotation.x = drinkX; // (only asleep — which returns early — otherwise touches core.rotation.x)
+		core.position.y -= drinkX * 0.18; // sink toward the surface as they fold
+
 		// idle head glances when not walking — but if you're nearby and they're not walking, they turn to WATCH
 		// you (a town that notices you pass). Same gaze as the animals; the head still leads an actual walk.
 		let lookT = agent.behavior === 'lookAround' ? Math.sin(agent.progress * Math.PI * 2) * 0.6 : 0;
@@ -209,6 +218,8 @@
 			lookT = Math.max(-1.2, Math.min(1.2, Math.atan2(Math.sin(rel), Math.cos(rel)))); // clamp to neck range
 		}
 		if (head) head.rotation.y = headYaw.step(dt, lookT);
+		// head dips further than the torso to reach the surface, with a gentle lap while actually drinking
+		if (head) head.rotation.x = drinkX * 0.7 + (drinking ? Math.sin(t * 6) * 0.06 : 0);
 	});
 </script>
 
