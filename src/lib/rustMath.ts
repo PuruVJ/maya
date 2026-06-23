@@ -12,6 +12,7 @@ interface MathGlue {
 	ff_targets: (rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number, dt: number) => Uint32Array;
 	ff_gene: (gene: number, rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, dt: number) => number;
 	band_spread: (count: number, ax: number, az: number, r: number) => Float64Array;
+	ponds_near: (px: number, pz: number, reach: number) => Float64Array;
 	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
 }
 
@@ -63,6 +64,12 @@ export function rustFfTargets(rabbit: number, cat: number, kangaroo: number, per
  *  deterministic op→placement compute lives in the crate, not the JS engine). Null if the wasm isn't loaded yet. */
 export function rustBandSpread(count: number, ax: number, az: number, r: number): Float64Array | null {
 	return glue ? glue.band_spread(count, ax, az, r) : null;
+}
+
+/** NATURAL PONDS near (px,pz) within `reach` — Rust owns the world's water (an even, infinite, deterministic pond
+ *  field); the renderer calls this once per area to draw them. Flat [x, z, radius, …], or null if wasm isn't loaded. */
+export function rustPondsNear(px: number, pz: number, reach: number): Float64Array | null {
+	return glue ? glue.ponds_near(px, pz, reach) : null;
 }
 
 /** THE ENGINE — apply `ops` to a world (both JSON strings) for a player at (px,pz,yaw). Returns the new world +

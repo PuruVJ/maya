@@ -142,6 +142,80 @@ pub fn in_water(zones: &[WZone], x: f64, z: f64) -> bool {
     false
 }
 
+// ───────────────────────── NATURAL PONDS (Rust is the source of truth) ─────────────────────────
+// A deterministic, INFINITE field of natural ponds laid on a jittered grid — so water is spread EVENLY across the
+// whole world (animals settle by their local pond instead of all dragging to one shore). Rust OWNS this (the sim
+// reads it for thirst; the renderer reads `ponds_near` to draw them). Static → the frontend reads it once per area,
+// so it crosses the wasm boundary almost for free. Pure functions of position → identical every run, no state.
+const POND_CELL: f64 = 300.0; // metres between natural ponds (grid spacing)
+const POND_PROB: f64 = 0.82; // fraction of cells that actually hold a pond (natural gaps, not a rigid lattice)
+const POND_R_MIN: f64 = 11.0;
+const POND_R_MAX: f64 = 20.0;
+
+/// deterministic [0,1) hash of a grid cell + salt (no state, no transcendentals → identical across worker/main).
+fn pond_hash(cx: i32, cz: i32, salt: i32) -> f64 {
+    let mut h = (cx as i64)
+        .wrapping_mul(73_856_093)
+        ^ (cz as i64).wrapping_mul(19_349_663)
+        ^ (salt as i64).wrapping_mul(83_492_791);
+    h = h.wrapping_mul(-7_046_029_254_386_353_131); // 0x9E3779B97F4A7C15 as i64 (golden-ratio mix)
+    ((h >> 33) & 0xFF_FFFF) as f64 / 16_777_216.0
+}
+
+/// The natural pond in grid cell (cx,cz), or None if this cell has none. Returns (centre_x, centre_z, radius).
+pub fn natural_pond_in_cell(cx: i32, cz: i32) -> Option<(f64, f64, f64)> {
+    if pond_hash(cx, cz, 0) >= POND_PROB {
+        return None;
+    }
+    let jx = (pond_hash(cx, cz, 1) - 0.5) * POND_CELL * 0.6; // jitter off the lattice so it reads natural
+    let jz = (pond_hash(cx, cz, 2) - 0.5) * POND_CELL * 0.6;
+    let x = cx as f64 * POND_CELL + jx;
+    let z = cz as f64 * POND_CELL + jz;
+    let r = POND_R_MIN + pond_hash(cx, cz, 3) * (POND_R_MAX - POND_R_MIN);
+    Some((x, z, r))
+}
+
+/// All natural ponds whose surface comes within `reach` of (px,pz) — for the RENDERER (draw the nearby water) and
+/// for seeding fish/etc. Flat-friendly tuple list; the caller maps it to whatever it needs.
+pub fn ponds_near(px: f64, pz: f64, reach: f64) -> Vec<(f64, f64, f64)> {
+    let c0 = ((px - reach) / POND_CELL).floor() as i32;
+    let c1 = ((px + reach) / POND_CELL).floor() as i32;
+    let d0 = ((pz - reach) / POND_CELL).floor() as i32;
+    let d1 = ((pz + reach) / POND_CELL).floor() as i32;
+    let mut out = Vec::new();
+    for cx in c0..=c1 {
+        for cz in d0..=d1 {
+            if let Some((x, z, r)) = natural_pond_in_cell(cx, cz) {
+                if (x - px).hypot(z - pz) <= reach + r {
+                    out.push((x, z, r));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The nearest natural pond to (x,z) — scanning the 3×3 cells around it (a pond can't be more than ~1 cell away).
+/// Returns (centre_x, centre_z, radius). For the sim's thirst (it then computes the edge distance + drink reach).
+pub fn nearest_natural_pond(x: f64, z: f64) -> Option<(f64, f64, f64)> {
+    let cx = (x / POND_CELL).floor() as i32;
+    let cz = (z / POND_CELL).floor() as i32;
+    let mut best: Option<(f64, f64, f64)> = None;
+    let mut best_d = f64::INFINITY;
+    for dcx in -1..=1 {
+        for dcz in -1..=1 {
+            if let Some((wx, wz, r)) = natural_pond_in_cell(cx + dcx, cz + dcz) {
+                let d = (wx - x).hypot(wz - z) - r; // distance to the pond's edge
+                if d < best_d {
+                    best_d = d;
+                    best = Some((wx, wz, r));
+                }
+            }
+        }
+    }
+    best
+}
+
 // ───────────────────────── op application (mirror of src/lib/engine.ts applyOps) ─────────────────────────
 use jzon::{array, object, JsonValue};
 

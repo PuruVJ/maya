@@ -38,6 +38,7 @@
 	import { treeAt, treeRadius, onPath, SCATTER_STEP } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { drainBirths, drainBuilds, drainWells, rustTick } from '$lib/rustSim';
+	import { rustPondsNear } from '$lib/rustMath';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { setRustObstacles, setRustPopScale, setRustRefuges, setRustWater, setRustAridity } from '$lib/rustSim';
 	import { worldAreaScale } from '$lib/world';
@@ -107,6 +108,28 @@
 	let baseObstacles: Obstacle[] = [];
 	const TREE_FEED_R = 140; // feed the ambient-forest trunks within this radius of the player as obstacles
 	const TREE_REFEED2 = 24 * 24; // re-feed once the player has moved this far (the 140m radius gives margin)
+	// NATURAL PONDS — Rust owns the world's water (an even, infinite, deterministic pond field). We just DRAW the
+	// ones near the player, refreshed as they roam. The sim reads the same field internally for thirst, so animals
+	// settle by their local pond instead of all dragging to one shore.
+	const POND_RENDER_R = 360; // metres around the player we draw natural ponds (covers the ~live region)
+	let naturalPonds = $state<{ id: string; material: string; shape: string; pos: [number, number, number]; size: number }[]>([]);
+	let lastPondX = NaN;
+	let lastPondZ = NaN;
+	function refreshPonds(px: number, pz: number): void {
+		const flat = rustPondsNear(px, pz, POND_RENDER_R);
+		if (!flat) return; // wasm not ready yet
+		const out: typeof naturalPonds = [];
+		for (let k = 0; k < flat.length; k += 3) {
+			const x = flat[k]; // flat is [x, z, r] per pond
+			const z = flat[k + 1];
+			const r = flat[k + 2];
+			out.push({ id: `np${Math.round(x)}_${Math.round(z)}`, material: 'water', shape: 'blob', pos: [x, 0, z], size: r });
+		}
+		naturalPonds = out;
+		lastPondX = px;
+		lastPondZ = pz;
+	}
+
 	let lastTreeFeedX = NaN;
 	let lastTreeFeedZ = NaN;
 
@@ -611,6 +634,11 @@
 		if (Number.isNaN(lastTreeFeedX) || (px - lastTreeFeedX) ** 2 + (pz - lastTreeFeedZ) ** 2 > TREE_REFEED2) {
 			feedObstacles(px, pz);
 		}
+		// redraw the nearby NATURAL ponds (Rust's pond field) as the player roams — coarse threshold, ~⅓ the render
+		// radius of margin so ponds are always in place before you reach them.
+		if (Number.isNaN(lastPondX) || (px - lastPondX) ** 2 + (pz - lastPondZ) ** 2 > 120 * 120) {
+			refreshPonds(px, pz);
+		}
 		// time-slice the MOUNT of the near set (a few/frame) so striding into a dense block doesn't hitch
 		const n = visible.length;
 		const backlog = n - revealed;
@@ -673,6 +701,11 @@
 	{:else}
 		<Zone zone={z} />
 	{/if}
+{/each}
+<!-- NATURAL ponds — Rust-owned water field, drawn near the player (the source of truth lives in the sim) -->
+{#each naturalPonds as z (z.id)}
+	<Water zone={z} sky={world.sky} terrain={world.terrain} />
+	<LakeFish zone={z} terrain={world.terrain} />
 {/each}
 
 {#each world.paths ?? [] as p (p.id)}

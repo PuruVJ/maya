@@ -697,7 +697,7 @@ impl Snapshot {
                 }
             }
             // bit7 → DRINKING: thirsty + standing at a water edge → the view dips its head to lap (watering hole)
-            if !world.water_src.is_empty() && !m.companion && m.hydration < 0.95 {
+            if (world.natural_water || !world.water_src.is_empty()) && !m.companion && m.hydration < 0.95 {
                 if let Some((_, _, d_edge)) = world.nearest_water(m.agent.x, m.agent.z) {
                     if d_edge <= 0.0 {
                         f |= 128;
@@ -872,6 +872,9 @@ pub struct World {
     water_src: Vec<(f64, f64, f64)>, // DRINKABLE water sources (x, z, radius) fed from the JS pond view → every animal
     // must periodically reach a water EDGE to refill hydration or it dies of thirst. An INDEPENDENT survival pressure
     // (distinct from food/predation) → the substrate for water-bound niches/jobs (docs: emergence economy rung).
+    natural_water: bool, // on → the sim ALSO reads Rust's procedural natural-pond field (engine::nearest_natural_pond)
+    // as drink sources, so water is spread evenly across the whole world. Off by default (tests pin water exactly);
+    // the game enables it via Sim::new. This is the "Rust owns the world's water" source of truth.
     refuges: Vec<(f64, f64)>,      // house/settlement centres (fed from JS) → a threatened woman/child FLEES toward the nearest (home = safety)
     refuge_pop: Vec<u32>,          // per-refuge occupancy (people within SETTLE_R), recomputed each tick → drives sparse-settlement MIGRATION
     obstacles: Vec<Obstacle>,      // solid props/buildings/ponds → agents are pushed out (no tunnelling)
@@ -924,6 +927,7 @@ impl World {
             slept: Vec::new(),
             fish: Vec::new(),
             water_src: Vec::new(),
+            natural_water: false,
             refuges: Vec::new(),
             refuge_pop: Vec::new(),
             obstacles: Vec::new(),
@@ -1108,19 +1112,35 @@ impl World {
         self.water_src.extend(xzr.chunks_exact(3).map(|c| (c[0], c[1], c[2])));
     }
 
+    /// Turn on Rust's procedural natural-pond field as drink sources (the game does this; tests leave it off so
+    /// they control water exactly). With it on, water is spread evenly across the whole infinite world.
+    pub fn set_natural_water(&mut self, on: bool) {
+        self.natural_water = on;
+    }
+
     /// Nearest water EDGE to (x,z): returns (edge_dx, edge_dz, dist_to_edge) of the closest pond, or None if the
     /// world has no water. The vector points from the animal toward the bank; dist_to_edge ≤ 0 means it's already
     /// within drinking reach. Linear scan — ponds are few.
     fn nearest_water(&self, x: f64, z: f64) -> Option<(f64, f64, f64)> {
         let mut best: Option<(f64, f64, f64)> = None;
         let mut best_d = f64::INFINITY;
-        for &(wx, wz, r) in &self.water_src {
+        let mut consider = |wx: f64, wz: f64, r: f64| {
             let (dx, dz) = (wx - x, wz - z);
-            let d_center = dx.hypot(dz);
-            let d_edge = d_center - (r + DRINK_REACH); // ≤0 → within reach of the bank
+            let d_edge = dx.hypot(dz) - (r + DRINK_REACH); // ≤0 → within reach of the bank
             if d_edge < best_d {
                 best_d = d_edge;
                 best = Some((dx, dz, d_edge));
+            }
+        };
+        // JS-fed water: wells settlers dug + player-dug lakes (the dynamic delta)
+        for &(wx, wz, r) in &self.water_src {
+            consider(wx, wz, r);
+        }
+        // RUST-OWNED natural ponds (the procedural field) — the source of truth for the world's water. Off by
+        // default so the scenario tests control water exactly; the game (Sim::new) turns it on.
+        if self.natural_water {
+            if let Some((wx, wz, r)) = crate::engine::nearest_natural_pond(x, z) {
+                consider(wx, wz, r);
             }
         }
         best
@@ -1999,7 +2019,7 @@ impl World {
             }
             // THIRST — hydration ebbs; top up at a water EDGE. No water defined (a bare test world) → thirst is
             // inert, so every pre-water scenario stays valid. The companion never thirsts (magically tended).
-            let has_water = !self.water_src.is_empty();
+            let has_water = self.natural_water || !self.water_src.is_empty();
             if self.agents[i].companion {
                 self.agents[i].hydration = 1.0;
             } else if has_water {

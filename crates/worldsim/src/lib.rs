@@ -95,6 +95,13 @@ mod wasm_api {
         crate::world::band_spread(count as usize, ax, az, r)
     }
 
+    /// NATURAL PONDS near (px,pz) within `reach` — Rust owns the world's water (a deterministic, even, infinite
+    /// pond field); the renderer calls this once per area to DRAW them. Flat [x, z, radius, …]. Cheap + stateless.
+    #[wasm_bindgen]
+    pub fn ponds_near(px: f64, pz: f64, reach: f64) -> Vec<f64> {
+        crate::engine::ponds_near(px, pz, reach).into_iter().flat_map(|(x, z, r)| [x, z, r]).collect()
+    }
+
     /// THE ENGINE (no JS engine): apply `ops_json` to `world_json` for a player at (px,pz,yaw). Returns a JSON
     /// string `{"world": <new world>, "conflicts": [...]}`. The world DOM round-trips unknown fields untouched.
     /// Faithful port of the old engine.ts applyOps — see crate::engine (parity-tested against the JS originals).
@@ -134,6 +141,7 @@ mod wasm_api {
             let mut world = World::new();
             world.set_behavior_mode(BehaviorMode::Emergent); // the GAME runs the emergent brain by default
             world.set_player_immune(true); // the player is not prey (user: "give me immunity, no animals hunt me")
+            world.set_natural_water(true); // Rust owns the world's water: an even procedural pond field everywhere
             Sim { world, snap: Snapshot::default() }
         }
 
