@@ -71,12 +71,8 @@ const GIVEUP_ENERGY: f64 = 0.06; // ...or it abandons the chase early when this 
 // mobbing (chunk e) — when prey heavily outnumber one hunter, the herd turns and swarms it
 const MOB_MIN: u32 = 4; // this many prey fleeing ONE hunter flips them flee → swarm
 const MOB_RELEASE: u32 = 3; // hysteresis: a mobbed hunter stays mobbed until the swarm thins BELOW this
-const SURROUND_RALLY: u32 = 10; // a hunter THIS swarmed is deep inside a crowd → no escape, so EVERY adult (women
-// too, not just the guard men) turns and fights a proper brawl; only children still flee. (mob_count, people ×2.)
-const GUARD_RALLY: u32 = 4; // mob_count (people double-weighted) on a hunter at which adult MALE people stop fleeing
-// and CHARGE it instead — village guards rallying to defend the threatened (a female + child). 4 ⇒ ≥1 OTHER person
-// is also under threat, so a lone man doesn't suicide; women + children always flee to safety.
-const MOB_W: f64 = 2.2; // converge force as the mob charges the predator
+// (the Manual rally/charge tuning — SURROUND_RALLY/GUARD_RALLY/MOB_W — was removed with the Manual brain; the
+// emergent brain drives mob-charge via its own utility primitives.)
 const MOB_KILL_DPS: f64 = 0.03; // health/s a hunter loses PER attacker pressed against it (size+health combo)
 const SLASH_CD: f64 = 1.2; // seconds between a cornered hunter's retaliatory slashes (each kills one attacker)
 const HURT_AT: f64 = 0.45; // below this health an animal is injured → limps (HURT_SPEED) and flees
@@ -1544,11 +1540,10 @@ impl World {
         self.behave.resize(n, (1.0, false));
         self.kills.clear();
         let hunt2 = HUNT2 * (1.0 + 0.4 * self.night); // keener at night
-        let mut danger_now = 0.0_f64; // peak imminence of any player-hunting predator this tick
-        // 5. DECIDE — the EMERGENT brain (needs + primitives + utility, design doc) scores each agent's move.
-        // Sections 1–4 (perception/targeting/mobbing/sleep/flock) above and 6–9 (kills/metabolism/breeding/build/
-        // step/collide) below are shared; this is the only behaviour pass.
-        danger_now = emergent::decide(self, px, pz, pspeed, danger2, hunt2);
+        // 5. DECIDE — the EMERGENT brain (needs + primitives + utility, design doc) scores each agent's move and
+        // returns the peak imminence of any player-hunting predator this tick. Sections 1–4 (perception/targeting/
+        // mobbing/sleep/flock) above and 6–9 (kills/metabolism/breeding/build/step/collide) below are shared.
+        let danger_now = emergent::decide(self, px, pz, pspeed, danger2, hunt2);
 
         // ease the danger level toward this tick's peak → the UI vignette swells/fades smoothly
         self.danger += (danger_now - self.danger) * (6.0 * DT).min(1.0);
