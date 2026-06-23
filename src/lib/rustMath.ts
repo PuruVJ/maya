@@ -3,8 +3,10 @@
 // in the sim worker. This is a SECOND, tiny wasm instance (no Sim state, no per-tick loop) — the same .wasm bytes
 // the worker already fetched (browser-cached), just a second WebAssembly instance for stateless calls.
 //
-// Lazy: call `initRustMath()` once at startup and await it before any cap/load math. The pure getters return the
-// Rust result, or a permissive sentinel if it somehow isn't loaded (never a duplicated JS formula).
+// ONE stateful class (RustMath) owns the wasm handle + the load lifecycle, with a SINGLE `#call` guard so each
+// method is a one-liner — no `if (glue)` repeated per function. `await rustMath.init()` once at startup. Methods
+// return the Rust result, or a permissive sentinel (usually null) if the wasm somehow isn't loaded yet (never a
+// duplicated JS formula). The legacy `rust*` free functions below are thin delegators kept for existing callers.
 
 interface MathGlue {
 	default: (input?: unknown) => Promise<unknown>;
@@ -20,93 +22,114 @@ interface MathGlue {
 	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
 }
 
-let glue: MathGlue | null = null;
-let loading: Promise<void> | null = null;
+class RustMath {
+	#glue: MathGlue | null = null;
+	#loading: Promise<void> | null = null;
 
-/** Load the main-thread wasm math instance (idempotent). Resolves once the pure functions are callable. */
-export function initRustMath(): Promise<void> {
-	if (glue) return Promise.resolve();
-	if (!loading) {
-		loading = (async () => {
-			if (typeof location !== 'undefined' && typeof location.origin === 'string') {
-				// BROWSER: same glue the worker loads; @vite-ignore so Vite doesn't bundle the static wasm pkg
-				const m = (await import(/* @vite-ignore */ `${location.origin}/worldsim/worldsim.js`)) as unknown as MathGlue;
-				await m.default();
-				glue = m;
-			} else {
-				// NODE (vitest — the engine runs in Rust now, so even node tests use the wasm): load the bytes from
-				// disk; the web-target `default(init)` accepts a BufferSource.
-				const fs = await import('node:fs');
-				const jsUrl = new URL('../../static/worldsim/worldsim.js', import.meta.url);
-				const wasmUrl = new URL('../../static/worldsim/worldsim_bg.wasm', import.meta.url);
-				const m = (await import(/* @vite-ignore */ jsUrl.href)) as unknown as MathGlue;
-				await m.default({ module_or_path: fs.readFileSync(wasmUrl) } as unknown as undefined);
-				glue = m;
-			}
-		})().catch((e) => {
-			console.error('[rustMath] failed to load wasm math', e);
-		});
+	/** True once the wasm math instance is callable. */
+	get ready(): boolean {
+		return this.#glue !== null;
 	}
-	return loading;
+
+	/** Load the main-thread wasm math instance (idempotent). Resolves once the pure functions are callable. */
+	init(): Promise<void> {
+		if (this.#glue) return Promise.resolve();
+		if (!this.#loading) {
+			this.#loading = (async () => {
+				if (typeof location !== 'undefined' && typeof location.origin === 'string') {
+					// BROWSER: same glue the worker loads; @vite-ignore so Vite doesn't bundle the static wasm pkg
+					const m = (await import(/* @vite-ignore */ `${location.origin}/worldsim/worldsim.js`)) as unknown as MathGlue;
+					await m.default();
+					this.#glue = m;
+				} else {
+					// NODE (vitest — the engine runs in Rust now, so even node tests use the wasm): load the bytes from
+					// disk; the web-target `default(init)` accepts a BufferSource.
+					const fs = await import('node:fs');
+					const jsUrl = new URL('../../static/worldsim/worldsim.js', import.meta.url);
+					const wasmUrl = new URL('../../static/worldsim/worldsim_bg.wasm', import.meta.url);
+					const m = (await import(/* @vite-ignore */ jsUrl.href)) as unknown as MathGlue;
+					await m.default({ module_or_path: fs.readFileSync(wasmUrl) } as unknown as undefined);
+					this.#glue = m;
+				}
+			})().catch((e) => {
+				console.error('[rustMath] failed to load wasm math', e);
+			});
+		}
+		return this.#loading;
+	}
+
+	/** THE single guard — run `fn` against the loaded wasm, or return `fallback` (default null) if it isn't ready. */
+	#call<T>(fn: (g: MathGlue) => T, fallback: T | null = null): T | null {
+		return this.#glue ? fn(this.#glue) : fallback;
+	}
+
+	/** Carrying caps [rabbit, cat, kangaroo, person, lion, dinosaur] from the Rust `cap_for` — single source of truth. */
+	popCaps(rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number): Uint32Array | null {
+		return this.#call((g) => g.pop_caps(rabbit, cat, kangaroo, person, lion, dino, scale));
+	}
+
+	/** Aggregate fast-forward target headcounts after `dt` seconds away — closed-form logistic relaxation, from Rust. */
+	ffTargets(rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number, dt: number): Uint32Array | null {
+		return this.#call((g) => g.ff_targets(rabbit, cat, kangaroo, person, lion, dino, scale, dt));
+	}
+
+	/** Spawn-spread band layout [x,z,…] for a big creature batch — the golden-spiral placement math, from Rust. */
+	bandSpread(count: number, ax: number, az: number, r: number): Float64Array | null {
+		return this.#call((g) => g.band_spread(count, ax, az, r));
+	}
+
+	/** NATURAL PONDS near (px,pz) within `reach` — Rust owns the world's water. Flat [x, z, radius, …]. */
+	pondsNear(px: number, pz: number, reach: number): Float64Array | null {
+		return this.#call((g) => g.ponds_near(px, pz, reach));
+	}
+
+	/** Ambient TREES near (px,pz) — Rust owns the forest field. Flat [x,z,scale,scaleY,rot,colorHash]×n. */
+	treesNear(px: number, pz: number, reach: number): Float64Array | null {
+		return this.#call((g) => g.trees_near(px, pz, reach));
+	}
+
+	/** Ambient BUSHES near (px,pz). Flat [x,z,scale,rot,colorHash]×n. */
+	bushesNear(px: number, pz: number, reach: number): Float64Array | null {
+		return this.#call((g) => g.bushes_near(px, pz, reach));
+	}
+
+	/** Per-kind MIGRATION weight from the sim, by Kind order [rabbit,cat,kangaroo,person,lion,dinosaur]. */
+	migrateWeights(): Float64Array | null {
+		return this.#call((g) => g.migrate_weights());
+	}
+
+	/** The render slice of the eco table — [rank, speed_lo, speed_hi] per kind, by Kind order (eco.rs is the truth). */
+	ecoRender(): Float64Array | null {
+		return this.#call((g) => g.eco_render());
+	}
+
+	/** THE ENGINE — apply `ops` to a world (both JSON strings) for a player at (px,pz,yaw). New world + conflicts. */
+	applyOps(worldJson: string, opsJson: string, px: number, pz: number, yaw: number): { world: unknown; conflicts: unknown[] } | null {
+		return this.#call((g) => JSON.parse(g.apply_ops(worldJson, opsJson, px, pz, yaw)) as { world: unknown; conflicts: unknown[] });
+	}
+
+	/** Closed-form VIGOR drift for a dormant region over `dtSec` away (Rust). Falls back to the unchanged gene. */
+	ffGene(gene: number, c: Record<string, number>, dtSec: number): number {
+		return this.#call((g) => g.ff_gene(gene, c.rabbit ?? 0, c.cat ?? 0, c.kangaroo ?? 0, c.person ?? 0, c.lion ?? 0, c.dinosaur ?? 0, dtSec), gene) as number;
+	}
 }
 
-export const rustMathReady = (): boolean => glue !== null;
+/** The single main-thread wasm-math instance. Prefer `rustMath.method()`; the `rust*` exports below delegate to it. */
+export const rustMath = new RustMath();
 
-/** Carrying caps [rabbit, cat, kangaroo, person, lion, dinosaur] from the Rust `cap_for` — the single source of
- *  truth. Returns null if the wasm isn't loaded yet (caller decides a safe default). */
-export function rustPopCaps(rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number): Uint32Array | null {
-	return glue ? glue.pop_caps(rabbit, cat, kangaroo, person, lion, dino, scale) : null;
-}
-
-/** Aggregate fast-forward target headcounts [rabbit, cat, kangaroo, person, lion, dino] after `dt` seconds away —
- *  the closed-form logistic relaxation toward carrying capacity, from Rust. Null if the wasm isn't loaded yet. */
-export function rustFfTargets(rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number, dt: number): Uint32Array | null {
-	return glue ? glue.ff_targets(rabbit, cat, kangaroo, person, lion, dino, scale, dt) : null;
-}
-
-/** Spawn-spread band layout [x,z,…] for a big creature batch — the golden-spiral placement math, from Rust (the
- *  deterministic op→placement compute lives in the crate, not the JS engine). Null if the wasm isn't loaded yet. */
-export function rustBandSpread(count: number, ax: number, az: number, r: number): Float64Array | null {
-	return glue ? glue.band_spread(count, ax, az, r) : null;
-}
-
-/** NATURAL PONDS near (px,pz) within `reach` — Rust owns the world's water (an even, infinite, deterministic pond
- *  field); the renderer calls this once per area to draw them. Flat [x, z, radius, …], or null if wasm isn't loaded. */
-export function rustPondsNear(px: number, pz: number, reach: number): Float64Array | null {
-	return glue ? glue.ponds_near(px, pz, reach) : null;
-}
-
-/** Ambient TREES near (px,pz) — Rust owns the forest field. Flat [x,z,scale,scaleY,rot,colorHash]×n, or null. */
-export function rustTreesNear(px: number, pz: number, reach: number): Float64Array | null {
-	return glue ? glue.trees_near(px, pz, reach) : null;
-}
-
-/** Ambient BUSHES near (px,pz). Flat [x,z,scale,rot,colorHash]×n, or null. */
-export function rustBushesNear(px: number, pz: number, reach: number): Float64Array | null {
-	return glue ? glue.bushes_near(px, pz, reach) : null;
-}
-
-/** Per-kind MIGRATION weight from the sim (the source of truth), by Kind order [rabbit,cat,kangaroo,person,lion,
- *  dinosaur]. The HUD reads this instead of hard-coding a duplicate. Null until the wasm math instance is loaded. */
-export function rustMigrateWeights(): Float64Array | null {
-	return glue ? glue.migrate_weights() : null;
-}
-
-/** The render slice of the eco table — [rank, speed_lo, speed_hi] per kind, by Kind order. Rust is the source of
- *  truth (eco.rs); the renderer reads gait-speed + rank from here. Null until the wasm math instance is loaded. */
-export function rustEcoRender(): Float64Array | null {
-	return glue ? glue.eco_render() : null;
-}
-
-/** THE ENGINE — apply `ops` to a world (both JSON strings) for a player at (px,pz,yaw). Returns the new world +
- *  any placement conflicts, or null if the wasm isn't loaded yet. The op→world compute lives in Rust (crate::engine);
- *  JS only (de)serializes + renders. */
-export function rustApplyOps(worldJson: string, opsJson: string, px: number, pz: number, yaw: number): { world: unknown; conflicts: unknown[] } | null {
-	return glue ? (JSON.parse(glue.apply_ops(worldJson, opsJson, px, pz, yaw)) as { world: unknown; conflicts: unknown[] }) : null;
-}
-
-/** Closed-form VIGOR drift for a dormant region over `dtSec` away (Rust) — evolves the offloaded population's mean
- *  gene under predation pressure so dormant regions evolve via the clock, not freeze. Falls back to unchanged gene. */
-export function rustFfGene(gene: number, c: Record<string, number>, dtSec: number): number {
-	return glue ? glue.ff_gene(gene, c.rabbit ?? 0, c.cat ?? 0, c.kangaroo ?? 0, c.person ?? 0, c.lion ?? 0, c.dinosaur ?? 0, dtSec) : gene;
-}
+// ── legacy free-function API (thin delegators to the singleton — kept so existing callers don't churn) ──────────
+export const initRustMath = (): Promise<void> => rustMath.init();
+export const rustMathReady = (): boolean => rustMath.ready;
+export const rustPopCaps = (rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number): Uint32Array | null =>
+	rustMath.popCaps(rabbit, cat, kangaroo, person, lion, dino, scale);
+export const rustFfTargets = (rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number, dt: number): Uint32Array | null =>
+	rustMath.ffTargets(rabbit, cat, kangaroo, person, lion, dino, scale, dt);
+export const rustBandSpread = (count: number, ax: number, az: number, r: number): Float64Array | null => rustMath.bandSpread(count, ax, az, r);
+export const rustPondsNear = (px: number, pz: number, reach: number): Float64Array | null => rustMath.pondsNear(px, pz, reach);
+export const rustTreesNear = (px: number, pz: number, reach: number): Float64Array | null => rustMath.treesNear(px, pz, reach);
+export const rustBushesNear = (px: number, pz: number, reach: number): Float64Array | null => rustMath.bushesNear(px, pz, reach);
+export const rustMigrateWeights = (): Float64Array | null => rustMath.migrateWeights();
+export const rustEcoRender = (): Float64Array | null => rustMath.ecoRender();
+export const rustApplyOps = (worldJson: string, opsJson: string, px: number, pz: number, yaw: number): { world: unknown; conflicts: unknown[] } | null =>
+	rustMath.applyOps(worldJson, opsJson, px, pz, yaw);
+export const rustFfGene = (gene: number, c: Record<string, number>, dtSec: number): number => rustMath.ffGene(gene, c, dtSec);
