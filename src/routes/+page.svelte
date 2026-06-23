@@ -19,6 +19,16 @@
 	import { math } from '$lib/math';
 	import { heightAt } from '$lib/terrain';
 	import { encodeWorld, decodeWorld } from '$lib/share';
+	import { clock } from '$lib/clock';
+
+	// TIME-LAPSE: scale the sim clock so users can watch the world evolve faster. The sim stays frame-rate
+	// independent (fixed 30 Hz ticks) — rate just maps more ticks onto each real second. 1× is normal speed.
+	const SPEEDS = [1, 1.5, 2] as const;
+	let speed = $state(1);
+	function setSpeed(r: number): void {
+		speed = r;
+		clock.setRate(r);
+	}
 	import { loadWorld, saveWorld } from '$lib/worldStore';
 	import { SKY_BG } from '$lib/kinds';
 	import { enableWorldCurvature } from '$lib/curveWorld';
@@ -321,6 +331,17 @@
 		>
 			AI: {llm.model?.label ?? '…'} ⌄
 		</button>
+		<!-- TIME-LAPSE speed: watch the simulation evolve faster (the sim stays frame-rate-independent) -->
+		<div class="pointer-events-auto flex items-center overflow-hidden rounded-full bg-black/35 backdrop-blur [text-shadow:none]" title="Simulation speed">
+			{#each SPEEDS as s (s)}
+				<button
+					class="px-2.5 py-1 text-xs font-semibold transition {speed === s ? 'bg-amber-500/80 text-black' : 'text-white/85 hover:bg-black/40'}"
+					onclick={() => setSpeed(s)}
+				>
+					{s}×
+				</button>
+			{/each}
+		</div>
 	</div>
 </div>
 
