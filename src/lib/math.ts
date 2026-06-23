@@ -23,6 +23,11 @@ interface MathGlue {
 	migrate_weights: () => Float64Array;
 	gestation_secs: () => Float64Array;
 	kind_rh: (kind: string) => Float64Array;
+	terrain_height: (x: number, z: number) => number;
+	rng_hash: (position: number, seed: number) => number;
+	rng_hash_keys: (seed: number, keys: Int32Array) => number;
+	rng_rand: (seed: number, keys: Int32Array) => number;
+	rng_seed_from: (s: string) => number;
 	water_seed: (id: string) => number;
 	water_edge_factor: (seed: number, ang: number) => number;
 	eco_render: () => Float64Array;
@@ -133,6 +138,26 @@ class WorldMath {
 	 *  copy to this. Unknown kind → the fallback [1, 2]. */
 	kindRh(kind: string): Float64Array | null {
 		return this.#call((g) => g.kind_rh(kind));
+	}
+
+	/** AMBIENT terrain height at (x,z), no features — Rust's copy of the render's heightAt (a test pins the JS one). */
+	terrainHeight(x: number, z: number): number | null {
+		return this.#call((g) => g.terrain_height(x, z));
+	}
+
+	/** Rust's addressed-RNG primitives (rng.rs) — the JS rng.ts keeps a native copy for render-side seeding; a test
+	 *  pins it to these. `hash`/`hashKeys` return a uint32; `rand` a float in [0,1); `seedFrom` a string→uint32. */
+	rngHash(position: number, seed: number): number | null {
+		return this.#call((g) => g.rng_hash(position, seed));
+	}
+	rngHashKeys(seed: number, keys: number[]): number | null {
+		return this.#call((g) => g.rng_hash_keys(seed, Int32Array.from(keys)));
+	}
+	rngRand(seed: number, keys: number[]): number | null {
+		return this.#call((g) => g.rng_rand(seed, Int32Array.from(keys)));
+	}
+	rngSeedFrom(s: string): number | null {
+		return this.#call((g) => g.rng_seed_from(s));
 	}
 
 	/** Pond SHORELINE radius factor at `ang` for `seed` — Rust's source of truth (render copy pinned by a test). */

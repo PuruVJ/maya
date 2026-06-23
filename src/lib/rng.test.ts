@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { hash, rand, hashKeys, seedFrom, Rng } from './rng';
+import { math } from './math';
 
 describe('hash-based RNG', () => {
 	it('is a pure function — same coordinate, same value, every time', () => {
@@ -115,5 +116,50 @@ describe('Rng helpers', () => {
 		// ...and matches the addressable form (counter folded as the last key)
 		expect(a[0]).toBe(r.rand(10, 20, 0));
 		expect(a[1]).toBe(r.rand(10, 20, 1));
+	});
+});
+
+// PARITY GUARD vs Rust (rng.rs): the sim (Rust) and render-side seeding (JS) MUST draw identical values for the
+// same (seed, keys), or the simulated world desyncs from the rendered/seeded one. The crate's own tests pin only
+// the Rust side to frozen constants — a tweak to rng.ts above would pass them silently. This pins the live JS copy
+// to the live Rust one over a sweep (Rust exposes rng_hash/rng_hash_keys/rng_rand/rng_seed_from via wasm).
+describe('addressed RNG parity (JS rng.ts ↔ Rust rng.rs)', () => {
+	beforeAll(async () => {
+		await math.init();
+	});
+
+	it('loaded the wasm (otherwise the guard is vacuous)', () => {
+		expect(math.ready).toBe(true);
+	});
+
+	it('hash(position, seed) matches Rust (incl. negatives + 32-bit extremes)', () => {
+		const vals = [0, 1, -1, 7, 42, -97, 1000, 65535, 123456, -2147483648, 2147483647];
+		for (const p of vals) for (const s of [0, 1, 42, -5, 999999]) {
+			expect(hash(p, s), `hash(${p}, ${s})`).toBe(math.rngHash(p, s));
+		}
+	});
+
+	it('hashKeys(seed, keys) matches Rust — arity-sensitive ([] ≠ [0] ≠ [0,0])', () => {
+		const keysets: number[][] = [[], [0], [0, 0], [1], [1, 2, 3], [-4, 5, -6], [42, -97, 1000, 7]];
+		for (const seed of [0, 7, 42, 4204040608 >>> 0]) for (const keys of keysets) {
+			expect(hashKeys(seed >>> 0, keys), `hashKeys(${seed}, [${keys}])`).toBe(math.rngHashKeys(seed >>> 0, keys));
+		}
+	});
+
+	it('rand(seed, ...keys) matches Rust exactly (integer hash / 2^32 is an exact f64)', () => {
+		for (const seed of [1, 42, 7777]) for (const keys of [[1], [1, 2], [9, 8, 7]]) {
+			const js = rand(seed, ...keys);
+			const rs = math.rngRand(seed, keys);
+			expect(rs, `rngRand(${seed}, [${keys}])`).not.toBeNull();
+			expect(js, `rand parity (${seed}, [${keys}])`).toBe(rs);
+		}
+	});
+
+	it('seedFrom(string) matches Rust for ASCII seeds (world names / share tokens)', () => {
+		// ASCII only: JS charCodeAt (UTF-16) and Rust's UTF-16 code-unit fold coincide within ASCII — and every real
+		// seed (a world name / share slug) is ASCII, matching rng.rs's documented contract.
+		for (const s of ['', 'a', 'world', 'puruvj-demo', 'seed-12345', 'A Long World Name 0007', '~tilde_99']) {
+			expect(seedFrom(s), `seedFrom("${s}")`).toBe(math.rngSeedFrom(s));
+		}
 	});
 });

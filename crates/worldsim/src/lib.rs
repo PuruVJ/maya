@@ -138,6 +138,15 @@ mod wasm_api {
         [Rabbit, Cat, Kangaroo, Person, Lion, Dinosaur].map(crate::world::migrate_weight).to_vec()
     }
 
+    /// AMBIENT terrain height at (x,z) with no contained features — the deterministic wilderness relief. The render
+    /// (terrain.ts heightAt) keeps a native copy (it runs per-frame to ground objects + before the wasm loads), so
+    /// this exists to PARITY-TEST that copy against Rust (src/lib/terrain.test.ts). Feature patches blend on top in
+    /// both copies; the ambient field is the shared core most likely to drift on a tweak.
+    #[wasm_bindgen]
+    pub fn terrain_height(x: f64, z: f64) -> f64 {
+        crate::engine::height_at(x, z, &[])
+    }
+
     /// Pond per-id SEED (matches the render's waterSeed) — exposed so a parity test pins the JS copy to Rust.
     #[wasm_bindgen]
     pub fn water_seed(id: &str) -> f64 {
