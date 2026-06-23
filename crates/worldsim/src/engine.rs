@@ -153,6 +153,8 @@ const POND_CELL: f64 = 300.0; // metres between natural ponds (grid spacing)
 const POND_PROB: f64 = 0.82; // fraction of cells that actually hold a pond (natural gaps, not a rigid lattice)
 const POND_R_MIN: f64 = 11.0;
 const POND_R_MAX: f64 = 20.0;
+const POND_SPAWN_CLEAR: f64 = 120.0; // keep procedural ponds OUT of the curated spawn/home area (like SCATTER_CLEAR
+// for trees) — cell (0,0) always rolls a pond, which otherwise lands a random lake right on top of the demo's home.
 
 /// deterministic [0,1) hash of a grid cell + salt (no state, no transcendentals → identical across worker/main).
 fn pond_hash(cx: i32, cz: i32, salt: i32) -> f64 {
@@ -173,6 +175,9 @@ pub fn natural_pond_in_cell(cx: i32, cz: i32) -> Option<(f64, f64, f64)> {
     let jz = (pond_hash(cx, cz, 2) - 0.5) * POND_CELL * 0.6;
     let x = cx as f64 * POND_CELL + jx;
     let z = cz as f64 * POND_CELL + jz;
+    if x * x + z * z < POND_SPAWN_CLEAR * POND_SPAWN_CLEAR {
+        return None; // no procedural pond in the curated home area (the demo's own lake lives here instead)
+    }
     let r = POND_R_MIN + pond_hash(cx, cz, 3) * (POND_R_MAX - POND_R_MIN);
     Some((x, z, r))
 }
