@@ -13,6 +13,7 @@
 	import FpsPanel from '$lib/components/FpsPanel.svelte';
 	import EcoStats from '$lib/components/EcoStats.svelte';
 	import EventLog from '$lib/components/EventLog.svelte';
+	import SplashScreen from '$lib/components/SplashScreen.svelte';
 	import { nature } from '$lib/nature.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld, fastForward, type World as WorldData } from '$lib/world';
@@ -367,6 +368,7 @@
 
 <!-- live FPS / frame-time meter, top-centre -->
 <FpsPanel />
+<SplashScreen name={world.name} />
 <EcoStats {world} />
 <EventLog />
 

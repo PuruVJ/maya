@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { Tween } from 'svelte/motion';
+	import { cubicOut } from 'svelte/easing';
 	import { llm } from '$lib/llm.svelte';
 	import { playerState } from '$lib/playerState.svelte';
 	import { applyOps } from '$lib/engine';
@@ -48,7 +50,13 @@
 
 	const player = () => ({ pos: playerState.pos, yaw: playerState.yaw });
 
-	const pct = $derived(Math.round(llm.progress * 100));
+	// the model downloads as a handful of big shards, so llm.progress JUMPS (~11% a shard). Ease a shown value toward
+	// it so the bar CLIMBS smoothly between callbacks instead of lurching. (Resets instantly to 0 when a load starts.)
+	const shownProgress = new Tween(0, { duration: 500, easing: cubicOut });
+	$effect(() => {
+		shownProgress.set(llm.progress, llm.progress === 0 ? { duration: 0 } : undefined);
+	});
+	const pct = $derived(Math.round(shownProgress.current * 100));
 	const placeholder = $derived(
 		llm.busy
 			? 'Building your world…' // generating — make the wait legible (the model can take a few seconds)
