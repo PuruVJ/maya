@@ -226,8 +226,7 @@ pub fn decide(world: &mut World, px: f64, pz: f64, pspeed: f64, danger2: f64, hu
                         if !finishing {
                             // a wounding bite — keep chasing to finish it; no meal yet
                         } else {
-                        world.kills.push(p);
-                        world.events.extend_from_slice(&[super::EV_KILL, world.agents[p].kind as usize as f32, world.agents[p].agent.x as f32, world.agents[p].agent.z as f32]);
+                        world.kills.push(p); // EV_KILL is emitted once, uniformly, where world.kills is applied (world.rs §6)
                         world.agents[i].meals += 1;
                         world.agents[i].fed_meat = super::MEAT_SATED; // meat meal → people can breed a while (no-op for others)
                         world.agents[i].feeding = super::FEED_SECS; // hunker down + eat (no fidget) a few seconds
