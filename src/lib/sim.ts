@@ -13,7 +13,7 @@
  * Build the bundle first: `pnpm build:wasm` (emits to `static/worldsim/`). If the worker/wasm fails to load,
  * agents stay put and a console error fires — there is NO main-thread fallback, by design.
  */
-import { base } from '$app/paths';
+import { asset } from '$app/paths';
 import { agentManager, type ManagedAgent } from './agents.svelte';
 import { fishRegistry } from './fish.svelte';
 import { playerState } from './playerState.svelte';
@@ -47,7 +47,7 @@ type Snap = {
 	ageMeans: Float32Array; // 6 — mean age fraction (0..1) per kind; -1 = none alive (HUD age readout)
 };
 type OutMsg =
-	| { type: 'init'; base: string; obstacles: Float64Array | null }
+	| { type: 'init'; glueUrl: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
 	| { type: 'refuges'; xz: Float64Array }
 	| { type: 'water'; xzr: Float64Array }
@@ -240,7 +240,9 @@ class WorldSim {
 					console.error('[sim] worker error', err.message);
 					resolve(false);
 				};
-				this.#worker.postMessage({ type: 'init', base, obstacles: this.#pendingObstacles } satisfies OutMsg);
+				// the worker loads this glue (which fetches its own _bg.wasm beside it). `asset(...)` is the non-deprecated
+				// way to base-prefix a static path (replaces the deprecated `base`). The files come from `pnpm build:wasm`.
+				this.#worker.postMessage({ type: 'init', glueUrl: asset('/worldsim/worldsim.js'), obstacles: this.#pendingObstacles } satisfies OutMsg);
 			} catch (e) {
 				this.#status = 'failed';
 				console.error('[sim] could not spawn the sim worker', e);

@@ -67,7 +67,7 @@ interface WasmModule {
 // the main thread sends one of these; we reply with 'ready' / 'failed' / 'snap'
 type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number; genome: number[] | null };
 type InMsg =
-	| { type: 'init'; base: string; obstacles: Float64Array | null }
+	| { type: 'init'; glueUrl: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
 	| { type: 'refuges'; xz: Float64Array }
 	| { type: 'water'; xzr: Float64Array }
@@ -113,7 +113,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 		try {
 			// load the wasm glue from the static path (same module the main thread used to import). @vite-ignore:
 			// it's a runtime URL served from static/, not something to bundle.
-			const mod = (await import(/* @vite-ignore */ `${d.base}/worldsim/worldsim.js`)) as unknown as WasmModule;
+			const mod = (await import(/* @vite-ignore */ d.glueUrl)) as unknown as WasmModule;
 			wasm = await mod.default();
 			sim = new mod.Sim();
 			if (d.obstacles) sim.set_obstacles(d.obstacles); // anything Scene pushed before we finished loading
