@@ -39,9 +39,10 @@
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { sim } from '$lib/sim';
 	import { math } from '$lib/math';
+	import { vitals } from '$lib/vitals.svelte';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { worldAreaScale } from '$lib/world';
-	import { streamRegions, regionOf, fastForwardDormant } from '$lib/streaming';
+	import { streamRegions, regionOf, fastForwardDormant, enforceLiveBudget, LIVE_BUDGET } from '$lib/streaming';
 	import { playerState } from '$lib/playerState.svelte';
 	import { heightAt } from '$lib/terrain';
 	import { inWater, waterSurfaceY, waterEdgeFactor } from '$lib/water';
@@ -331,8 +332,12 @@
 		// REPRODUCTION: Rust bred new animals → turn each into a world-object (a baby of that kind), which mounts
 		// its renderer + spawns into the sim (as a maturing juvenile). The per-kind cap keeps this bounded.
 		const babies = sim.drainBirths();
-		for (const b of babies) {
-			world.objects.push({ id: babyPrefix + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene, pfamA: b.pfamA, pfamB: b.pfamB, genome: b.genome });
+		if (babies.length) {
+			const nowSec = sim.tick() / math.tickHz(); // SIM seconds → birth rate stays correct at any time-lapse speed
+			for (const b of babies) {
+				world.objects.push({ id: babyPrefix + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene, pfamA: b.pfamA, pfamB: b.pfamB, genome: b.genome });
+				vitals.birth(b.kind, nowSec); // feed the HUD's per-species TFR estimate (numerator)
+			}
 		}
 
 		// EMERGENT CITIES: place the houses settlers raised this frame. Snap to an 8 m grid (→ aligned blocks),
@@ -643,6 +648,11 @@
 			lastPulseTick = simTick;
 			fastForwardDormant(world, simTick);
 		}
+		// HARD LIVE BUDGET (user: "400 that actually EXISTS there, systemically"): if the near area is densely packed
+		// past LIVE_BUDGET, offload the FARTHEST excess (creatures + structures) into dormant aggregates — they leave
+		// the live set entirely (so they despawn from the Rust sim AND stop drawing, not just hide), and rejoin as you
+		// approach. Bounds what truly exists live around you, which is what caps sim + draw cost (and the DRS flicker).
+		if (world.objects.length > LIVE_BUDGET) enforceLiveBudget(world, px, pz, sim.tick());
 		const objLen = world.objects.length;
 		if (objLen !== lastObjLen || Number.isNaN(lastRevealX) || (px - lastRevealX) ** 2 + (pz - lastRevealZ) ** 2 > RECHECK_MOVE2) {
 			lastRevealX = px;

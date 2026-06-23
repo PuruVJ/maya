@@ -71,6 +71,18 @@ mod wasm_api {
             .collect()
     }
 
+    /// Female fertile WINDOW (seconds) per kind — maturity → menopause/old-age. The SAME numbers the sim breeds by,
+    /// so the HUD's per-species TFR estimate (births ÷ fertile females × this window) never drifts from the sim.
+    /// Returns [rabbit, cat, kangaroo, person, lion, dino].
+    #[wasm_bindgen]
+    pub fn fertile_windows() -> Vec<f64> {
+        use crate::eco::Kind;
+        [Kind::Rabbit, Kind::Cat, Kind::Kangaroo, Kind::Person, Kind::Lion, Kind::Dinosaur]
+            .iter()
+            .map(|&k| crate::world::fertile_window(k))
+            .collect()
+    }
+
     /// Aggregate fast-forward: advance the 6 populations by `dt` seconds away toward carrying capacity (closed-form
     /// logistic). Returns target headcounts [rabbit, cat, kangaroo, person, lion, dino] — JS materialises the deltas.
     #[wasm_bindgen]

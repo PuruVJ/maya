@@ -12,6 +12,7 @@
 </script>
 
 <svelte:head>
+	<title>Maya</title>
 	<link rel="icon" href={favicon} />
 </svelte:head>
 

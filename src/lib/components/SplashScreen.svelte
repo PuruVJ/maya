@@ -5,7 +5,7 @@
 	import { boot } from '$lib/boot.svelte';
 	import { fade } from 'svelte/transition';
 
-	let { name = 'a generative world' }: { name?: string } = $props();
+	let { name = 'Maya' }: { name?: string } = $props();
 </script>
 
 {#if !boot.ready}

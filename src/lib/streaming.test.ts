@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { emptyWorld, type World, type WorldObject } from './world';
-import { regionOf, regionKey, activeKeys, collapseRegion, wakeRegion, streamRegions, REGION_SIZE } from './streaming';
+import { regionOf, regionKey, activeKeys, collapseRegion, wakeRegion, streamRegions, enforceLiveBudget, REGION_SIZE } from './streaming';
 
 // Build a world with `n` creatures of `kind` clustered around a region's centre.
 function withCreatures(kind: string, n: number, cx: number, cz: number, w: World = emptyWorld('t')): World {
@@ -75,6 +75,34 @@ describe('sleep / wake', () => {
 		expect(creatures(w, 'rabbit').length).toBe(20); // near rabbits untouched
 		expect(creatures(w, 'kangaroo').length).toBe(0); // far kangaroos collapsed
 		expect(w.regions?.['6,6']?.counts.kangaroo).toBe(15);
+	});
+
+	it('enforceLiveBudget keeps the nearest `budget` live and offloads the farthest to dormant aggregates', () => {
+		const w = emptyWorld('t');
+		for (let i = 0; i < 100; i++) w.objects.push({ id: 'r' + i, kind: 'rabbit', pos: [i * 5, 0, 0], gene: 1 } as WorldObject);
+		const evicted = enforceLiveBudget(w, 0, 0, 10, 40); // player at origin → nearest 40 (smallest x) stay
+		expect(evicted).toBe(60);
+		expect(w.objects.length).toBe(40);
+		expect(Math.max(...w.objects.map((o) => o.pos[0]))).toBe(39 * 5); // the 40 kept are the 40 nearest
+		let dormant = 0; // the 60 offloaded are still alive in region aggregates
+		for (const k in w.regions) for (const kind in w.regions![k].counts) dormant += w.regions![k].counts[kind];
+		expect(dormant).toBe(60);
+	});
+
+	it('enforceLiveBudget offloads STRUCTURES verbatim too (not only creatures)', () => {
+		const w = emptyWorld('t');
+		w.objects.push({ id: 'r0', kind: 'rabbit', pos: [1, 0, 1], gene: 1 } as WorldObject); // near
+		w.objects.push({ id: 'h0', kind: 'house', pos: [9999, 0, 0] } as WorldObject); // far
+		expect(enforceLiveBudget(w, 0, 0, 5, 1)).toBe(1); // budget 1 → keep nearest (rabbit), evict the house
+		expect(w.objects.map((o) => o.id)).toEqual(['r0']);
+		const key = regionKey(...regionOf(9999, 0));
+		expect(w.regions?.[key]?.statics[0]?.id).toBe('h0'); // house preserved verbatim for round-trip
+	});
+
+	it('enforceLiveBudget is a no-op under budget', () => {
+		const w = withCreatures('rabbit', 10, 0, 0);
+		expect(enforceLiveBudget(w, 0, 0, 0, 400)).toBe(0);
+		expect(w.objects.length).toBe(10);
 	});
 
 	it('round-trip conserves the population: sleep far, then walk there to wake it', () => {

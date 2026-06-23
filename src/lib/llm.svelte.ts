@@ -47,10 +47,20 @@ export class WorldLLM {
 	// ONE model now — always the WorldGen mini (no picker). readStored only ever returns it or null.
 	selected = $state((readStored() ?? 'tuned-sm') as ModelKey | null);
 
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	#engine: any = null;
 	#worker: Worker | null = null;
 	#loadPromise: Promise<void> | null = null;
+	// tiny RPC over the worker: each request gets an id; the worker replies {id, ok, ...} or streams {type:'progress'}
+	#rpcId = 0;
+	#pending = new Map<number, { resolve: (v: { content?: string }) => void; reject: (e: Error) => void }>();
+
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	#call(req: Record<string, any>): Promise<{ content?: string }> {
+		const id = ++this.#rpcId;
+		return new Promise((resolve, reject) => {
+			this.#pending.set(id, { resolve, reject });
+			this.#worker!.postMessage({ ...req, id });
+		});
+	}
 
 	get model() {
 		return this.selected ? (MODELS[this.selected] ?? null) : null;
@@ -65,7 +75,7 @@ export class WorldLLM {
 			// tear down any previous engine + worker so load() rebuilds with the new weights
 			this.#worker?.terminate();
 			this.#worker = null;
-			this.#engine = null;
+			this.#pending.clear();
 			this.#loadPromise = null;
 			this.phase = 'idle';
 			this.progress = 0;
@@ -93,35 +103,38 @@ export class WorldLLM {
 						/* ignore */
 					}
 				}
-				const webllm = await import('@mlc-ai/web-llm');
-				// run inference in a Web Worker so token generation never freezes the 3D render loop
+				// run inference in a Web Worker so token generation never freezes the 3D render loop. The worker hosts
+				// the FULL WebLLM engine; we talk to it over the tiny RPC below (so @mlc-ai/web-llm isn't bundled on the
+				// main thread too — see llm-worker.ts). Progress messages stream in via the 'progress' branch.
 				this.#worker = new Worker(new URL('./llm-worker.ts', import.meta.url), { type: 'module' });
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-				const engineConfig: any = {
-					initProgressCallback: (r: { progress?: number; text?: string }) => {
-						this.progress = r.progress ?? 0;
-						this.text = r.text ?? '';
+				this.#worker.onmessage = (e: MessageEvent) => {
+					const d = e.data;
+					if (d?.type === 'progress') {
+						this.progress = d.progress ?? 0;
+						this.text = d.text ?? '';
+						return;
 					}
+					const p = this.#pending.get(d?.id);
+					if (!p) return;
+					this.#pending.delete(d.id);
+					if (d.ok) p.resolve(d);
+					else p.reject(new Error(d.error ?? 'worker error'));
 				};
+				this.#worker.onerror = (ev) => {
+					const err = new Error(ev.message || 'LLM worker crashed');
+					for (const [, p] of this.#pending) p.reject(err);
+					this.#pending.clear();
+				};
+				// origin-relative dev path → absolute URL the worker can fetch; HF/absolute URLs pass through. (Resolved
+				// HERE because location.origin is reliable on the main thread; the worker receives the absolute URL.)
 				const tdef = TUNED[sel];
-				if (tdef) {
-					// register our hosted weights against the matching STOCK model lib (same architecture +
-					// quant) — no custom WASM needed, only the fine-tuned weights are ours
-					const stock = webllm.prebuiltAppConfig.model_list.find((m) => m.model_id === tdef.stockId);
-					// origin-relative dev path → absolute URL WebLLM can fetch; HF/absolute URLs pass through
-					const modelUrl = tdef.url.startsWith('http') ? tdef.url : new URL(tdef.url, location.origin).href;
-					engineConfig.appConfig = {
-						...webllm.prebuiltAppConfig,
-						model_list: [
-							...webllm.prebuiltAppConfig.model_list,
-							{ model: modelUrl, model_id: tdef.id, model_lib: stock?.model_lib }
-						]
-					};
-				}
-				this.#engine = await webllm.CreateWebWorkerMLCEngine(this.#worker, modelId, engineConfig);
+				const tuned = tdef
+					? { id: tdef.id, stockId: tdef.stockId, url: tdef.url.startsWith('http') ? tdef.url : new URL(tdef.url, location.origin).href }
+					: undefined;
+				await this.#call({ type: 'reload', modelId, tuned });
 				this.phase = 'ready';
 				this.text = 'AI ready';
-				dlog('llm', 'engine ready', { model: modelId, engine: this.#engine?.constructor?.name });
+				dlog('llm', 'engine ready', { model: modelId });
 			} catch (e) {
 				this.phase = 'error';
 				this.text = e instanceof Error ? e.message : 'AI failed to load';
@@ -140,17 +153,9 @@ export class WorldLLM {
 		try {
 			// the fine-tunes were trained on the compact world-state prompt; stock models need the full one
 			const system = isTuned(this.selected) ? buildWorldState(world, player) : buildSystem(world, player);
-			const reply = await this.#engine.chat.completions.create({
-				messages: [
-					{ role: 'system', content: system },
-					{ role: 'user', content: instruction }
-				],
-				response_format: { type: 'json_object', schema: SCHEMA_STR },
-				temperature,
-				// headroom for multi-op compound replies (the model emits whole chains in one shot)
-				max_tokens: 768
-			});
-			const raw = reply.choices?.[0]?.message?.content ?? '{}';
+			// headroom (max_tokens 768) for multi-op compound replies — the model emits whole chains in one shot
+			const reply = await this.#call({ type: 'generate', system, instruction, temperature, maxTokens: 768, schema: SCHEMA_STR });
+			const raw = reply.content ?? '{}';
 			const parsed = JSON.parse(raw);
 			const ops: Op[] = Array.isArray(parsed.ops) ? parsed.ops.filter(isValidOp) : [];
 			const ms = Math.round(performance.now() - t0);

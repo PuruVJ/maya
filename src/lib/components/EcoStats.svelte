@@ -5,8 +5,11 @@
 	// a gain (a birth / an immigrant arriving), RED on a loss (a kill / starvation / old age) — so the churn of the
 	// living world is glanceable without staring at the numbers.
 	import { onMount } from 'svelte';
+	import { fly, fade } from 'svelte/transition';
+	import { cubicOut } from 'svelte/easing';
 	import { agentManager } from '$lib/agents.svelte';
 	import { sim } from '$lib/sim';
+	import { vitals } from '$lib/vitals.svelte';
 	import { nature } from '$lib/nature.svelte';
 	import { math } from '$lib/math';
 	import type { World } from '$lib/world';
@@ -34,6 +37,11 @@
 	// stays a whole-world stat. Populated once the wasm math instance loads (SPECIES order = Rust Kind order).
 	let MIGRATE_WEIGHT = $state<Record<string, number>>({});
 	const DORMANT_MIGRATE_FRAC = 0.12;
+	// per-kind female FERTILE WINDOW (seconds) — from the sim (Rust), so the TFR estimate uses the sim's own breeding
+	// numbers. Populated once the wasm loads (SPECIES order = Kind order). TFR per species is then a live estimate:
+	// (births/sim-sec for the species ÷ its fertile females) × this window = expected offspring per female's life.
+	let FERTILE_WINDOW = $state<Record<string, number>>({});
+	let tfr = $state<Record<string, number>>({}); // per-species TFR estimate (≈2 = replacement)
 
 	let counts = $state<Record<string, number>>({});
 	let pulse = $state<Record<string, number>>({}); // bumps on every change → re-keys the chip so the flash replays
@@ -69,11 +77,16 @@
 				const mw = math.migrateWeights(); // Rust is the source of truth; SPECIES order = Kind order
 				if (mw) MIGRATE_WEIGHT = Object.fromEntries(SPECIES.map(({ k }, i) => [k, mw[i]]));
 			}
+			if (Object.keys(FERTILE_WINDOW).length === 0) {
+				const fw = math.fertileWindows(); // sim's own fertile-window seconds; SPECIES order = Kind order
+				if (fw) FERTILE_WINDOW = Object.fromEntries(SPECIES.map(({ k }, i) => [k, fw[i]]));
+			}
 			const c: Record<string, number> = {};
 			let live = 0;
 			let geneSum = 0;
 			const f: Record<string, number> = {};
 			const mle: Record<string, number> = {};
+			const ferF: Record<string, number> = {}; // fertile females per species (mature, pre-elder) → TFR denominator
 			const mig: Record<string, number> = {};
 			let bold = 0; // boldness niche tally (genome[1] = safety weight): bold = flees late, breeds fast
 			let cautious = 0;
@@ -85,8 +98,12 @@
 				c[m.kind] = (c[m.kind] ?? 0) + 1;
 				geneSum += math.clampGene(m.gene ?? 1); // gene is defined 0.6..1.6; clamp the readout defensively
 				// sex: even seedId = female (matches Rust is_female); migrating = the Rust roamer flag (bit4)
-				if ((m.seedId & 1) === 0) f[m.kind] = (f[m.kind] ?? 0) + 1;
-				else mle[m.kind] = (mle[m.kind] ?? 0) + 1;
+				if ((m.seedId & 1) === 0) {
+					f[m.kind] = (f[m.kind] ?? 0) + 1;
+					// fertile ≈ mature (≥0.12 of life, the sim's JUVENILE_FRAC) and pre-elder (≤0.85, ≈ animal menopause)
+					const a = m.ageFrac ?? 0;
+					if (a >= 0.12 && a <= 0.85) ferF[m.kind] = (ferF[m.kind] ?? 0) + 1;
+				} else mle[m.kind] = (mle[m.kind] ?? 0) + 1;
 				if (m.migrating) mig[m.kind] = (mig[m.kind] ?? 0) + 1;
 				if (m.genome) {
 					stratN++;
@@ -142,6 +159,17 @@
 			}
 			for (const k in mig) mig[k] = Math.round(mig[k]); // live (exact) + dormant (estimated) → whole-world ✈
 			migrating = mig;
+			// TFR per species (live estimate): expected offspring per female over her fertile life. Numerator = recent
+			// births/sim-sec (vitals); denominator = live fertile females; × the sim's fertile window. ≈2 = replacement.
+			const nowSec = sim.tick() / (math.tickHz() || 30);
+			const rate = vitals.ratePerSec(nowSec);
+			const t: Record<string, number> = {};
+			for (const { k } of SPECIES) {
+				const Ff = ferF[k] ?? 0;
+				const fw = FERTILE_WINDOW[k] ?? 0;
+				t[k] = Ff > 0 && fw > 0 ? ((rate[k] ?? 0) / Ff) * fw : 0;
+			}
+			tfr = t;
 			if (!first) {
 				for (const { k } of SPECIES) {
 					const cur = c[k] ?? 0;
@@ -171,7 +199,8 @@
 
 {#if total > 0}
 	<div
-		class="pointer-events-none fixed left-1/2 top-12 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full bg-black/40 px-3 py-1 text-[13px] font-medium text-white/85 backdrop-blur"
+		transition:fade={{ duration: 200 }}
+		class="pointer-events-none fixed left-1/2 top-12 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full border border-white/10 bg-zinc-900/55 px-3 py-1 text-[13px] font-medium text-white/85 shadow-lg shadow-black/30 backdrop-blur-xl"
 		title="Live population by species — chips flash green on a gain (birth / immigrant), red on a loss (kill / starve / old age)"
 	>
 		{#each SPECIES as { k, icon } (k)}
@@ -200,12 +229,13 @@
 
 	{#if detail}
 		<div
-			class="pointer-events-none fixed left-1/2 top-[5.5rem] z-20 w-[21rem] -translate-x-1/2 space-y-2 rounded-xl bg-black/55 px-3 py-2 text-[12px] text-white/85 backdrop-blur"
+			transition:fly={{ y: -8, duration: 220, easing: cubicOut }}
+			class="pointer-events-none fixed left-1/2 top-[5.5rem] z-20 w-[21rem] -translate-x-1/2 space-y-2 rounded-2xl border border-white/10 bg-zinc-900/70 px-3 py-2 text-[12px] text-white/85 shadow-2xl shadow-black/40 backdrop-blur-xl"
 		>
 			<!-- per-species TOTAL ♂/♀ across the whole world. Live ones are sexed exactly; dormant (streamed-away)
 			     ones are a headcount, so they're split ~50/50 (sex is seed-parity, ≈even) → an accurate total. ✈ is
 			     whole-world: live roamers (exact) + an estimate of the dormant population on the move (by migrate-weight). -->
-			<div class="text-[10px] uppercase tracking-wide text-white/45">total ♂/♀ (incl. dormant) · ✈ migrating (world) · 🎂 mean age (live)</div>
+			<div class="text-[10px] uppercase tracking-wide text-white/45">total ♂/♀ · 👶 TFR · ✈ migrating · 🎂 mean age</div>
 			<div class="space-y-0.5">
 				{#each SPECIES as { k, icon }, idx (k)}
 					{#if counts[k]}
@@ -213,10 +243,15 @@
 						{@const tM = (sexM[k] ?? 0) + Math.ceil(dorm / 2)}
 						{@const tF = (sexF[k] ?? 0) + Math.floor(dorm / 2)}
 						{@const age = ageMeans[idx] ?? -1}
+						{@const tv = tfr[k] ?? 0}
 						<div class="flex items-center justify-between tabular-nums">
 							<span class="w-12">{icon} {counts[k]}</span>
 							<span class="text-sky-300/80" title="males (live + ~half of {dorm} dormant)">♂{tM}</span>
 							<span class="text-pink-300/80" title="females (live + ~half of {dorm} dormant)">♀{tF}</span>
+							<span
+								class={tv >= 2 ? 'text-emerald-300/90' : tv >= 1 ? 'text-amber-300/90' : 'text-rose-300/90'}
+								title="TFR estimate — expected offspring per female over her fertile life (live population). ≈2 = replacement; below 2 = this species is shrinking. Rolling ~90 s of births."
+							>👶{tv > 0 ? tv.toFixed(1) : '–'}</span>
 							<span class="text-amber-300/90" title="roamers migrating to another settlement — whole world (live exact + dormant estimate)">✈{migrating[k] ?? 0}</span>
 							<span class="text-lime-300/80" title="mean age as % of lifespan, live (0 = all newborns, 100 = all elderly)">🎂{age >= 0 ? Math.round(age * 100) + '%' : '–'}</span>
 						</div>

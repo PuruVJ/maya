@@ -509,6 +509,14 @@ fn fertile_until(kind: Kind, seed_id: i32, lifespan: f64) -> f64 {
         lifespan * 0.97 // males: fertile right up to death
     }
 }
+
+/// Female fertile WINDOW in seconds (maturity → menopause/old-age) for a kind — the span over which a female can
+/// bear young. Exposed to JS (lib.rs `fertile_windows`) so the HUD's per-species TFR estimate uses the sim's OWN
+/// numbers instead of a drifting copy. Uses a representative female seed for the (seeded) human menopause age.
+pub fn fertile_window(kind: Kind) -> f64 {
+    let ls = base_lifespan(kind);
+    (fertile_until(kind, 0, ls) - JUVENILE_FRAC * ls).max(1.0) // seed 0 = even = female; deterministic representative
+}
 const HEAL: f64 = 0.04; // health/s regained while unharmed
 // HYSTERESIS hunger latch (the user's flip-flop fix): a carnivore commits to hunting below LO and won't stop
 // (rest) until eating lifts it past HI — without the gap, energy at one threshold flipped hunting on/off every

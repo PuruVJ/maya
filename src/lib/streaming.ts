@@ -19,6 +19,12 @@ const FF_KINDS = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] as 
 
 export const REGION_SIZE = 200; // metres per region tile
 const ACTIVE_RING = 1; // regions within this Chebyshev ring of the player's stay LIVE (3×3 → ~600 m live span)
+// HARD LIVE BUDGET — the most individual objects (creatures AND structures) that may be live at once. Region
+// streaming bounds the live SPAN (~600 m); this bounds the live COUNT, for the case the span is densely packed
+// (e.g. you spawn 1000 people in one spot). Excess beyond this — the FARTHEST from the player — is offloaded to the
+// dormant region aggregates (still alive there, fast-forwarded, re-materialised as you approach). So only ~this many
+// elements ever actually exist live around you, which is what caps the sim + draw cost (and the DRS flicker).
+export const LIVE_BUDGET = 400;
 // tick rate comes from the sim clock (math.tickHz(), cached) — no duplicated 30 here
 
 export const regionKey = (cx: number, cz: number): string => `${cx},${cz}`;
@@ -152,4 +158,46 @@ export function streamRegions(world: World, px: number, pz: number, tick: number
 		slept++;
 	}
 	return { slept, woken };
+}
+
+/** HARD LIVE-COUNT CAP. Keep only the nearest `budget` objects live (creatures + structures alike); offload the
+ *  FARTHEST excess into their region's dormant aggregate — creatures lossily (counts + a count-weighted gene mean),
+ *  statics verbatim — exactly as collapseRegion does, so they round-trip back when you approach. This is what makes
+ *  "only ~budget elements actually exist live around you" true even when the live SPAN is densely packed (region
+ *  streaming alone can't help if 1000 are crammed into one 200 m tile). Returns how many it offloaded. Cheap: a
+ *  single distance sort, and the caller only invokes it while over budget. */
+export function enforceLiveBudget(world: World, px: number, pz: number, tick: number, budget = LIVE_BUDGET): number {
+	const objs = world.objects;
+	if (objs.length <= budget) return 0;
+	if (!world.regions) world.regions = {};
+	// rank by distance² to the player; the nearest `budget` stay live, the rest are evicted
+	const order = objs.map((_, i) => i);
+	const d2 = objs.map((o) => (o.pos[0] - px) ** 2 + (o.pos[2] - pz) ** 2);
+	order.sort((a, b) => d2[a] - d2[b]);
+	const keepIdx = new Set(order.slice(0, budget));
+	const kept: WorldObject[] = [];
+	let evicted = 0;
+	for (let i = 0; i < objs.length; i++) {
+		const o = objs[i];
+		if (keepIdx.has(i)) {
+			kept.push(o);
+			continue;
+		}
+		const [cx, cz] = regionOf(o.pos[0], o.pos[2]);
+		const key = regionKey(cx, cz);
+		const agg = (world.regions[key] ??= { counts: {}, gene: 1, statics: [], lastTick: tick });
+		if (CREATURE_KINDS.has(o.kind)) {
+			// count-weighted running gene mean (matches the spirit of collapseRegion's averaged gene)
+			let n = 0;
+			for (const k in agg.counts) n += agg.counts[k];
+			agg.gene = math.clampGene((agg.gene * n + (o.gene ?? 1)) / (n + 1));
+			agg.counts[o.kind] = (agg.counts[o.kind] ?? 0) + 1;
+		} else {
+			agg.statics.push(o); // durable structure → kept verbatim (restored on wake)
+		}
+		agg.lastTick = tick;
+		evicted++;
+	}
+	world.objects = kept;
+	return evicted;
 }

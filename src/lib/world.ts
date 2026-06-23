@@ -259,3 +259,9 @@ export function emptyWorld(name = 'Untitled'): World {
 export function demoWorld(): World {
 	return structuredClone(DEMO_SNAPSHOT as unknown as World);
 }
+
+/** The world's brand title (single source of truth = the demo snapshot). The local world's name is app branding,
+ *  not user content — there's no rename UI — so a cached world from a previous name should adopt the current one. */
+export const WORLD_NAME = (DEMO_SNAPSHOT as unknown as World).name;
+/** Names this world has shipped under; a cached local world bearing one of these is migrated to WORLD_NAME on load. */
+export const LEGACY_WORLD_NAMES = ['Hello World'];

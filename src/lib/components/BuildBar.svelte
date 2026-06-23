@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { Tween } from 'svelte/motion';
 	import { cubicOut } from 'svelte/easing';
+	import { fly } from 'svelte/transition';
 	import { llm } from '$lib/llm.svelte';
 	import { playerState } from '$lib/playerState.svelte';
 	import { applyOps } from '$lib/engine';
@@ -17,6 +18,11 @@
 	let { world }: { world: World } = $props();
 
 	const KIND_LIST = Object.keys(KINDS);
+
+	// shared style for the small, low-contrast utility buttons in the tool tray — kept visually subordinate so the
+	// hero command input below is unmistakably the main thing (user: "I want the input to be the big thing").
+	const trayBtn =
+		'flex size-9 items-center justify-center rounded-full text-[15px] leading-none text-white/55 transition hover:bg-white/10 hover:text-white disabled:opacity-25 disabled:hover:bg-transparent';
 
 	let text = $state('');
 	let lastInstruction = $state('');
@@ -269,14 +275,14 @@
 	class="fixed bottom-6 left-1/2 z-10 flex w-[min(620px,calc(100vw-2rem))] -translate-x-1/2 flex-col items-center gap-2"
 >
 	{#if llm.phase === 'error'}
-		<div class="rounded-full bg-red-950/80 px-3.5 py-1.5 text-xs text-red-200 backdrop-blur">
+		<div transition:fly={{ y: 8, duration: 180 }} class="rounded-full border border-red-400/20 bg-red-950/80 px-3.5 py-1.5 text-xs text-red-200 shadow-lg shadow-black/30 backdrop-blur-xl">
 			{llm.text} ·
 			<button class="font-medium underline" onclick={() => llm.load().catch(() => {})}>retry</button>
 		</div>
 	{/if}
 
 	{#if pending}
-		<div class="rounded-full bg-amber-950/80 px-3.5 py-1.5 text-xs text-amber-100 backdrop-blur">
+		<div transition:fly={{ y: 8, duration: 180 }} class="rounded-full border border-amber-400/20 bg-amber-950/80 px-3.5 py-1.5 text-xs text-amber-100 shadow-lg shadow-black/30 backdrop-blur-xl">
 			The {pending.label} is over {pending.ids.length} object{pending.ids.length > 1 ? 's' : ''} —
 			<button class="font-medium underline" onclick={demolish}>demolish</button>
 			<span class="opacity-50">·</span>
@@ -285,7 +291,7 @@
 	{/if}
 
 	{#if note}
-		<div class="flex max-w-full items-start gap-2 rounded-2xl bg-sky-950/80 px-3.5 py-2 text-xs text-sky-100 backdrop-blur">
+		<div transition:fly={{ y: 8, duration: 180 }} class="flex max-w-full items-start gap-2 rounded-2xl border border-sky-400/20 bg-sky-950/80 px-3.5 py-2 text-xs text-sky-100 shadow-lg shadow-black/30 backdrop-blur-xl">
 			<span class="select-none">💡</span>
 			<span class="flex-1">{note}</span>
 			<button class="font-medium underline opacity-80" onclick={() => (note = null)}>ok</button>
@@ -293,94 +299,95 @@
 	{/if}
 
 	{#if editor.tool === 'delete'}
-		<div class="rounded-full bg-rose-950/80 px-3.5 py-1.5 text-xs text-rose-100 backdrop-blur">
+		<div transition:fly={{ y: 8, duration: 180 }} class="rounded-full border border-rose-400/20 bg-rose-950/80 px-3.5 py-1.5 text-xs text-rose-100 shadow-lg shadow-black/30 backdrop-blur-xl">
 			Delete mode — tap any object to remove it ·
 			<button class="font-medium underline" onclick={() => (editor.tool = 'none')}>done</button>
 		</div>
 	{:else if editor.tool === 'move'}
-		<div class="rounded-full bg-sky-900/80 px-3.5 py-1.5 text-xs text-sky-100 backdrop-blur">
+		<div transition:fly={{ y: 8, duration: 180 }} class="rounded-full border border-sky-400/20 bg-sky-900/80 px-3.5 py-1.5 text-xs text-sky-100 shadow-lg shadow-black/30 backdrop-blur-xl">
 			{editor.held ? '✋ carrying it — tap where it should go' : 'Move mode — tap a thing to pick it up'} ·
 			<button class="font-medium underline" onclick={() => { editor.tool = 'none'; editor.held = null; }}>done</button>
 		</div>
 	{/if}
 
-	{#if editor.paletteOpen}
+	<!-- BAR GROUP — stays put. The palette + command suggestions float ABOVE it as overlays (absolute, bottom-full)
+	     so opening them never reflows the input or the tray (user: opening the palette shoved the build bar up). -->
+	<div class="relative flex w-full flex-col items-center gap-2">
+		{#if editor.paletteOpen}
+			<div
+				transition:fly={{ y: 8, duration: 160, easing: cubicOut }}
+				class="absolute bottom-full left-0 mb-2 flex w-full flex-wrap justify-center gap-1.5 rounded-2xl border border-white/10 bg-zinc-900/85 p-2.5 shadow-2xl backdrop-blur-md"
+			>
+				{#each KIND_LIST as kind (kind)}
+					<Button variant="secondary" size="sm" class="h-7 px-2.5 text-xs capitalize" onclick={() => place(kind)}>
+						{kind}
+					</Button>
+				{/each}
+			</div>
+		{/if}
+
+		{#if suggestions.length}
+			<div transition:fly={{ y: 8, duration: 160, easing: cubicOut }} class="absolute bottom-full left-0 mb-2 w-full overflow-hidden rounded-2xl border border-white/10 bg-zinc-900/85 shadow-2xl backdrop-blur-md">
+				{#each suggestions as s, i (s.cmd)}
+					<button
+						class="flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-sm transition {i === Math.min(selIdx, suggestions.length - 1) ? 'bg-white/15' : 'hover:bg-white/10'}"
+						onmouseenter={() => (selIdx = i)}
+						onclick={() => runSuggestion(s)}
+					>
+						<span class="font-medium text-foreground">{s.label}</span>
+						<span class="flex-1 truncate text-xs text-foreground/55">{s.desc}</span>
+					</button>
+				{/each}
+			</div>
+		{/if}
+
+		<!-- TOOL TRAY — history + edit modes + palette, deliberately small & low-contrast so the hero input dominates -->
+		<div class="flex items-center gap-0.5 rounded-full border border-white/10 bg-zinc-900/60 p-1 shadow-lg shadow-black/30 backdrop-blur-xl">
+			<button class={trayBtn} onclick={undo} disabled={!history.canUndo || llm.busy} title="Undo">↶</button>
+			<button class={trayBtn} onclick={redo} disabled={!history.canRedo || llm.busy} title="Redo">↷</button>
+			<button class={trayBtn} onclick={reroll} disabled={!canReroll || llm.busy} title="Re-roll — try that prompt again">↻</button>
+			<span class="mx-1 h-4 w-px bg-white/15"></span>
+			<button
+				class="{trayBtn} {editor.tool === 'move' ? 'bg-sky-500/80 text-white hover:bg-sky-500/80' : ''}"
+				onclick={() => { editor.tool = editor.tool === 'move' ? 'none' : 'move'; editor.held = null; }}
+				title="Move mode — tap a thing, then tap where it goes">✋</button>
+			<button
+				class="{trayBtn} {editor.tool === 'delete' ? 'bg-rose-500/85 text-white hover:bg-rose-500/85' : ''}"
+				onclick={() => (editor.tool = editor.tool === 'delete' ? 'none' : 'delete')}
+				title="Delete mode — tap objects to remove them">🗑</button>
+			<span class="mx-1 h-4 w-px bg-white/15"></span>
+			<button
+				class="{trayBtn} {editor.paletteOpen ? 'bg-white/15 text-white' : ''}"
+				onclick={() => (editor.paletteOpen = !editor.paletteOpen)}
+				title="Palette — drop a thing in front of you">⊞</button>
+		</div>
+
+		<!-- HERO — the command input is the star: big, inviting, everything else is subordinate to it -->
 		<div
-			class="flex w-full flex-wrap justify-center gap-1.5 rounded-2xl border border-white/10 bg-background/70 p-2.5 shadow-2xl backdrop-blur-md"
+			class="group relative flex w-full items-center gap-2.5 rounded-2xl border border-white/12 bg-zinc-900/65 py-2 pl-4 pr-2 shadow-[0_16px_50px_-12px_rgba(0,0,0,0.85)] backdrop-blur-2xl transition-colors focus-within:border-amber-400/40"
 		>
-			{#each KIND_LIST as kind (kind)}
-				<Button variant="secondary" size="sm" class="h-7 px-2.5 text-xs capitalize" onclick={() => place(kind)}>
-					{kind}
-				</Button>
-			{/each}
+			<span class="pointer-events-none select-none text-lg leading-none text-amber-300/70 transition-colors group-focus-within:text-amber-300">✦</span>
+			<Input
+				bind:value={text}
+				onkeydown={onKey}
+				{placeholder}
+				maxlength={100}
+				disabled={llm.phase !== 'ready'}
+				class="h-12 flex-1 border-0 bg-transparent px-0 text-base text-foreground shadow-none placeholder:text-white/40 focus-visible:ring-0"
+			/>
+			<Button
+				onclick={build}
+				disabled={llm.phase !== 'ready' || llm.busy || !text.trim()}
+				class="h-10 rounded-xl bg-amber-500 px-5 text-sm font-semibold text-black hover:bg-amber-400"
+			>
+				{#if llm.phase === 'loading'}
+					{pct}%
+				{:else if llm.busy}
+					<span class="animate-pulse">building…</span>
+				{:else}
+					Build
+				{/if}
+			</Button>
 		</div>
-	{/if}
-
-	{#if suggestions.length}
-		<div class="w-full overflow-hidden rounded-2xl border border-white/10 bg-background/80 shadow-2xl backdrop-blur-md">
-			{#each suggestions as s, i (s.cmd)}
-				<button
-					class="flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-sm transition {i === Math.min(selIdx, suggestions.length - 1) ? 'bg-white/15' : 'hover:bg-white/10'}"
-					onmouseenter={() => (selIdx = i)}
-					onclick={() => runSuggestion(s)}
-				>
-					<span class="font-medium text-foreground">{s.label}</span>
-					<span class="flex-1 truncate text-xs text-foreground/55">{s.desc}</span>
-				</button>
-			{/each}
-		</div>
-	{/if}
-
-	<div
-		class="relative flex w-full items-center gap-1.5 rounded-full border border-white/15 bg-background/75 p-2 pl-2.5 shadow-2xl shadow-black/40 backdrop-blur-xl"
-	>
-		<Button
-			variant={editor.paletteOpen ? 'default' : 'secondary'}
-			size="icon"
-			onclick={() => (editor.paletteOpen = !editor.paletteOpen)}
-			title="Build palette — click a thing to drop it in front of you"
-		>
-			⊞
-		</Button>
-
-		<Input
-			bind:value={text}
-			onkeydown={onKey}
-			{placeholder}
-			maxlength={100}
-			disabled={llm.phase !== 'ready'}
-			class="h-11 flex-1 border-0 bg-transparent px-2 text-base text-foreground shadow-none focus-visible:ring-0"
-		/>
-		<Button onclick={build} disabled={llm.phase !== 'ready' || llm.busy || !text.trim()}>
-			{#if llm.phase === 'loading'}
-				{pct}%
-			{:else if llm.busy}
-				<span class="animate-pulse">…</span>
-			{:else}
-				Build
-			{/if}
-		</Button>
-		<Button
-			variant={editor.tool === 'move' ? 'default' : 'secondary'}
-			size="icon"
-			onclick={() => {
-				editor.tool = editor.tool === 'move' ? 'none' : 'move';
-				editor.held = null;
-			}}
-			title="Move mode — tap a thing, then tap where it goes"
-		>
-			✋
-		</Button>
-		<Button
-			variant={editor.tool === 'delete' ? 'destructive' : 'secondary'}
-			size="icon"
-			onclick={() => (editor.tool = editor.tool === 'delete' ? 'none' : 'delete')}
-			title="Delete mode — tap objects to remove them"
-		>
-			🗑
-		</Button>
-		<Button variant="secondary" size="icon" onclick={reroll} disabled={!canReroll || llm.busy} title="Re-roll (try again)">↻</Button>
-		<Button variant="secondary" size="icon" onclick={undo} disabled={!history.canUndo || llm.busy} title="Undo">↶</Button>
-		<Button variant="secondary" size="icon" onclick={redo} disabled={!history.canRedo || llm.busy} title="Redo">↷</Button>
 	</div>
 </div>

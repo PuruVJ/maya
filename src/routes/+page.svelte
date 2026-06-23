@@ -16,7 +16,7 @@
 	import SplashScreen from '$lib/components/SplashScreen.svelte';
 	import { nature } from '$lib/nature.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
-	import { demoWorld, emptyWorld, fastForward, type World as WorldData } from '$lib/world';
+	import { demoWorld, emptyWorld, fastForward, WORLD_NAME, LEGACY_WORLD_NAMES, type World as WorldData } from '$lib/world';
 	import { math } from '$lib/math';
 	import { heightAt } from '$lib/terrain';
 	import { encodeWorld, decodeWorld } from '$lib/share';
@@ -104,6 +104,10 @@
 			const saved = await loadWorld();
 			if (saved && Array.isArray(saved.objects)) {
 				const w = dedupeObjects(saved);
+				// HEAL (temporary): caches written under an old title flicker name→Maya on reload. The local world's
+				// name is app branding (no rename UI), so adopt the current one. Re-saved below, so it self-heals once.
+				// TODO: remove once confirmed clean.
+				if (LEGACY_WORLD_NAMES.includes(w.name)) w.name = WORLD_NAME;
 				// DETERMINISTIC AGGREGATE FAST-FORWARD (big-world.md §3): advance the population to "now" by however
 				// long you were away — closed-form, so even a week away is instant (no tick-replay hang).
 				const away = saved.savedAt ? Date.now() - saved.savedAt : 0;
@@ -393,27 +397,28 @@
 	</div>
 {/if}
 
-<div class="pointer-events-none fixed left-4 top-4 text-white [text-shadow:0_1px_4px_rgba(0,0,0,0.5)]">
-	<div class="text-xl font-bold tracking-tight">{world.name}</div>
-	<div class="mt-1.5 flex items-center gap-1.5">
-		<span class="inline-block rounded-full bg-black/35 px-2.5 py-1 text-xs font-semibold backdrop-blur [text-shadow:none]">
-			100% local · no API key · free
-		</span>
-		<!-- single fine-tune, no picker → a static label (the WorldGen mini is the only model) -->
-		<span class="inline-block rounded-full bg-black/35 px-2.5 py-1 text-xs font-semibold backdrop-blur [text-shadow:none]">
-			AI: {llm.model?.label ?? '…'}
-		</span>
-		<!-- TIME-LAPSE speed: watch the simulation evolve faster (the sim stays frame-rate-independent) -->
-		<div class="pointer-events-auto flex items-center overflow-hidden rounded-full bg-black/35 backdrop-blur [text-shadow:none]" title="Simulation speed">
-			{#each SPEEDS as s (s)}
-				<button
-					class="px-2.5 py-1 text-xs font-semibold transition {speed === s ? 'bg-amber-500/80 text-black' : 'text-white/85 hover:bg-black/40'}"
-					onclick={() => setSpeed(s)}
-				>
-					{s}×
-				</button>
-			{/each}
+<div class="pointer-events-none fixed left-4 top-4 flex flex-col gap-2.5 text-white">
+	<div>
+		<div class="bg-gradient-to-b from-white to-amber-100/70 bg-clip-text text-2xl font-semibold tracking-tight text-transparent [filter:drop-shadow(0_1px_6px_rgba(0,0,0,0.55))]">
+			{world.name}
 		</div>
+		<div class="mt-0.5 text-[11px] font-medium tracking-wide text-white/45 [text-shadow:0_1px_3px_rgba(0,0,0,0.6)]">
+			100% local · no API key · free
+		</div>
+	</div>
+	<!-- TIME-LAPSE speed: watch the simulation evolve faster (the sim stays frame-rate-independent) -->
+	<div
+		class="pointer-events-auto inline-flex w-fit items-center gap-0.5 rounded-full border border-white/10 bg-zinc-900/55 p-0.5 backdrop-blur-xl"
+		title="Simulation speed"
+	>
+		{#each SPEEDS as s (s)}
+			<button
+				class="rounded-full px-2.5 py-1 text-xs font-semibold transition {speed === s ? 'bg-amber-500 text-black shadow-sm' : 'text-white/55 hover:text-white'}"
+				onclick={() => setSpeed(s)}
+			>
+				{s}×
+			</button>
+		{/each}
 	</div>
 </div>
 
@@ -421,14 +426,14 @@
 <div class="fixed right-4 top-4 z-10 flex flex-col items-end gap-1.5">
 	<div class="flex items-center gap-1.5">
 		<button
-			class="rounded-full bg-black/40 px-3 py-1.5 text-sm font-semibold text-white backdrop-blur transition hover:bg-black/60"
+			class="rounded-full border border-white/10 bg-zinc-900/55 px-3.5 py-1.5 text-sm font-semibold text-white/90 backdrop-blur-xl transition hover:bg-zinc-800/70 hover:text-white"
 			onclick={reset}
 			title="Reset to the demo world"
 		>
 			↺ Reset
 		</button>
 		<button
-			class="rounded-full bg-black/40 px-4 py-1.5 text-sm font-semibold text-white backdrop-blur transition hover:bg-black/60"
+			class="rounded-full border border-white/10 bg-zinc-900/55 px-4 py-1.5 text-sm font-semibold text-white/90 backdrop-blur-xl transition hover:bg-zinc-800/70 hover:text-white"
 			onclick={share}
 		>
 			🔗 Share
@@ -438,7 +443,7 @@
 	     keeps this bounded). DORMANT = streaming-offloaded creatures, still alive in region aggregates. -->
 	{#if liveUrl && world.objects.length}
 		<div
-			class="pointer-events-none rounded-full bg-black/35 px-2.5 py-0.5 text-[11px] font-medium text-white/55 backdrop-blur"
+			class="pointer-events-none rounded-full border border-white/5 bg-zinc-900/50 px-2.5 py-0.5 text-[11px] font-medium tabular-nums text-white/50 backdrop-blur-xl"
 			title="LIVE = simulated/rendered near you (streaming bounds this for perf). DORMANT = offloaded far creatures, still alive in region aggregates — they wake as you approach."
 		>
 			{world.objects.length} live{#if dormantCount > 0}&nbsp;· {dormantCount} dormant{/if}

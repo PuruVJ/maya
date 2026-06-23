@@ -23,7 +23,7 @@ class PerfScaler {
 	#cooldown = 240; // warm-up before the FIRST adjustment (~4 s) — rides out the load/mount storm (objects revealing +
 	// shaders compiling spike frame times) so DRS doesn't thrash the pixel-ratio (each change = a framebuffer resize =
 	// a grey flash) while the scene is still settling. After this it adapts normally.
-	#probeWait = 150; // frames between upward probes; BACKS OFF (×2, capped) each time a probe breaks budget + reverts
+	#probeWait = 300; // frames between upward probes; BACKS OFF (×2, capped) each time a probe breaks budget + reverts
 	#probedUp = false; // last change was an upward probe → if the very next adjustment is a drop, that probe FAILED
 	#PROBE_MAX = 3600; // ~60 s ceiling on the probe interval — at the converged edge, probing (and its flash) goes rare
 
@@ -58,20 +58,26 @@ class PerfScaler {
 
 		const refresh = 1 / this.#minDt; // achievable ceiling (Hz)
 		const budget = 1 / Math.min(this.target, refresh); // seconds/frame we're aiming to stay under
-		if (this.#ema > budget * 1.15 && this.dpr > this.#min) {
-			this.dpr = Math.max(this.#min, this.dpr - 0.09); // over budget → shed pixels fast (stays responsive)
-			this.#cooldown = 24;
+		// EVERY dpr change reallocates the framebuffer = a 1-frame flash (the transparent canvas blinks the CSS sky
+		// through). So the goal is FEW changes: a WIDE deadband (hold between 0.9× and 1.25× budget) rides out normal
+		// frame-time jitter without touching dpr, and a proportional drop snaps a big overshoot down in ONE step
+		// instead of several. In a heavy region (e.g. 1400+ live objects) this settles at a dpr and stays put, so the
+		// flicker is a one-time settle, not the every-few-seconds strobe it was when the band was narrow (1.05–1.15).
+		const over = this.#ema / budget;
+		if (over > 1.25 && this.dpr > this.#min) {
+			const step = over > 1.6 ? 0.25 : 0.1; // way over → big single drop (fewer reallocs); mildly over → gentle
+			this.dpr = Math.max(this.#min, this.dpr - step);
+			this.#cooldown = 60; // hold ~1 s after a drop before re-evaluating — don't thrash while the load settles
 			// if this drop is undoing a probe we JUST made, that probe broke the budget → wait (much) longer before the
-			// next one. At the converged edge this pushes the probe interval out toward a minute, so the framebuffer
-			// realloc — and its 1-frame grey flash — stops happening every few seconds while you stand still.
+			// next one. At the converged edge this pushes the probe interval out toward a minute.
 			if (this.#probedUp) this.#probeWait = Math.min(this.#probeWait * 2, this.#PROBE_MAX);
 			this.#probedUp = false;
-		} else if (this.#ema < budget * 1.05 && this.dpr < this.#max) {
-			this.dpr = Math.min(this.#max, this.dpr + 0.06); // meeting it with room → probe crisper (revert-safe)
+		} else if (over < 0.9 && this.dpr < this.#max) {
+			this.dpr = Math.min(this.#max, this.dpr + 0.06); // comfortably under → probe crisper (revert-safe)
 			this.#cooldown = this.#probeWait; // backed-off interval → fewer probes → fewer resize flashes at steady state
 			this.#probedUp = true;
 		} else if (this.#probedUp) {
-			this.#probeWait = 150; // a probe HELD (no revert) → conditions are good; reset so real headroom is found fast
+			this.#probeWait = 300; // a probe HELD (no revert) → conditions are good; reset so real headroom is found fast
 			this.#probedUp = false;
 		}
 	}

@@ -21,6 +21,7 @@ interface MathGlue {
 	trees_near: (px: number, pz: number, reach: number) => Float64Array;
 	bushes_near: (px: number, pz: number, reach: number) => Float64Array;
 	migrate_weights: () => Float64Array;
+	fertile_windows: () => Float64Array;
 	gestation_secs: () => Float64Array;
 	kind_rh: (kind: string) => Float64Array;
 	terrain_height: (x: number, z: number) => number;
@@ -122,6 +123,13 @@ class WorldMath {
 	/** Per-kind MIGRATION weight from the sim, by Kind order [rabbit,cat,kangaroo,person,lion,dinosaur]. */
 	migrateWeights(): Float64Array | null {
 		return this.#call((g) => g.migrate_weights());
+	}
+
+	/** Per-kind female FERTILE WINDOW (seconds): maturity → menopause/old-age. Kind order
+	 *  [rabbit,cat,kangaroo,person,lion,dinosaur]. The HUD's TFR estimate multiplies the live per-female birth rate
+	 *  by this — using the sim's own breeding numbers, so the readout can't drift from the simulation. */
+	fertileWindows(): Float64Array | null {
+		return this.#call((g) => g.fertile_windows());
 	}
 
 	/** Per-kind GESTATION seconds by Kind order [rabbit,cat,kangaroo,person,lion,dinosaur] (prefer `personGestation`). */
