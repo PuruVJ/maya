@@ -45,6 +45,7 @@
 	import { agentManager } from '$lib/agents.svelte';
 	import { editor } from '$lib/editor.svelte';
 	import { playerState } from '$lib/playerState.svelte';
+	import { sim } from '$lib/sim';
 
 	// Inception-fold valley — ground rears up ahead/behind; smaller radius = tighter walls (before <Canvas>).
 	// 800 (was 450) gentles the fold so the far side/city stays low enough to read as land, not lift into the sky.
@@ -146,6 +147,49 @@
 				}
 				console.table(sites);
 				console.log('%c🏘️ Settlement gallery placed — teleport to a site with its goto(x, z) above.', 'font-weight:bold;font-size:13px');
+			};
+			// DEBUG: `await dumpState()` in the console → one JSON blob of all live + locally-stored state (player,
+			// world, nearby natural ponds, sim, clock, climate, local/sessionStorage, the IndexedDB world cache).
+			// Copied to the clipboard so it can be pasted verbatim. The single source of truth for diagnosing a bug.
+			(window as unknown as { dumpState: () => Promise<unknown> }).dumpState = async () => {
+				const r1 = (n: number) => Math.round(n * 10) / 10;
+				const byKind: Record<string, number> = {};
+				for (const o of world.objects) byKind[o.kind] = (byKind[o.kind] ?? 0) + 1;
+				const [px, pz] = [playerState.pos[0], playerState.pos[2]];
+				const flat = math.pondsNear(px, pz, 250);
+				const pondsNearPlayer: { x: number; z: number; r: number }[] = [];
+				if (flat) for (let k = 0; k < flat.length; k += 3) pondsNearPlayer.push({ x: r1(flat[k]), z: r1(flat[k + 1]), r: r1(flat[k + 2]) });
+				let live = 0;
+				agentManager.forEach(() => live++);
+				const dumpStore = (s: Storage) => Object.fromEntries(Array.from({ length: s.length }, (_, i) => [s.key(i)!, s.getItem(s.key(i)!)!]));
+				let cache: unknown = null;
+				try {
+					const w = await loadWorld();
+					cache = w ? { name: w.name, objects: w.objects.length, zones: w.zones?.length ?? 0, start: w.start } : null;
+				} catch (e) {
+					cache = `error: ${e}`;
+				}
+				const state = {
+					player: { pos: playerState.pos.map(r1), yaw: r1(playerState.yaw), state: playerState.state, grounded: playerState.grounded },
+					world: { name: world.name, ground: world.ground, sky: world.sky, objects: world.objects.length, byKind, zones: world.zones, paths: world.paths?.length ?? 0, terrain: world.terrain?.length ?? 0, start: world.start, regions: Object.keys(world.regions ?? {}).length },
+					pondsNearPlayer,
+					sim: { status: sim.status(), danger: r1(sim.danger()), liveAgents: live },
+					clock: { tick: clock.tick, rate: clock.rate, paused: clock.paused },
+					nature: { aridity: r1(nature.aridity) },
+					localStorage: dumpStore(localStorage),
+					sessionStorage: dumpStore(sessionStorage),
+					worldCache: cache
+				};
+				const json = JSON.stringify(state, null, 2);
+				console.log('%c=== dumpState ===', 'font-weight:bold;font-size:13px', state);
+				console.log(json);
+				try {
+					await navigator.clipboard.writeText(json);
+					console.log('%c✓ copied to clipboard — paste it to share', 'color:#4ade80');
+				} catch {
+					/* clipboard blocked → copy from the JSON log above */
+				}
+				return state;
 			};
 		}
 	});
