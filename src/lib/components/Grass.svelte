@@ -282,6 +282,9 @@
 	let lastTerrain = -1;
 	let lastZones = -1;
 	const GRASS_POND_R = 130; // feed natural ponds within this of the player into the grass carve/reed uniforms
+	// a pond's WATER MESH is an organic blob drawn out to size × waterEdgeFactor (≈0.80–1.03), so the bulges reach
+	// past the nominal radius. Cull grass (and seat the reed band) at the MAX edge or grass/reeds grow IN the bulges.
+	const WATER_EDGE = 1.05;
 	let lastPondSyncX = NaN; // re-sync the player-relative natural ponds when you walk this far
 	let lastPondSyncZ = NaN;
 	function syncWorldUniforms() {
@@ -294,16 +297,19 @@
 		let n = 0;
 		let wr = 0;
 		for (const z of world.zones ?? []) {
-			if (z.material === 'water' && wr < MAXWR) uniforms.uWater.value[wr++].set(z.pos[0], z.pos[2], z.size); // reed beds
+			const isWater = z.material === 'water';
+			// water carves + reeds out to the blob's MAX edge (×WATER_EDGE); other zones (path/plaza) use their size.
+			if (isWater && wr < MAXWR) uniforms.uWater.value[wr++].set(z.pos[0], z.pos[2], z.size * WATER_EDGE); // reed beds
 			if (n >= MAXZ || !SKIP.has(z.material)) continue;
-			uniforms.uSkip.value[n++].set(z.pos[0], z.pos[2], z.size);
+			uniforms.uSkip.value[n++].set(z.pos[0], z.pos[2], isWater ? z.size * WATER_EDGE : z.size);
 		}
 		// NATURAL ponds (procedural, player-relative) carve grass + grow a reed bank too — feed the nearby ones into
-		// the remaining slots so grass doesn't grow in the water. Re-synced as the player walks (see useTask below).
+		// the remaining slots so grass doesn't grow in the water (out to the blob's max edge). Re-synced as you walk.
 		const np = math.pondsNear(playerState.pos[0], playerState.pos[2], GRASS_POND_R);
 		if (np) for (let k = 0; k < np.length; k += 3) {
-			if (wr < MAXWR) uniforms.uWater.value[wr++].set(np[k], np[k + 1], np[k + 2]);
-			if (n < MAXZ) uniforms.uSkip.value[n++].set(np[k], np[k + 1], np[k + 2]);
+			const r = np[k + 2] * WATER_EDGE;
+			if (wr < MAXWR) uniforms.uWater.value[wr++].set(np[k], np[k + 1], r);
+			if (n < MAXZ) uniforms.uSkip.value[n++].set(np[k], np[k + 1], r);
 		}
 		uniforms.uSkipCount.value = n;
 		uniforms.uWaterCount.value = wr;
