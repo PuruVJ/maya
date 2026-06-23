@@ -154,11 +154,13 @@
 		const len = world.terrain.length;
 		const zl = world.zones?.length ?? 0; // re-scatter when zones/paths/SOLID objects change (a new lake/road/house clears its trees)
 		const pl = world.paths?.length ?? 0;
-		// count only SOLID objects (buildings/props/trees) — NOT creatures (they're excluded from the grid below).
-		// Using world.objects.length here re-scattered ~3000 trees on EVERY creature birth/death (a 10–15 ms hitch
-		// most frames while a herd breeds) for zero visual change. Counting solids only kills that freeze entirely.
+		// count only SOLID, FOREST-CLEARING objects (buildings/props) — NOT creatures, and NOT graves. Creatures
+		// were already excluded (re-scattering 3000 trees on every birth/death was a 10-15ms hitch for no visual
+		// change). GRAVES are added on EVERY death (tiny, cosmetic, don't meaningfully clear forest) → counting them
+		// re-scattered the whole forest every few seconds in a lively world → a periodic frame hitch the adaptive
+		// resolution turned into a visible flicker. Skip them here (a stray tree on a headstone is invisible anyway).
 		let ol = 0;
-		for (const o of world.objects) if (!CREATURES.has(o.kind)) ol++;
+		for (const o of world.objects) if (!CREATURES.has(o.kind) && o.kind !== 'grave') ol++;
 		if (pcx === lastCx && pcz === lastCz && len === lastLen && zl === lastZones && pl === lastPaths && ol === lastObjs) return;
 		lastCx = pcx;
 		lastCz = pcz;

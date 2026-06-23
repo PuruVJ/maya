@@ -118,14 +118,22 @@
 	function refreshPonds(px: number, pz: number): void {
 		const flat = rustPondsNear(px, pz, POND_RENDER_R);
 		if (!flat) return; // wasm not ready yet
+		// REUSE existing pond objects by id (stable identity) so an unchanged pond keeps the SAME object — otherwise
+		// each refresh hands Water/LakeFish a fresh `zone` prop and they rebuild (a flicker). Only reassign the array
+		// when the set actually changes (a pond entered/left the radius).
+		const byId = new Map(naturalPonds.map((z) => [z.id, z]));
 		const out: typeof naturalPonds = [];
+		let changed = false;
 		for (let k = 0; k < flat.length; k += 3) {
 			const x = flat[k]; // flat is [x, z, r] per pond
 			const z = flat[k + 1];
 			const r = flat[k + 2];
-			out.push({ id: `np${Math.round(x)}_${Math.round(z)}`, material: 'water', shape: 'blob', pos: [x, 0, z], size: r });
+			const id = `np${Math.round(x)}_${Math.round(z)}`;
+			const existing = byId.get(id);
+			if (existing) out.push(existing);
+			else ((changed = true), out.push({ id, material: 'water', shape: 'blob', pos: [x, 0, z], size: r }));
 		}
-		naturalPonds = out;
+		if (changed || out.length !== naturalPonds.length) naturalPonds = out; // only churn the array on a real change
 		lastPondX = px;
 		lastPondZ = pz;
 	}
