@@ -1807,6 +1807,10 @@ impl World {
                 continue; // still carrying
             }
             self.agents[i].pregnant = 0.0;
+            // POST-PARTUM recovery: stamp a fresh cooldown at DELIVERY (not just at conception). Gestation (≫ the
+            // cooldown) means the conception-time cooldown has long expired by birth, so without this she'd re-conceive
+            // the SAME tick she delivers → perpetually pregnant (user: "released 2 kids and is STILL pregnant, wtf").
+            self.agents[i].breed_cd = self.agents[i].breed_cd.max(BREED_COOLDOWN);
             let kind = self.agents[i].kind;
             let kc = kind as usize;
             let (mx, mz) = (self.agents[i].agent.x, self.agents[i].agent.z);
@@ -4406,6 +4410,29 @@ mod tests {
         let slain = w.events().chunks_exact(4).any(|c| c[0] == EV_SLAIN);
         assert!(slain, "a health-zero (combat) death emitted no EV_SLAIN — combat deaths are silent in the log");
         assert!(w.agents[lion].dead, "the fatally-wounded lion should be dead");
+    }
+
+    // SCENARIO (emergent · reproduction): a just-delivered mother is on a POST-PARTUM cooldown, not instantly fertile
+    // again. Guards the "released kids and is STILL pregnant" bug — gestation outlasts the conception-time cooldown,
+    // so without a delivery-time cooldown she re-conceives the same tick she gives birth (perpetually pregnant).
+    #[test]
+    fn a_mother_recovers_before_conceiving_again() {
+        let mut w = emergent_world();
+        w.set_player(1e4, 1e4);
+        let mom = spawn_kind(&mut w, Kind::Rabbit, 0.0, 0.0, 2); // even seed → female
+        w.agents[mom].age = w.agents[mom].lifespan * 0.4; // adult + fertile
+        w.agents[mom].pregnant = DT * 2.0; // about to deliver
+        w.agents[mom].unborn_gene = 1.0;
+        let mut delivered = false;
+        for t in 1..=10 {
+            w.tick_once(t);
+            if w.agents[mom].pregnant == 0.0 && !w.births().is_empty() {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered, "the mother should have delivered her litter");
+        assert!(w.agents[mom].breed_cd > 0.0, "a just-delivered mother must be on a post-partum cooldown, not instantly re-fertile");
     }
 
     // SCENARIO (emergent · JOBS close the loop): digging a well is only half the story — the dug well must actually
