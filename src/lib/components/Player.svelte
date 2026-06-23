@@ -78,7 +78,8 @@
 			px = s.x;
 			pz = s.z;
 			yaw = s.yaw;
-			py = heightAt(px, pz, world.terrain) + 1;
+			// restore the saved HEIGHT if present (resume mid-air), clamped to ≥ ground so terrain changes can't bury you
+			py = s.y != null ? Math.max(s.y, heightAt(px, pz, world.terrain) + 0.9) : heightAt(px, pz, world.terrain) + 1;
 			spawned = false; // re-teleport the kinematic body to here on the next frame
 		}
 	});

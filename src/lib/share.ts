@@ -12,7 +12,7 @@ const scaleOrZero = (s?: [number, number, number]) =>
 
 // compact positional pack — objects/zones/paths store [x,z] only; Y is re-derived on load
 type Live = Map<string, { x: number; z: number; dead: boolean; asleep: boolean; ageFrac?: number }>;
-type PlayerPos = { x: number; z: number; yaw: number };
+type PlayerPos = { x: number; z: number; yaw: number; y?: number };
 
 function pack(w: World, live?: Live, player?: PlayerPos) {
 	return {
@@ -22,7 +22,7 @@ function pack(w: World, live?: Live, player?: PlayerPos) {
 		s: w.sky,
 		sp: [r1(w.spawn[0]), r1(w.spawn[1]), r1(w.spawn[2])],
 		// where the player is standing right now → reopening the link drops you back here (handy on reload)
-		pl: player ? [r1(player.x), r1(player.z), r1(player.yaw)] : 0,
+		pl: player ? [r1(player.x), r1(player.z), r1(player.yaw), r1(player.y ?? 0)] : 0,
 		// 7th element = live-state flag (0 alive · 1 dead · 2 asleep); pos uses the live position if the agent
 		// has wandered (so a shared link reopens animals where they are now / as corpses)
 		o: w.objects.map((o) => {
@@ -52,7 +52,7 @@ function unpack(d: any): World {
 		ground: d.g ?? 'grass',
 		sky: d.s ?? 'day',
 		spawn: Array.isArray(d.sp) ? [d.sp[0], d.sp[1], d.sp[2]] : [0, 0, 0],
-		start: Array.isArray(d.pl) ? { x: d.pl[0], z: d.pl[1], yaw: d.pl[2] } : undefined,
+		start: Array.isArray(d.pl) ? { x: d.pl[0], z: d.pl[1], yaw: d.pl[2], y: typeof d.pl[3] === 'number' ? d.pl[3] : undefined } : undefined,
 		objects: (d.o ?? []).map((a: any[], i: number) => ({
 			id: 'o' + i.toString(36),
 			kind: a[0],

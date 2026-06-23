@@ -156,7 +156,7 @@
 	// animals are present (to capture their wandering/deaths). A static built city therefore re-encodes only
 	// when you change it, not every second. replaceState (no history spam); skipped when the hash is the same.
 	// the player's live pose → packed into a SHARE link (the Share button) so a shared world reopens where you stood
-	const playerPose = () => ({ x: playerState.pos[0], z: playerState.pos[2], yaw: playerState.yaw });
+	const playerPose = () => ({ x: playerState.pos[0], y: playerState.pos[1], z: playerState.pos[2], yaw: playerState.yaw });
 	// A save snapshot that captures the LIVE moment, not the placed-at spots: each creature's world-object pos is
 	// rewritten to where it ACTUALLY is now (so a reloaded world resumes mid-wander, not reset to spawn), dead ones
 	// are dropped (don't resurrect a corpse), and the player's pose rides along in `start` so you reopen standing
@@ -325,7 +325,8 @@
 		class="pointer-events-none fixed left-1/2 top-20 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-black/35 px-3 py-1 text-xs font-semibold text-white/85 backdrop-blur"
 	>
 		<span class="inline-block text-sm leading-none" style:transform="rotate({homeDeg}deg)">↑</span>
-		<span>home · {homeDist < 1000 ? Math.round(homeDist) + ' m' : (homeDist / 1000).toFixed(1) + ' km'}</span>
+		<!-- player world coordinates (the arrow still points home) -->
+		<span class="tabular-nums">{Math.round(playerState.pos[0])}, {Math.round(playerState.pos[2])}</span>
 	</div>
 {/if}
 
