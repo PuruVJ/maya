@@ -11,14 +11,25 @@
 	//
 	// The wasm loads eagerly + mandatorily; until it's ready the agents simply don't tick (no JS fallback — if
 	// the load fails they stay put and sim logs an error). Run `pnpm build:wasm` to produce the bundle.
-	import { useTask } from '@threlte/core';
+	import { useTask, useThrelte } from '@threlte/core';
 	import { clock, DT } from '$lib/clock';
 	import { sim } from '$lib/sim';
+	import { visibility } from '$lib/visibility.svelte';
 
 	sim.init(); // eager + mandatory; agents idle until it resolves
+	visibility.start(); // tab-away → pause (the gate below skips advancing; no dt accrues while hidden)
+
+	// PAUSE RENDERING when tabbed away: flip Threlte to manual render-mode (its auto-render task stops) and back to
+	// continuous on return, kicking one frame so the scene repaints immediately. The sim is frozen separately below.
+	const { renderMode, invalidate } = useThrelte();
+	$effect(() => {
+		renderMode.set(visibility.visible ? 'always' : 'manual');
+		if (visibility.visible) invalidate();
+	});
 
 	useTask((dt) => {
 		if (sim.status() !== 'ready') return; // wasm still loading (or failed) → don't advance the sim
+		if (!visibility.visible) return; // tabbed away → freeze the sim (no advance → no catch-up burst on return)
 		const n = clock.advance(dt);
 		for (let i = 0; i < n; i++) sim.step(DT);
 	});
