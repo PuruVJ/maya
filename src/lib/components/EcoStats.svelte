@@ -6,7 +6,7 @@
 	// living world is glanceable without staring at the numbers.
 	import { onMount } from 'svelte';
 	import { agentManager } from '$lib/agents.svelte';
-	import { rustBehaviorIsEmergent, setRustBehaviorMode, rustAgeMeans } from '$lib/rustSim';
+	import { sim } from '$lib/sim';
 	import { nature } from '$lib/nature.svelte';
 	import { math } from '$lib/math';
 	import type { World } from '$lib/world';
@@ -17,9 +17,9 @@
 
 	// the decision BRAIN driving the agents (docs/emergent-behavior.md): Emergent (needs+primitives+utility, the
 	// default) vs Manual (the hand-coded sim). A dev A/B toggle — flip it live in the same world to compare.
-	let emergent = $state(rustBehaviorIsEmergent());
+	let emergent = $state(sim.isEmergent());
 	function toggleBrain() {
-		emergent = setRustBehaviorMode(!emergent);
+		emergent = sim.setEmergent(!emergent);
 	}
 
 	// the world — so the readout includes DORMANT region aggregates (streaming-offloaded creatures are still alive,
@@ -108,7 +108,7 @@
 			sexF = f;
 			sexM = mle;
 			liveByKind = { ...c }; // snapshot LIVE counts (with sex) before the dormant aggregates are folded in below
-			ageMeans = rustAgeMeans(); // mean age fraction per kind (live) → the age readout below
+			ageMeans = sim.ageMeans(); // mean age fraction per kind (live) → the age readout below
 			// structures (near live + dormant statics) by kind, and settlement count (clumps of ≥3 buildings)
 			const st: Record<string, number> = {};
 			const homes: [number, number][] = [];

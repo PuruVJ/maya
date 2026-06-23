@@ -10,16 +10,16 @@
 	// stays smooth at the display rate despite the 30 Hz sim.
 	//
 	// The wasm loads eagerly + mandatorily; until it's ready the agents simply don't tick (no JS fallback — if
-	// the load fails they stay put and rustSim logs an error). Run `pnpm build:wasm` to produce the bundle.
+	// the load fails they stay put and sim logs an error). Run `pnpm build:wasm` to produce the bundle.
 	import { useTask } from '@threlte/core';
 	import { clock, DT } from '$lib/clock';
-	import { initRustSim, rustStatus, tickRust } from '$lib/rustSim';
+	import { sim } from '$lib/sim';
 
-	initRustSim(); // eager + mandatory; agents idle until it resolves
+	sim.init(); // eager + mandatory; agents idle until it resolves
 
 	useTask((dt) => {
-		if (rustStatus() !== 'ready') return; // wasm still loading (or failed) → don't advance the sim
+		if (sim.status() !== 'ready') return; // wasm still loading (or failed) → don't advance the sim
 		const n = clock.advance(dt);
-		for (let i = 0; i < n; i++) tickRust(DT);
+		for (let i = 0; i < n; i++) sim.step(DT);
 	});
 </script>

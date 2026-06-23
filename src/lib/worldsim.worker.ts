@@ -2,7 +2,7 @@
 /**
  * The Rust/WASM world-sim, running OFF the main thread (perf foundation 2/3 — see the `perf-foundation-plan`
  * memory). The engine is unchanged; we just moved WHERE it runs: the wasm + the `Sim` live here, in a dedicated
- * worker, so stepping 1000 agents no longer steals frame time from render. The main thread (rustSim.ts) drives
+ * worker, so stepping 1000 agents no longer steals frame time from render. The main thread (sim.ts) drives
  * this with one `tick` message per sim tick and renders the snapshot we post back.
  *
  * The main thread owns a stable-slot free-list. It tells us which slot to retire and which slot a new spawn

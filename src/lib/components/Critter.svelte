@@ -100,10 +100,10 @@
 		if (companion) m.companion = true; // manager won't scare it off, and it can't be your own pet's prey-panic
 		if (obj?.dead) m.dead = true; // restore live state from a shared link (a corpse stays a corpse)
 		else if (obj?.asleep) m.asleep = true;
-		if (obj?.juvenile) m.juvenile = true; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown
-		if (obj?.gene != null) m.gene = obj.gene; // inherited vigor → rustSim scales its speed at spawn (genetics)
-		if (obj?.pfamA != null) ((m.pfamA = obj.pfamA), (m.pfamB = obj.pfamB)); // parentage → rustSim sets lineage (incest avoidance)
-		if (obj?.genome) m.genome = obj.genome; // inherited behaviour genome → rustSim set_genome at spawn (evolution)
+		if (obj?.juvenile) m.juvenile = true; // a Rust-bred newborn → sim stamps a maturation breed-cooldown
+		if (obj?.gene != null) m.gene = obj.gene; // inherited vigor → sim scales its speed at spawn (genetics)
+		if (obj?.pfamA != null) ((m.pfamA = obj.pfamA), (m.pfamB = obj.pfamB)); // parentage → sim sets lineage (incest avoidance)
+		if (obj?.genome) m.genome = obj.genome; // inherited behaviour genome → sim set_genome at spawn (evolution)
 		return m;
 	});
 	$effect(() => {

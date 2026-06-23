@@ -1,6 +1,6 @@
 // Per-agent RENDER STATE + secondary-motion helper for ambient critters (cats) and NPCs (people). The
 // actual locomotion sim (the Reynolds steering + behaviour FSM that used to live here) is now the Rust/WASM
-// core (crates/worldsim) — see the `rust-owns-all-compute` memory. rustSim writes the Rust read-back
+// core (crates/worldsim) — see the `rust-owns-all-compute` memory. sim writes the Rust read-back
 // (x/z/heading, + derived speed/turnRate) onto each Agent every tick; this class just HOLDS that pose and
 // interpolates it to the display rate. Pure logic, no Svelte/three — components own the meshes.
 
@@ -50,7 +50,7 @@ export interface AgentOpts {
 }
 
 /**
- * An agent's pose on the XZ plane, plus render interpolation. The Rust sim owns the motion: rustSim writes
+ * An agent's pose on the XZ plane, plus render interpolation. The Rust sim owns the motion: sim writes
  * `x`/`z`/`heading` from the WASM read-back each tick and derives `speed`/`turnRate` from the per-tick delta;
  * the components read `rx`/`rz`/`rh` (interpolated), `gaitRate()`, `turnRate`, `behavior` and `progress` to
  * drive locomotion. `AgentOpts` is still passed at spawn (maxSpeed scales the gait; the rest mirror the Rust
@@ -60,8 +60,8 @@ export class Agent {
 	x: number;
 	z: number;
 	heading: number; // facing angle; model nose is +Z, so group.rotation.y = heading
-	speed = 0; // planar speed (m/s) — derived by rustSim each tick → drives gaitRate()
-	turnRate = 0; // signed yaw rate (rad/s) → banking / tail lag — derived by rustSim each tick
+	speed = 0; // planar speed (m/s) — derived by sim each tick → drives gaitRate()
+	turnRate = 0; // signed yaw rate (rad/s) → banking / tail lag — derived by sim each tick
 
 	// RENDER INTERPOLATION — the sim steps at a fixed 30 Hz, but renderers refresh at the display rate.
 	// savePrev() snapshots the pre-step pose; interpolate(alpha) blends prev→current by the clock's sub-tick
@@ -76,9 +76,9 @@ export class Agent {
 	hx: number; // home / leash centre (companion-pet follow target — the Rust port reads this in Phase C)
 	hz: number;
 
-	behavior: Behavior = 'wander'; // current idle-FSM behaviour — set each tick by rustSim from the Rust read-back
+	behavior: Behavior = 'wander'; // current idle-FSM behaviour — set each tick by sim from the Rust read-back
 	progress = 0; // 0..1 through that behaviour (Rust read-back) → drives groom cycles / pounce arcs / lookAround
-	appeared = false; // false until the FIRST sim snapshot lands → rustSim zeroes that frame's delta so a freshly
+	appeared = false; // false until the FIRST sim snapshot lands → sim zeroes that frame's delta so a freshly
 	// spawned agent doesn't show a bogus speed/turn spike (random ctor heading → sim heading) and fall over on spawn.
 
 	readonly maxSpeed: number; // scales gaitRate()

@@ -1,15 +1,15 @@
 // Registry + per-agent RENDER STATE for all ambient agents (critters + people). The SIMULATION is now the
-// headless Rust/WASM core (crates/worldsim), driven via rustSim.ts — this file no longer simulates anything.
+// headless Rust/WASM core (crates/worldsim), driven via sim.ts — this file no longer simulates anything.
 // The old JS food-chain + Reynolds-flocking tick (~600 lines) was DELETED in the JS→Rust migration (see the
 // `rust-owns-all-compute` memory + the migration roadmap in the work-queue): Rust owns ALL compute; JS keeps
 // only the render-side bookkeeping the Rust read-back doesn't cover.
 //
 // What remains here:
-//  • the agent REGISTRY — components register/unregister; the renderers + rustSim iterate it (forEach);
+//  • the agent REGISTRY — components register/unregister; the renderers + sim iterate it (forEach);
 //  • the ManagedAgent DATA SHAPE + its seeded factory `makeManaged` (Rust mirrors transforms/flags onto these,
 //    so the renderers read `m.agent.rx/rz/rh` + `m.dead/m.asleep` exactly as before);
 //  • the cheap per-frame VIEW passes Rust doesn't produce — LOD tiers + the nearest-N shadow budget
-//    (`assignPerfFlags`, called by rustSim after each read-back).
+//    (`assignPerfFlags`, called by sim after each read-back).
 // Deliberately NOT reactive in the hot path — these objects are mutated 60×/s; making them $state would cause
 // render storms. See docs/npc-movement.md.
 import { Agent, type Behavior } from './steering';
@@ -70,7 +70,7 @@ const MESH_BUDGET = 150;
 // CORPSE DECAY: now that reproduction makes the world cycle life→death→corpse forever, bodies would pile up
 // without bound (scene graph + the saved share-link both grow). A corpse lingers (you wanted to SEE dead
 // bodies) then, in its final seconds, sinks into the ground and is reaped — its world-object is removed, which
-// unmounts the renderer and despawns it from the Rust sim (see Scene's reaper + rustSim's unregister→despawn).
+// unmounts the renderer and despawns it from the Rust sim (see Scene's reaper + sim's unregister→despawn).
 export const CORPSE_DECAY_SECS = 62; // a body lingers this long before it's gone
 export const CORPSE_SINK_SECS = 6; // …sinking into the earth over the last few of those seconds
 
@@ -100,7 +100,7 @@ export interface ManagedAgent {
 	pregnant: boolean; // carrying a litter (mirrored from Rust) → the view shows a rounded belly
 	guardian: boolean; // his mate is expecting (mirrored from Rust) → the view arms him with a machete
 	drinking: boolean; // lapping at a water edge (mirrored from Rust) → the view dips its head
-	juvenile?: boolean; // a Rust-bred newborn → rustSim stamps a maturation breed-cooldown when it spawns into the sim
+	juvenile?: boolean; // a Rust-bred newborn → sim stamps a maturation breed-cooldown when it spawns into the sim
 	gene?: number; // inherited VIGOR (≈1.0; scales speed) — ferried from the Rust birth → set on the sim agent at spawn
 	pfamA?: number; // mother's lineage id — ferried from the Rust birth → set_lineage at spawn (incest avoidance)
 	pfamB?: number; // father's lineage id
@@ -152,7 +152,7 @@ class AgentManager {
 	}
 
 	/** Recompute per-agent LOD tier + the nearest-N shadow budget from the current positions. The Rust sim
-	 *  produces transforms but not these view flags, so rustSim calls this after each read-back (cheap, no alloc
+	 *  produces transforms but not these view flags, so sim calls this after each read-back (cheap, no alloc
 	 *  — reuses #shadowScratch) to keep impostor/shadow perf right. */
 	assignPerfFlags(px: number, pz: number): void {
 		for (const m of this.#agents) {
@@ -193,7 +193,7 @@ class AgentManager {
 		this.#agents.delete(m);
 	}
 
-	/** Is this agent still registered? rustSim reconciles its WASM roster against this — an agent that
+	/** Is this agent still registered? sim reconciles its WASM roster against this — an agent that
 	 *  unregistered (its object was removed / the world cleared) is despawned from the Rust sim, not left a ghost. */
 	has(m: ManagedAgent): boolean {
 		return this.#agents.has(m);

@@ -37,10 +37,9 @@
 	import { SKY_FOG, kindDef } from '$lib/kinds';
 	import { forEachTreeNear, treeRadius, onPath } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
-	import { drainBirths, drainBuilds, drainWells, rustTick } from '$lib/rustSim';
+	import { sim } from '$lib/sim';
 	import { math } from '$lib/math';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
-	import { setRustObstacles, setRustPopScale, setRustRefuges, setRustWater, setRustAridity } from '$lib/rustSim';
 	import { worldAreaScale } from '$lib/world';
 	import { streamRegions, regionOf, fastForwardDormant } from '$lib/streaming';
 	import { playerState } from '$lib/playerState.svelte';
@@ -156,7 +155,7 @@
 		});
 		lastTreeFeedX = px;
 		lastTreeFeedZ = pz;
-		setRustObstacles([...baseObstacles, ...trees]); // the Rust sim resolves these solids (push-out, no tunnelling)
+		sim.setObstacles([...baseObstacles, ...trees]); // the Rust sim resolves these solids (push-out, no tunnelling)
 	}
 
 	// DRINK SOURCES = natural ponds + any WELLS settlers have dug. Re-run whenever a well is placed (emergent jobs),
@@ -164,7 +163,7 @@
 	function feedWaterSources(): void {
 		const ponds = (world.zones ?? []).filter((z) => z.material === 'water').map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
 		const wells = world.objects.filter((o) => o.kind === 'well').map((o) => ({ x: o.pos[0], z: o.pos[2], r: 3 }));
-		setRustWater([...ponds, ...wells]);
+		sim.setWater([...ponds, ...wells]);
 	}
 
 	$effect(() => {
@@ -198,7 +197,7 @@
 		feedWaterSources(); // ponds + settler-dug WELLS -> the sim drink sources (re-runs on each new well)
 		// REFUGES (flee-to-safety): the houses are where a threatened woman/child runs for cover (and where the
 		// guard men cluster). Feed their centres to the Rust sim; it changes only when a building is raised/removed.
-		setRustRefuges(world.objects.filter((o) => BUILDING_KINDS.has(o.kind)).map((o) => ({ x: o.pos[0], z: o.pos[2] })));
+		sim.setRefuges(world.objects.filter((o) => BUILDING_KINDS.has(o.kind)).map((o) => ({ x: o.pos[0], z: o.pos[2] })));
 	});
 
 	// Reveal objects a few per frame so a big batch ("add 120 cats") mounts gradually instead of all at once
@@ -294,14 +293,14 @@
 	useTask((dt) => {
 		// REPRODUCTION: Rust bred new animals → turn each into a world-object (a baby of that kind), which mounts
 		// its renderer + spawns into the sim (as a maturing juvenile). The per-kind cap keeps this bounded.
-		const babies = drainBirths();
+		const babies = sim.drainBirths();
 		for (const b of babies) {
 			world.objects.push({ id: babyPrefix + babyN++, kind: b.kind, pos: [b.x, 0, b.z], juvenile: true, gene: b.gene, pfamA: b.pfamA, pfamB: b.pfamB, genome: b.genome });
 		}
 
 		// EMERGENT CITIES: place the houses settlers raised this frame. Snap to an 8 m grid (→ aligned blocks),
 		// skip an already-occupied plot, and stop at HOUSE_CAP so a town grows but never sprawls without bound.
-		const builds = drainBuilds();
+		const builds = sim.drainBuilds();
 		if (builds.length) {
 			let houses = 0;
 			for (const o of world.objects) if (BUILDING_KINDS.has(o.kind)) houses++;
@@ -347,7 +346,7 @@
 		// EMERGENT WELLS (jobs): an industrious settler with no water in reach dug one → place it as a `well` object
 		// AND register it as a new drink source (feedWaterSources), so life can now slake thirst there and the
 		// settlement grows around the water it made. Dedup so a cluster of diggers makes ONE well, not a stack.
-		const wells = drainWells();
+		const wells = sim.drainWells();
 		if (wells.length) {
 			let placed = 0;
 			for (const wl of wells) {
@@ -414,7 +413,7 @@
 		if (restockT >= RESTOCK_EVERY) {
 			restockT = 0;
 			// feed the world's AREA to the sim → prey caps scale with the (growing) world/city; predators follow prey
-			setRustPopScale(worldAreaScale(world.objects));
+			sim.setPopScale(worldAreaScale(world.objects));
 			const live: Record<string, number> = {};
 			const geneSum: Record<string, number> = {};
 			let allGene = 0;
@@ -547,7 +546,7 @@
 			});
 			if (world.regions) for (const key in world.regions) for (const k in world.regions[key].counts) pop += world.regions[key].counts[k];
 			const c = nature.directClimate(pop);
-			setRustAridity(c.aridity);
+			sim.setAridity(c.aridity);
 			if (c.banner) nature.announce(c.banner);
 		}
 
@@ -598,11 +597,11 @@
 		const rkey = rcx + ',' + rcz;
 		if (rkey !== lastRegion) {
 			lastRegion = rkey;
-			streamRegions(world, px, pz, rustTick());
+			streamRegions(world, px, pz, sim.tick());
 		}
 		// WORLD PULSE: every ~10 s (300 sim ticks @30 Hz), fast-forward EVERY dormant region to now so the far world
 		// keeps living (grows toward carrying capacity + evolves) instead of freezing until visited. Cheap closed-form.
-		const simTick = rustTick();
+		const simTick = sim.tick();
 		if (simTick - lastPulseTick > 300) {
 			lastPulseTick = simTick;
 			fastForwardDormant(world, simTick);

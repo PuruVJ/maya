@@ -4,7 +4,7 @@
 	// heart SDF in the fragment shader — no assets, no per-heart objects. Decorative; not saved/shared.
 	import { T, useTask } from '@threlte/core';
 	import * as THREE from 'three';
-	import { drainLoves } from '$lib/rustSim';
+	import { sim } from '$lib/sim';
 	import { heightAt } from '$lib/terrain';
 	import type { World } from '$lib/world';
 
@@ -67,7 +67,7 @@
 	let next = 0; // round-robin slot cursor
 	useTask((dt) => {
 		uniforms.uTime.value += dt;
-		const loves = drainLoves();
+		const loves = sim.drainLoves();
 		if (loves.length === 0) return;
 		for (const lv of loves) {
 			const s = next;
