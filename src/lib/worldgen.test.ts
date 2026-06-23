@@ -193,7 +193,7 @@ const opAddEq = (g: Op, r: Op, where: string) => {
 	if (g.op !== 'add' || r.op !== 'add') { expect(g.op, `${where} op`).toBe(r.op); return; }
 	expect(g.kind, `${where} kind`).toBe(r.kind);
 	for (let k = 0; k < 3; k++) expect(Math.abs((g.pos![k]) - (r.pos![k])), `${where} pos[${k}]`).toBeLessThan(GEN_EPS);
-	expect(g.scale![0], `${where} scale`).toBeCloseTo(r.scale![0], 6);
+	expect(g.scale?.[0] ?? 1, `${where} scale`).toBeCloseTo(r.scale?.[0] ?? 1, 6);
 	expect(g.rot ?? 0, `${where} rot`).toBeCloseTo(r.rot ?? 0, 4);
 };
 
@@ -248,4 +248,139 @@ describe('forest/lake generator parity (JS reference ↔ Rust port)', () => {
 		expect(a.material).toBe(b.material);
 		expect(a.size).toBeCloseTo(b.size!, 9);
 	});
+});
+
+// ── REFERENCE city (verbatim from the pre-port city.ts cityOps) — the spec the Rust port must match ──
+const BUILDINGS = ['house', 'cabin', 'tower'];
+const WALL_TONES = ['#d2b48c', '#c9a978', '#be9d72', '#cdb389', '#b89a86', '#c2a15f', '#a98c63'];
+const STONE_TONES = ['#b7b2a8', '#adb0b3', '#c1bcb0', '#a8a59c'];
+const DISTRICTS = [
+	{ towerChance: 0.3, h: [1.5, 2.2], w: [1.0, 1.25], tones: STONE_TONES },
+	{ towerChance: 0.1, h: [1.1, 1.6], w: [0.95, 1.2], tones: WALL_TONES },
+	{ towerChance: 0.03, h: [0.85, 1.15], w: [0.85, 1.05], tones: WALL_TONES }
+];
+const TAU = Math.PI * 2;
+const districtFor = (ring: number) => DISTRICTS[Math.min(ring, DISTRICTS.length - 1)];
+const lerp = (r: number[], t: number) => r[0] + (r[1] - r[0]) * t;
+const isBuilding = (k: string) => k === 'house' || k === 'cabin' || k === 'tower';
+function refCity(world: World, player: Player): Op[] {
+	const ops: Op[] = [];
+	const fx = Math.sin(player.yaw), fz = -Math.cos(player.yaw);
+	const tx = player.pos[0] + fx * 16, tz = player.pos[2] + fz * 16;
+	const near = world.objects.filter((o) => isBuilding(o.kind) && Math.hypot(o.pos[0] - tx, o.pos[2] - tz) < 45);
+	let cx: number, cz: number;
+	if (near.length) {
+		cx = near.reduce((s, o) => s + o.pos[0], 0) / near.length;
+		cz = near.reduce((s, o) => s + o.pos[2], 0) / near.length;
+	} else { cx = Math.round(tx / 2) * 2; cz = Math.round(tz / 2) * 2; }
+	let maxR = 0;
+	for (const o of near) { const d = Math.hypot(o.pos[0] - cx, o.pos[2] - cz); if (d > maxR) maxR = d; }
+	const RING_GAP = 16;
+	const ringR = near.length ? maxR + RING_GAP : 16;
+	const ring = near.length ? Math.round(maxR / RING_GAP) : 0;
+	const SPOKES = 6, ROAD_W = 4;
+	const edge = ringR + 8;
+	for (const p of world.paths ?? []) if (Math.hypot(p.from[0] - cx, p.from[2] - cz) < 6) ops.push({ op: 'remove', id: p.id });
+	for (const z of world.zones ?? []) if (z.material === 'plaza' && Math.hypot(z.pos[0] - cx, z.pos[2] - cz) < 10) ops.push({ op: 'remove', id: z.id });
+	if (!inWater(world.zones, cx, cz)) ops.push({ op: 'addZone', material: 'plaza', shape: 'rect', pos: [cx, 0, cz], size: Math.min(15, 6 + ring * 2) });
+	const spokeAng: number[] = [];
+	for (let s = 0; s < SPOKES; s++) {
+		const ang = (s / SPOKES) * TAU + 0.26;
+		spokeAng.push(ang);
+		ops.push({ op: 'addPath', material: 'path', fromPos: [cx, 0, cz], toPos: [cx + Math.cos(ang) * edge, 0, cz + Math.sin(ang) * edge], width: ROAD_W });
+		const off = ROAD_W / 2 + 0.6;
+		const lx = cx + Math.cos(ang) * ringR - Math.sin(ang) * off;
+		const lz = cz + Math.sin(ang) * ringR + Math.cos(ang) * off;
+		if (!inWater(world.zones, lx, lz)) ops.push({ op: 'add', kind: 'lamp', pos: [lx, 0, lz] });
+	}
+	const spacing = 13 + ring * 3;
+	const count = Math.max(5, Math.min(30, Math.round((TAU * ringR) / spacing)));
+	const district = districtFor(ring);
+	const clearAng = Math.min(0.26, (ROAD_W / 2 + 2) / ringR);
+	const SECTOR = TAU / SPOKES;
+	for (let i = 0; i < count; i++) {
+		const a = (i / count) * TAU + ring * 0.4 + 0.13;
+		let onRoad = false;
+		for (const sa of spokeAng) { const da = Math.abs(((((a - sa) % TAU) + TAU + Math.PI) % TAU) - Math.PI); if (da < clearAng) onRoad = true; }
+		if (onRoad) continue;
+		const jr = ringR + (HASH1(ring * 31 + i * 7) - 0.5) * RING_GAP * 0.4;
+		const x = cx + Math.cos(a) * jr, z = cz + Math.sin(a) * jr;
+		if (inWater(world.zones, x, z)) continue;
+		const sector = Math.floor(((((a - 0.26) % TAU) + TAU) % TAU) / SECTOR);
+		const bSeed = ring * 23 + sector * 7;
+		const towerBlock = HASH1(bSeed + 11) < district.towerChance;
+		const blockTone = district.tones[Math.floor(HASH1(bSeed + 3) * district.tones.length)];
+		const wBase = lerp(district.w, HASH1(bSeed + 5));
+		const hBase = lerp(district.h, HASH1(bSeed + 7));
+		const seed = i + ring * 17;
+		const kind = towerBlock ? 'tower' : BUILDINGS[i % 2];
+		const wide = wBase * (0.92 + HASH1(seed) * 0.16);
+		const tall = hBase * (0.9 + HASH1(seed + 5) * 0.2);
+		const rotDeg = (Math.atan2(cx - x, cz - z) * 180) / Math.PI + (HASH1(seed + 9) - 0.5) * 16;
+		const color = kind === 'tower' ? undefined : blockTone;
+		ops.push({ op: 'add', kind, pos: [x, 0, z], rot: rotDeg, scale: [wide, tall, wide], color });
+	}
+	return ops;
+}
+
+// generic op comparator (covers remove / addZone / addPath / add) with an epsilon on hash-driven coords
+function opEq(g: Op, r: Op, where: string) {
+	expect(g.op, `${where} op`).toBe(r.op);
+	if (r.op === 'remove' && g.op === 'remove') { expect(g.id, `${where} id`).toBe(r.id); return; }
+	if (r.op === 'addZone' && g.op === 'addZone') {
+		expect(g.material).toBe(r.material); expect(g.shape).toBe(r.shape);
+		for (let k = 0; k < 3; k++) expect(Math.abs(g.pos![k] - r.pos![k]), `${where} pos[${k}]`).toBeLessThan(GEN_EPS);
+		expect(g.size!, `${where} size`).toBeCloseTo(r.size!, 6); return;
+	}
+	if (r.op === 'addPath' && g.op === 'addPath') {
+		expect(g.material).toBe(r.material); expect(g.width).toBe(r.width);
+		for (let k = 0; k < 3; k++) {
+			expect(Math.abs(g.fromPos![k] - r.fromPos![k]), `${where} from[${k}]`).toBeLessThan(GEN_EPS);
+			expect(Math.abs(g.toPos![k] - r.toPos![k]), `${where} to[${k}]`).toBeLessThan(GEN_EPS);
+		}
+		return;
+	}
+	if (r.op === 'add' && g.op === 'add') {
+		opAddEq(g, r, where);
+		expect(g.color, `${where} color`).toBe(r.color);
+	}
+}
+
+describe('city generator parity (JS reference ↔ Rust port)', () => {
+	beforeAll(async () => { await math.init(); });
+
+	const bldg = (id: string, kind: string, x: number, z: number) => ({ id, kind, pos: [x, 0, z] }) as WorldObject;
+	const cluster = (cx: number, cz: number) =>
+		[bldg('a', 'house', cx - 8, cz), bldg('b', 'cabin', cx + 7, cz - 3), bldg('c', 'house', cx, cz + 9), bldg('d', 'tower', cx + 4, cz + 6), bldg('e', 'cabin', cx - 5, cz - 7), bldg('f', 'house', cx + 10, cz + 2)];
+
+	const cases: { name: string; world: World; player: Player }[] = [
+		{ name: 'fresh city, positive coords', world: mkWorld(), player: { pos: [20, 0, 30], yaw: 0.5 } },
+		{ name: 'fresh city, NEGATIVE coords (js_round trap)', world: mkWorld(), player: { pos: [-7, 0, -13], yaw: 2.3 } },
+		{
+			name: 'grow existing city + remove old plaza & spokes',
+			world: mkWorld(
+				cluster(0, -16),
+				[{ id: 'z0', material: 'plaza', pos: [0, 0, -16], size: 6 }] as World['zones']
+			),
+			player: { pos: [0, 0, 0], yaw: 0 }
+		},
+		{
+			name: 'city beside water (cull)',
+			world: mkWorld(cluster(0, -16), [{ id: 'z0', material: 'water', pos: [10, 0, -16], size: 14 }] as World['zones']),
+			player: { pos: [0, 0, 0], yaw: 0 }
+		}
+	];
+
+	for (const { name, world, player } of cases) {
+		it(`city_ops matches the reference — ${name}`, () => {
+			// the grow case also needs a centre-anchored path to exercise spoke removal
+			if (name.startsWith('grow')) world.paths = [{ id: 'p9', material: 'path', from: [0, 0, -16], to: [40, 0, -16], width: 4 }] as World['paths'];
+			const ref = refCity(world, player);
+			const got = math.cityOps(JSON.stringify(world), player.pos[0], player.pos[2], player.yaw);
+			expect(got, 'wasm cityOps').not.toBeNull();
+			if (!got) return;
+			expect(got.length, `${name} op count`).toBe(ref.length);
+			ref.forEach((r, i) => opEq(got[i], r, `${name} #${i}`));
+		});
+	}
 });

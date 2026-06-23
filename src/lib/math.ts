@@ -31,6 +31,7 @@ interface MathGlue {
 	settlement_plan: (cx: number, cz: number, size: string, seed: number, id_prefix: string) => string;
 	forest_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
 	lake_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
+	city_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
 }
 
 class WorldMath {
@@ -171,6 +172,11 @@ class WorldMath {
 	/** LAKE generator — engine Ops that dig/grow a pond ahead of the player. Reads the world DOM (JSON). */
 	lakeOps(worldJson: string, px: number, pz: number, yaw: number): Op[] | null {
 		return this.#call((g) => JSON.parse(g.lake_ops(worldJson, px, pz, yaw)) as Op[]);
+	}
+
+	/** CITY generator — engine Ops that build/grow a concentric district-zoned city. Reads the world DOM (JSON). */
+	cityOps(worldJson: string, px: number, pz: number, yaw: number): Op[] | null {
+		return this.#call((g) => JSON.parse(g.city_ops(worldJson, px, pz, yaw)) as Op[]);
 	}
 
 	/** Closed-form VIGOR drift for a dormant region over `dtSec` away (Rust). Falls back to the unchanged gene. */

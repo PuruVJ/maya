@@ -216,6 +216,14 @@ mod wasm_api {
         crate::worldgen::lake_ops(&world, px, pz, yaw).dump()
     }
 
+    /// CITY generator — builds/grows the next concentric ring of a district-zoned city ahead of the player. Reads
+    /// the world DOM (objects + paths + zones), returns an ops JSON array. Ported from city.ts cityOps.
+    #[wasm_bindgen]
+    pub fn city_ops(world_json: &str, px: f64, pz: f64, yaw: f64) -> String {
+        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        crate::worldgen::city_ops(&world, px, pz, yaw).dump()
+    }
+
     // ───────────────────────── the agent-sim bridge ─────────────────────────
     // One `Sim` per world. JS spawns agents (by kind-code + seedId), drives it with `step(dt)` once per frame
     // (the Rust clock sub-steps to fixed DT internally), and reads transforms back as typed-array VIEWS over
