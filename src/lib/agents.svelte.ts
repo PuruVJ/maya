@@ -105,6 +105,7 @@ export interface ManagedAgent {
 	pfamA?: number; // mother's lineage id — ferried from the Rust birth → set_lineage at spawn (incest avoidance)
 	pfamB?: number; // father's lineage id
 	genome?: number[]; // inherited behaviour genome (5 weights) — ferried from the Rust birth → set_genome at spawn
+	ageFrac?: number; // 0..1 life fraction — mirrored from the sim each frame; on a SAVED agent, set_age restores it at spawn
 }
 
 /** Build a fully-seeded managed agent from its kind (so components don't repeat the eco wiring). The Rust sim
@@ -206,11 +207,11 @@ class AgentManager {
 
 	/** Current LIVE state of every PLACED animal, keyed by its world-object id → merged into the share link
 	 *  so a creature that wandered off / died reopens exactly there. (Ambient ones with no objId are skipped.) */
-	liveSnapshot(): Map<string, { x: number; z: number; dead: boolean; asleep: boolean }> {
-		const out = new Map<string, { x: number; z: number; dead: boolean; asleep: boolean }>();
+	liveSnapshot(): Map<string, { x: number; z: number; dead: boolean; asleep: boolean; ageFrac?: number }> {
+		const out = new Map<string, { x: number; z: number; dead: boolean; asleep: boolean; ageFrac?: number }>();
 		for (const m of this.#agents) {
 			if (!m.objId) continue;
-			out.set(m.objId, { x: m.agent.x, z: m.agent.z, dead: m.dead, asleep: m.asleep });
+			out.set(m.objId, { x: m.agent.x, z: m.agent.z, dead: m.dead, asleep: m.asleep, ageFrac: m.ageFrac });
 		}
 		return out;
 	}

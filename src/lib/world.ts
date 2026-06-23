@@ -19,6 +19,7 @@ export interface WorldObject {
 	pfamA?: number; // mother's lineage id (from the Rust birth) → set on the sim agent at spawn for incest avoidance
 	pfamB?: number; // father's lineage id
 	genome?: number[]; // inherited behaviour genome (5 weights, from the Rust birth) → set on the sim agent at spawn
+	ageFrac?: number; // 0..1 life fraction — saved into the share link so a reload restores exact age (adults stay adult)
 	keep?: boolean; // PLAYER/LLM-placed → never reclaimed by habitation decay (only emergent NPC homes can rot away)
 }
 

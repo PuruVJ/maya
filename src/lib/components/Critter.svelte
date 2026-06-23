@@ -104,6 +104,7 @@
 		if (obj?.gene != null) m.gene = obj.gene; // inherited vigor → sim scales its speed at spawn (genetics)
 		if (obj?.pfamA != null) ((m.pfamA = obj.pfamA), (m.pfamB = obj.pfamB)); // parentage → sim sets lineage (incest avoidance)
 		if (obj?.genome) m.genome = obj.genome; // inherited behaviour genome → sim set_genome at spawn (evolution)
+		if (obj?.ageFrac != null) m.ageFrac = obj.ageFrac; // restore exact age → sim set_age at spawn (no age reset on reload)
 		return m;
 	});
 	$effect(() => {

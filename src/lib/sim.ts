@@ -27,7 +27,7 @@ const BEHAVIORS = ['wander', 'pause', 'lookAround', 'groom', 'sit', 'pounce'] as
 type Status = 'off' | 'loading' | 'ready' | 'failed';
 
 // ── worker message shapes (mirror worldsim.worker.ts) ───────────────────────────────────────────────
-type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number; genome: number[] | null };
+type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number; genome: number[] | null; age: number | null };
 type Snap = {
 	type: 'snap';
 	seq: number;
@@ -35,6 +35,7 @@ type Snap = {
 	xs: Float32Array;
 	zs: Float32Array;
 	headings: Float32Array;
+	ages: Float32Array; // 0..1 life fraction per agent → mirrored to m.ageFrac (persisted across reload)
 	healths: Float32Array;
 	flags: Uint32Array;
 	behaviors: Uint8Array;
@@ -325,7 +326,7 @@ class WorldSim {
 			const slot = this.#freeSlots.pop() ?? this.#nextSlot++;
 			this.#slotOf.set(m, slot);
 			tracked[slot] = m;
-			spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile, gene: m.gene ?? 1, pfamA: m.pfamA ?? 0, pfamB: m.pfamB ?? 0, genome: m.genome ? Array.from(m.genome) : null }); // plain copy — m.genome may be a $state Proxy
+			spawns.push({ slot, x: m.agent.x, z: m.agent.z, code: KIND_CODE[m.kind] ?? 0, radius: m.radius, seedId: m.seedId, companion: !!m.companion, juvenile: !!m.juvenile, gene: m.gene ?? 1, pfamA: m.pfamA ?? 0, pfamB: m.pfamB ?? 0, genome: m.genome ? Array.from(m.genome) : null, age: m.ageFrac ?? null }); // plain copy — m.genome may be a $state Proxy; age restores a SAVED agent's life-fraction
 		});
 
 		// Mirror a fresh snapshot onto the live roster.
@@ -356,6 +357,7 @@ class WorldSim {
 			a.heading = nh;
 			a.behavior = BEHAVIORS[s!.behaviors[i]] ?? 'wander';
 			a.progress = s!.progress[i];
+			m.ageFrac = s!.ages[i]; // live life-fraction → read back for the share encode (persisted across reload)
 			m.health = s!.healths[i];
 			const f = s!.flags[i];
 			m.dead = (f & 1) !== 0;

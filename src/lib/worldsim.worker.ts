@@ -45,12 +45,14 @@ interface RustSim {
 	set_player_immune(immune: number): void;
 	set_lineage(i: number, pfamA: number, pfamB: number): void; // newborn's parent lineage ids → incest avoidance
 	set_genome(i: number, food: number, safety: number, social: number, rest: number, industry: number): void; // inherited behaviour genome
+	set_age(i: number, frac: number): void; // restore a saved agent's exact age (life fraction) on reload
 	step(dt: number): void;
 	count(): number;
 	danger(): number;
 	xs_ptr(): number;
 	zs_ptr(): number;
 	headings_ptr(): number;
+	ages_ptr(): number;
 	healths_ptr(): number;
 	flags_ptr(): number;
 	behaviors_ptr(): number;
@@ -65,7 +67,7 @@ interface WasmModule {
 }
 
 // the main thread sends one of these; we reply with 'ready' / 'failed' / 'snap'
-type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number; genome: number[] | null };
+type Spawn = { slot: number; x: number; z: number; code: number; radius: number; seedId: number; companion: boolean; juvenile: boolean; gene: number; pfamA: number; pfamB: number; genome: number[] | null; age: number | null };
 type InMsg =
 	| { type: 'init'; glueUrl: string; obstacles: Float64Array | null }
 	| { type: 'obstacles'; flat: Float64Array }
@@ -84,6 +86,7 @@ let viewCount = -1;
 let xs = new Float32Array();
 let zs = new Float32Array();
 let headings = new Float32Array();
+let ages = new Float32Array();
 let healths = new Float32Array();
 let flags = new Uint32Array();
 let behaviors = new Uint8Array();
@@ -98,6 +101,7 @@ function refreshViews(): void {
 	xs = new Float32Array(viewBuf, sim.xs_ptr(), c);
 	zs = new Float32Array(viewBuf, sim.zs_ptr(), c);
 	headings = new Float32Array(viewBuf, sim.headings_ptr(), c);
+	ages = new Float32Array(viewBuf, sim.ages_ptr(), c);
 	healths = new Float32Array(viewBuf, sim.healths_ptr(), c);
 	flags = new Uint32Array(viewBuf, sim.flags_ptr(), c);
 	behaviors = new Uint8Array(viewBuf, sim.behaviors_ptr(), c);
@@ -162,6 +166,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 		if (s.gene !== 1) sim.set_gene(idx, s.gene); // a bred baby's inherited vigor (genetics)
 		if (s.pfamA || s.pfamB) sim.set_lineage(idx, s.pfamA, s.pfamB); // a bred baby's parentage → incest avoidance
 		if (s.genome) sim.set_genome(idx, s.genome[0], s.genome[1], s.genome[2], s.genome[3], s.genome[4]); // inherited genome
+		if (s.age != null) sim.set_age(idx, s.age); // restore a SAVED agent's exact age (reload keeps adults adult)
 	}
 
 	sim.set_player(d.px, d.pz);
@@ -175,6 +180,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 	const sx = xs.slice();
 	const sz = zs.slice();
 	const sh = headings.slice();
+	const sag = ages.slice();
 	const shp = healths.slice();
 	const sf = flags.slice();
 	const sb = behaviors.slice();
@@ -190,7 +196,7 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 
 	const ageMeans = sim.age_means(); // 6 floats — mean age fraction per kind (HUD age readout); tiny, not transferred
 	ctx.postMessage(
-		{ type: 'snap', seq: d.seq, count: viewCount, xs: sx, zs: sz, headings: sh, healths: shp, flags: sf, behaviors: sb, progress: sp, births, builds, wells, events, danger: sim.danger(), ageMeans },
-		[sx.buffer, sz.buffer, sh.buffer, shp.buffer, sf.buffer, sb.buffer, sp.buffer, births.buffer, builds.buffer, wells.buffer, events.buffer]
+		{ type: 'snap', seq: d.seq, count: viewCount, xs: sx, zs: sz, headings: sh, ages: sag, healths: shp, flags: sf, behaviors: sb, progress: sp, births, builds, wells, events, danger: sim.danger(), ageMeans },
+		[sx.buffer, sz.buffer, sh.buffer, sag.buffer, shp.buffer, sf.buffer, sb.buffer, sp.buffer, births.buffer, builds.buffer, wells.buffer, events.buffer]
 	);
 };

@@ -653,6 +653,7 @@ pub struct Snapshot {
     pub xs: Vec<f32>,       // world X per agent
     pub zs: Vec<f32>,       // world Z per agent
     pub headings: Vec<f32>, // facing (radians)
+    pub ages: Vec<f32>,       // 0..1 life fraction (age/lifespan) — persisted so a reload keeps adults adult
     pub healths: Vec<f32>,    // 0..1 (drives injury/blood/limp on the view side)
     pub flags: Vec<u32>,      // bit0 = dead, bit1 = asleep, bit2 = moving (speed past a walk), bit3 = hunting-player
     pub behaviors: Vec<u8>,   // current idle-FSM behaviour code (0 wander·1 pause·2 lookAround·3 groom·4 sit·5 pounce)
@@ -666,6 +667,7 @@ impl Snapshot {
         self.xs.resize(n, 0.0);
         self.zs.resize(n, 0.0);
         self.headings.resize(n, 0.0);
+        self.ages.resize(n, 0.0);
         self.healths.resize(n, 0.0);
         self.flags.resize(n, 0);
         self.behaviors.resize(n, 0);
@@ -674,6 +676,7 @@ impl Snapshot {
             self.xs[i] = m.agent.x as f32;
             self.zs[i] = m.agent.z as f32;
             self.headings[i] = m.agent.heading as f32;
+            self.ages[i] = (m.age / m.lifespan.max(1.0)).clamp(0.0, 1.0) as f32;
             self.healths[i] = m.health as f32;
             let mut f = 0u32;
             if m.dead {
@@ -2369,6 +2372,14 @@ impl World {
         }
     }
 
+    /// RESTORE a saved agent's exact age from a life fraction (0..1 × its lifespan) — so a reloaded world keeps its
+    /// adults adult instead of snapping back to the seeded START age (founders age UP during play; that was lost).
+    pub fn set_age(&mut self, i: usize, frac: f64) {
+        if let Some(m) = self.agents.get_mut(i) {
+            m.age = m.lifespan * frac.clamp(0.0, 1.0);
+        }
+    }
+
     /// Apply an inherited VIGOR gene to a freshly-spawned bred baby: store it (so its own offspring inherit) and
     /// scale its max speed by it. Called once, right after the JS bridge spawns the baby. Founders skip this.
     pub fn set_gene(&mut self, i: usize, gene: f64) {
@@ -3299,6 +3310,25 @@ mod tests {
         // a healthy, live, awake agent has no dead/asleep bits set
         assert_eq!(snap.flags[r] & 3, 0, "a live awake agent sets neither dead nor asleep");
         assert!((snap.healths[r] - w.agents[r].health as f32).abs() < 1e-6);
+    }
+
+    // AGE PERSISTENCE round-trip: set_age restores an exact life fraction and the snapshot reports it back, so a
+    // reloaded world keeps its adults adult instead of snapping to the seeded START age (the "adults → kids" bug).
+    #[test]
+    fn set_age_round_trips_through_the_snapshot() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        let p = w.spawn(animal(0.0, 0.0, 5), Kind::Person, 0.5, 5);
+        // restore a mid-life adult (0.5 of lifespan) the way a reloaded share link does
+        w.set_age(p, 0.5);
+        let life = w.agents[p].lifespan;
+        assert!((w.agents[p].age - life * 0.5).abs() < 1e-9, "set_age should set age = frac × lifespan");
+        let mut snap = Snapshot::default();
+        snap.fill(&w);
+        assert!((snap.ages[p] - 0.5).abs() < 1e-6, "the snapshot must report the restored life fraction (got {})", snap.ages[p]);
+        // clamps out of range
+        w.set_age(p, 9.0);
+        assert!((w.agents[p].age - life).abs() < 1e-9, "set_age clamps >1 to a full lifespan");
     }
 
     #[test]

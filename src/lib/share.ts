@@ -11,7 +11,7 @@ const scaleOrZero = (s?: [number, number, number]) =>
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 // compact positional pack — objects/zones/paths store [x,z] only; Y is re-derived on load
-type Live = Map<string, { x: number; z: number; dead: boolean; asleep: boolean }>;
+type Live = Map<string, { x: number; z: number; dead: boolean; asleep: boolean; ageFrac?: number }>;
 type PlayerPos = { x: number; z: number; yaw: number };
 
 function pack(w: World, live?: Live, player?: PlayerPos) {
@@ -31,7 +31,11 @@ function pack(w: World, live?: Live, player?: PlayerPos) {
 			const z = lv ? lv.z : o.pos[2];
 			const dead = lv ? lv.dead : o.dead;
 			const asleep = lv ? lv.asleep : o.asleep;
-			return [o.kind, r1(x), r1(z), o.color ?? 0, r1(o.rot ?? 0), scaleOrZero(o.scale), dead ? 1 : asleep ? 2 : 0];
+			const arr: (string | number | number[])[] = [o.kind, r1(x), r1(z), o.color ?? 0, r1(o.rot ?? 0), scaleOrZero(o.scale), dead ? 1 : asleep ? 2 : 0];
+			// 8th element (creatures only) = AGE life-fraction → a reload keeps adults adult, not seeded-young
+			const af = lv?.ageFrac ?? o.ageFrac;
+			if (af != null) arr.push(Math.round(af * 1000) / 1000);
+			return arr;
 		}),
 		z: w.zones.map((z) => [z.material, z.shape, r1(z.pos[0]), r1(z.pos[2]), z.size]),
 		p: w.paths.map((p) => [p.material, r1(p.from[0]), r1(p.from[2]), r1(p.to[0]), r1(p.to[2]), p.width]),
@@ -57,7 +61,8 @@ function unpack(d: any): World {
 			rot: a[4] || 0,
 			scale: (Array.isArray(a[5]) ? a[5] : [1, 1, 1]) as [number, number, number],
 			dead: a[6] === 1 || undefined, // live-state flag (0/1/2) → restore corpse/sleeper
-			asleep: a[6] === 2 || undefined
+			asleep: a[6] === 2 || undefined,
+			ageFrac: typeof a[7] === 'number' ? a[7] : undefined // 8th element (creatures) → restore exact age on spawn
 		})),
 		zones: (d.z ?? []).map((a: any[], i: number) => ({
 			id: 'z' + i.toString(36),

@@ -332,6 +332,10 @@ mod wasm_api {
         pub fn set_gene(&mut self, i: usize, gene: f64) {
             self.world.set_gene(i, gene);
         }
+        /// Restore a saved agent's exact age (life fraction 0..1) — reload keeps adults adult, not seeded-young.
+        pub fn set_age(&mut self, i: usize, frac: f64) {
+            self.world.set_age(i, frac);
+        }
         /// The cooldown JS should stamp on a newborn.
         pub fn juvenile_cd(&self) -> f64 {
             self.world.juvenile_cd()
@@ -448,6 +452,9 @@ mod wasm_api {
         }
         pub fn healths_ptr(&self) -> *const f32 {
             self.snap.healths.as_ptr()
+        }
+        pub fn ages_ptr(&self) -> *const f32 {
+            self.snap.ages.as_ptr()
         }
         pub fn flags_ptr(&self) -> *const u32 {
             self.snap.flags.as_ptr()
