@@ -142,7 +142,6 @@
 	let lastLen = -1;
 	let lastZones = -1;
 	let lastPaths = -1;
-	let lastObjs = -1;
 
 	useTask(() => {
 		uPlayer.value.set(playerState.pos[0], playerState.pos[2]); // every frame → bushes part as you brush past (cheap)
@@ -152,28 +151,18 @@
 		const pcx = Math.round(playerState.pos[0] / REBUILD) * REBUILD;
 		const pcz = Math.round(playerState.pos[2] / REBUILD) * REBUILD;
 		const len = world.terrain.length;
-		const zl = world.zones?.length ?? 0; // re-scatter when zones/paths/SOLID objects change (a new lake/road/house clears its trees)
+		const zl = world.zones?.length ?? 0; // re-scatter when zones/paths change (a new lake/road clears its trees)
 		const pl = world.paths?.length ?? 0;
-		// count only SOLID, FOREST-CLEARING objects (buildings/props) that are NEAR the player — not creatures, not
-		// graves, and not far-away builds. A house/well a settler raises 400 m away can't change the trees you SEE
-		// (render radius), yet counting it globally re-scattered the whole 3000-tree forest every few seconds in a
-		// lively world → a periodic hitch the adaptive resolution flickered on. Counting only near solids means the
-		// re-scatter fires solely when a building actually appears/leaves your forest view. (RADIUS + a clear margin.)
-		const ppx = playerState.pos[0];
-		const ppz = playerState.pos[2];
-		const nearR2 = (RADIUS + 40) ** 2;
-		let ol = 0;
-		for (const o of world.objects) {
-			if (CREATURES.has(o.kind) || o.kind === 'grave') continue;
-			if ((o.pos[0] - ppx) ** 2 + (o.pos[2] - ppz) ** 2 < nearR2) ol++;
-		}
-		if (pcx === lastCx && pcz === lastCz && len === lastLen && zl === lastZones && pl === lastPaths && ol === lastObjs) return;
+		// NO per-frame object scan: the re-scatter fires only when you MOVE (cross a REBUILD cell) or a lake/road
+		// changes. Buildings are NOT a trigger — counting them re-scattered the whole forest on every distant settler
+		// build/death (a periodic hitch the adaptive resolution flickered on); a new building just clears its trees on
+		// your next step instead (the solidBlocked cull below still avoids it whenever a re-scatter does run).
+		if (pcx === lastCx && pcz === lastCz && len === lastLen && zl === lastZones && pl === lastPaths) return;
 		lastCx = pcx;
 		lastCz = pcz;
 		lastLen = len;
 		lastZones = zl;
 		lastPaths = pl;
-		lastObjs = ol;
 
 		// placed-object footprints (buildings/props/lamps/placed trees) → no ambient tree clips through them.
 		// No collision-side change needed: the player + animals already can't enter these footprints, so a culled
