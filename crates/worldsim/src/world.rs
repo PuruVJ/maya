@@ -4696,6 +4696,50 @@ mod tests {
         assert!(w2.wells().is_empty(), "they should NOT dig a well when water is already in reach");
     }
 
+    // SCENARIO (emergent · JOBS close the loop): digging a well is only half the story — the dug well must actually
+    // become DRINKABLE. This drives the full round-trip the JS performs: the couple digs → we feed the well's
+    // reported position back through set_water (as JS does with wells()) → nearest_water now finds it → a parched
+    // settler seeks its OWN well and rehydrates. Without the feedback they'd keep draining to a thirst death.
+    #[test]
+    fn a_dug_well_becomes_drinkable_and_slakes_thirst() {
+        let mut w = emergent_world();
+        w.set_seasons(false);
+        // The only water is FAR away: has_water is TRUE (so thirst is live), but the origin is bone-dry (> WELL_NEED_R
+        // from the pond) → the industrious couple will dig rather than orbit an unreachable pond.
+        let far = [500.0, 0.0, 5.0];
+        w.set_water(&far);
+        let (a, b) = settle_industrious_couple(&mut w);
+
+        // run until they dig their well; capture where it landed (the position JS would echo back as a source)
+        let mut well: Option<(f64, f64)> = None;
+        for t in 1..=600 {
+            w.tick_once(t);
+            let ws = w.wells();
+            if ws.len() >= 2 {
+                well = Some((ws[0] as f64, ws[1] as f64));
+                break;
+            }
+        }
+        let (wx, wz) = well.expect("a dry industrious couple should dig a well");
+
+        // PARCH them (below BREED_HYDRATION so they don't breed-distract), then echo the well back as a drink source
+        // alongside the far pond — exactly the set_water(pond centres + wells) round-trip the renderer does each sync.
+        w.agents[a].hydration = 0.12;
+        w.agents[b].hydration = 0.12;
+        w.set_water(&[far[0], far[1], far[2], wx, wz, 2.0]);
+
+        // with their own well now the NEAREST water, the thirst-seek should walk them to it and the drink loop refill.
+        for t in 601..=1400 {
+            w.tick_once(t);
+        }
+        let (ha, hb) = (w.agents[a].hydration, w.agents[b].hydration);
+        eprintln!("[well slakes] hydration a={ha:.2} b={hb:.2} (well @ {wx:.0},{wz:.0})");
+        assert!(
+            ha > 0.5 && hb > 0.5,
+            "the couple didn't rehydrate at the well they dug (a={ha:.2}, b={hb:.2}) — dig→set_water→drink loop is broken"
+        );
+    }
+
     // CULTURE: a YOUNG settler beside a distinctive ELDER drifts its behaviour genome toward that role model
     // (memetic learning). Here the youth starts LAZY (industry 0.5) next to an INDUSTRIOUS elder (1.8) → it learns
     // toward high industry. Parked (max_speed 0) so they stay within learning range.
