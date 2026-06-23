@@ -102,6 +102,14 @@ mod wasm_api {
         crate::engine::ponds_near(px, pz, reach).into_iter().flat_map(|(x, z, r)| [x, z, r]).collect()
     }
 
+    /// Per-kind MIGRATION weight, by Kind order [rabbit, cat, kangaroo, person, lion, dinosaur] — the sim's source
+    /// of truth (world::migrate_weight), so the HUD reads it from here instead of hard-coding a duplicate copy.
+    #[wasm_bindgen]
+    pub fn migrate_weights() -> Vec<f64> {
+        use crate::eco::Kind::*;
+        [Rabbit, Cat, Kangaroo, Person, Lion, Dinosaur].map(crate::world::migrate_weight).to_vec()
+    }
+
     /// THE ENGINE (no JS engine): apply `ops_json` to `world_json` for a player at (px,pz,yaw). Returns a JSON
     /// string `{"world": <new world>, "conflicts": [...]}`. The world DOM round-trips unknown fields untouched.
     /// Faithful port of the old engine.ts applyOps — see crate::engine (parity-tested against the JS originals).

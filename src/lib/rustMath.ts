@@ -13,6 +13,7 @@ interface MathGlue {
 	ff_gene: (gene: number, rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, dt: number) => number;
 	band_spread: (count: number, ax: number, az: number, r: number) => Float64Array;
 	ponds_near: (px: number, pz: number, reach: number) => Float64Array;
+	migrate_weights: () => Float64Array;
 	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
 }
 
@@ -70,6 +71,12 @@ export function rustBandSpread(count: number, ax: number, az: number, r: number)
  *  field); the renderer calls this once per area to draw them. Flat [x, z, radius, …], or null if wasm isn't loaded. */
 export function rustPondsNear(px: number, pz: number, reach: number): Float64Array | null {
 	return glue ? glue.ponds_near(px, pz, reach) : null;
+}
+
+/** Per-kind MIGRATION weight from the sim (the source of truth), by Kind order [rabbit,cat,kangaroo,person,lion,
+ *  dinosaur]. The HUD reads this instead of hard-coding a duplicate. Null until the wasm math instance is loaded. */
+export function rustMigrateWeights(): Float64Array | null {
+	return glue ? glue.migrate_weights() : null;
 }
 
 /** THE ENGINE — apply `ops` to a world (both JSON strings) for a player at (px,pz,yaw). Returns the new world +

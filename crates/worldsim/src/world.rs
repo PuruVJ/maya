@@ -144,7 +144,7 @@ const WANDER_FRAC: f64 = 0.2; // base RESTLESS share (× the per-kind weight bel
 /// Per-kind MIGRATION tendency (user: "highest for humans, different for all animals"). Scales both the restless
 /// WANDERER share and the travel drive, so humans roam between settlements the most, kangaroos rove as nomads, and
 /// rabbits stick close. Migration applies to EVERY organism — people toward sparser settlements, animals to fresh range.
-fn migrate_weight(kind: Kind) -> f64 {
+pub fn migrate_weight(kind: Kind) -> f64 {
     match kind {
         Kind::Person => 1.0,    // most migratory — founds + moves between settlements
         Kind::Kangaroo => 0.7,  // nomadic rovers
@@ -401,8 +401,9 @@ const CARN_DRAIN_FRAC: f64 = 0.6; // carnivores burn fullness slower than grazer
 // Every animal carries `hydration`; it ebbs slowly, refills only at a water EDGE, and bleeds health when empty.
 // Gentle on purpose: thirst is a periodic ERRAND that pulls animals to water (spatial structure) — not a famine.
 const THIRST_DRAIN: f64 = 0.005; // /s hydration ebbs (~170 s from full to empty) — slower than the food drain
-const THIRSTY_AT: f64 = 0.15; // only when CRITICALLY thirsty does an animal break for water — so it roams/spreads
-// freely most of its life (drinks ~once near the end of the cycle) instead of orbiting a pond (user: spread out more)
+const THIRSTY_AT: f64 = 0.25; // MIDPOINT (user): low enough that an animal ROAMS ~75% of its life (no pond-orbiting
+// crowding), high enough that thirst is still a real, felt errand it must run. Between the old 0.4 (crowded) and 0.15
+// (thirst basically absent). Pairs with the even, abundant natural-pond field so the nearest water is never far.
 const DRINK_REACH: f64 = 5.0; // metres beyond a pond's radius an animal can lap from the bank (ponds are solid)
 const DRINK_RATE: f64 = 0.5; // /s hydration refilled while at a water edge (~2 s to top up — a quick drink)
 const THIRST_DAMAGE: f64 = 0.04; // /s health bleeds while parched (slightly gentler than starvation; recoverable)
