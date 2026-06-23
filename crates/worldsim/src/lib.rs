@@ -26,6 +26,7 @@ mod rng;
 mod simrng;
 mod spatialhash;
 mod world;
+mod worldgen;
 mod steering;
 
 pub use clock::{SimClock, DT};
@@ -189,6 +190,14 @@ mod wasm_api {
         }
         out["conflicts"] = c;
         out.dump()
+    }
+
+    /// PROCEDURAL SETTLEMENT PLAN — Rust owns the world-gen. Returns a JSON string `{objects, paths, radius}` for a
+    /// planned town at (cx,cz) of `size` ("hamlet"|"village"|"town"|"city"), deterministic in `seed`. Ported from
+    /// the old settlementPlanner.ts (parity-pinned by src/lib/worldgen.test.ts).
+    #[wasm_bindgen]
+    pub fn settlement_plan(cx: f64, cz: f64, size: &str, seed: u32, id_prefix: &str) -> String {
+        crate::worldgen::settlement_plan(cx, cz, size, seed, id_prefix).dump()
     }
 
     // ───────────────────────── the agent-sim bridge ─────────────────────────

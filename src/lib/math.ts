@@ -8,6 +8,8 @@
 // `math.pondsNear(...)`, `math.ffTargets(...)`, etc. Methods return the result, or a permissive sentinel (usually
 // null) if the wasm somehow isn't loaded yet (never a duplicated JS formula). Names say WHAT, not the technology.
 
+import type { WorldObject, Path } from './world';
+
 interface MathGlue {
 	default: (input?: unknown) => Promise<unknown>;
 	pop_caps: (rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number) => Uint32Array;
@@ -25,6 +27,7 @@ interface MathGlue {
 	gene_bounds: () => Float64Array;
 	tick_hz: () => number;
 	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
+	settlement_plan: (cx: number, cz: number, size: string, seed: number, id_prefix: string) => string;
 }
 
 class WorldMath {
@@ -149,6 +152,12 @@ class WorldMath {
 	/** THE ENGINE — apply `ops` to a world (both JSON strings) for a player at (px,pz,yaw). New world + conflicts. */
 	applyOps(worldJson: string, opsJson: string, px: number, pz: number, yaw: number): { world: unknown; conflicts: unknown[] } | null {
 		return this.#call((g) => JSON.parse(g.apply_ops(worldJson, opsJson, px, pz, yaw)) as { world: unknown; conflicts: unknown[] });
+	}
+
+	/** PROCEDURAL SETTLEMENT PLAN — Rust owns the world-gen. A planned town at (cx,cz) of `size`, deterministic in
+	 *  `seed`. Returns the world-objects + road paths + footprint radius (or null pre-wasm-load). */
+	settlementPlan(cx: number, cz: number, size: string, seed: number, idPrefix: string): { objects: WorldObject[]; paths: Path[]; radius: number } | null {
+		return this.#call((g) => JSON.parse(g.settlement_plan(cx, cz, size, seed, idPrefix)) as { objects: WorldObject[]; paths: Path[]; radius: number });
 	}
 
 	/** Closed-form VIGOR drift for a dormant region over `dtSec` away (Rust). Falls back to the unchanged gene. */
