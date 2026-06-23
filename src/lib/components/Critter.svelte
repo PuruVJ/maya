@@ -155,6 +155,9 @@
 	let farTime = 0;
 
 	useTask((dt) => {
+		// TIME-LAPSE: run the render animation at the sim's clock.rate (the worker ticks rate× faster, so bodies
+		// travel rate× per real second) — otherwise the gait skates / the body jitters in place instead of striding.
+		dt *= clock.rate;
 		t += dt;
 		if (growth < 1) growth = Math.min(1, growth + GROW_RATE * dt); // a juvenile matures toward adult size
 		const eSC = SC * growth * (female ? 0.9 : 1); // effective render scale (females a touch smaller — a sex cue)

@@ -116,8 +116,11 @@
 	let farTime = 0;
 
 	useTask((dt) => {
+		// TIME-LAPSE: the sim runs at clock.rate× (more ticks/sec → bodies travel rate× per real second), so the
+		// render animation must advance at the SAME rate or the legs skate / a body jitters in place while gliding.
+		dt *= clock.rate;
 		t += dt;
-		if (growth < 1) growth = Math.min(1, growth + GROW_RATE * dt); // a juvenile matures toward adult size
+		if (growth < 1) growth = Math.min(1, growth + GROW_RATE * dt); // a juvenile matures toward adult size (sim-time)
 		// the manager already stepped `agent` this frame — we only read & render it
 
 		// FAR → the impostor draws it (alive OR a tipped corpse): hide and, after a short grace, SHED the mesh.

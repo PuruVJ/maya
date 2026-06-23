@@ -22,12 +22,20 @@
 	import { clock } from '$lib/clock';
 
 	// TIME-LAPSE: scale the sim clock so users can watch the world evolve faster. The sim stays frame-rate
-	// independent (fixed 30 Hz ticks) — rate just maps more ticks onto each real second. 1× is normal speed.
+	// independent (fixed 30 Hz ticks) — rate just maps more ticks onto each real second (and the creature render
+	// animation reads clock.rate so bodies stride faster too, not skate). 1× is normal. Persisted in localStorage
+	// so the chosen pace survives a reload.
 	const SPEEDS = [1, 1.5, 2] as const;
+	const SPEED_KEY = 'sim-speed';
 	let speed = $state(1);
 	function setSpeed(r: number): void {
 		speed = r;
 		clock.setRate(r);
+		try {
+			localStorage.setItem(SPEED_KEY, String(r));
+		} catch {
+			/* private mode / storage disabled → just don't persist */
+		}
 	}
 	import { loadWorld, saveWorld } from '$lib/worldStore';
 	import { SKY_BG } from '$lib/kinds';
@@ -72,6 +80,9 @@
 	};
 
 	onMount(async () => {
+		// restore the saved time-lapse speed (localStorage) → the chosen pace survives reloads
+		const savedSpeed = Number(localStorage.getItem(SPEED_KEY));
+		if (SPEEDS.includes(savedSpeed as (typeof SPEEDS)[number])) setSpeed(savedSpeed);
 		// Load the main-thread Rust math BEFORE fastForward, so the away-growth uses the real Rust numbers, not the
 		// permissive fallback. Same .wasm the worker uses — browser-cached.
 		await math.init();
