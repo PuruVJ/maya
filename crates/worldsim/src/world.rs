@@ -427,6 +427,8 @@ const EV_BIRTH: f32 = 4.0; // a baby was delivered
 const EV_BUILD: f32 = 5.0; // a settler raised a house
 const EV_CONCEIVE: f32 = 6.0; // a pair mated (diagnostic: conceive≫birth ⇒ gestation/delivery is the bottleneck)
 const EV_WELL: f32 = 7.0; // an industrious settler dug a well (a self-made water source)
+const EV_SLAIN: f32 = 8.0; // died in COMBAT (health hit 0): a predator mobbed by prey, an apex losing a rival scrap,
+// or an attacker cut down by a cornered hunter's slash — distinct from EV_KILL (a predator catching its prey)
 const WELL_INDUSTRY: f64 = 1.2; // a settler's `industry` genome above this digs wells (emergent job; neutral 1.0 won't → Manual safe)
 const WELL_NEED_R: f64 = 60.0; // …but only when no water edge is within this radius (no water in reach → dig one)
 // CULTURE — memetic transmission among PEOPLE: a young settler occasionally learns from the oldest nearby elder of
@@ -1579,7 +1581,10 @@ impl World {
                 self.agents[i].asleep = false;
                 self.agents[i].agent.vx = 0.0;
                 self.agents[i].agent.vz = 0.0;
-                self.agents[i].carrion = CARRION_MEAT; // starved/wounded carcass → feeds a scavenger
+                self.agents[i].carrion = CARRION_MEAT; // wounded carcass → feeds a scavenger
+                // a COMBAT death (mob / rival scrap / retaliatory slash) → the world-log + telemetry see it too
+                let (k, ax, az) = (self.agents[i].kind as usize as f32, self.agents[i].agent.x as f32, self.agents[i].agent.z as f32);
+                self.events.extend_from_slice(&[EV_SLAIN, k, ax, az]);
                 continue;
             }
             // AGING: live a little; die of old age once past the natural lifespan (predation/starvation usually
@@ -4355,6 +4360,52 @@ mod tests {
         }
         assert!(built, "with water in reach the couple should build a house");
         assert!(w2.wells().is_empty(), "they should NOT dig a well when water is already in reach");
+    }
+
+    // SCENARIO (emergent · housing rule): a house needs LOVE, not just proximity. An opposite-sex adult pair that's
+    // fed, adjacent and build-ready but can NEVER conceive (breeding blocked) never PAIR-BONDS — so it raises no home
+    // (and digs no well: the bond gate sits above both). Guards the user's "being near isn't enough; loving each
+    // other can't happen immediately" rule (the old gate let just-adjacent strangers stamp instant houses).
+    #[test]
+    fn building_needs_a_pair_bond_not_just_proximity() {
+        let mut w = emergent_world();
+        w.set_seasons(false);
+        let (a, b) = settle_industrious_couple(&mut w); // fed + adult + adjacent + build_cd 0 …
+        w.agents[a].breed_cd = 1e9; // …but can NEVER conceive → the bond (set at conception) never forms
+        w.agents[b].breed_cd = 1e9;
+        let (tr, _, _) = run(&mut w, 2000, Kind::Person);
+        assert_eq!(tr.builds, 0, "an UNBONDED (merely-adjacent) pair raised {} home(s) — the pair-bond gate isn't holding", tr.builds);
+        assert!(w.agents[a].partner.is_none() && w.agents[b].partner.is_none(), "no bond should have formed (breeding was blocked)");
+        assert!(w.wells().is_empty(), "an unbonded pair shouldn't dig a well either (the gate is above the well/house split)");
+    }
+
+    // SCENARIO (emergent · telemetry): a predation KILL emits an EV_KILL event, so the world-log + diagnostics see
+    // predation. (EV_KILL was defined + read but never emitted until the kills pass started firing it — this pins
+    // that it stays wired.) A hungry lion in a tight rabbit cluster must produce at least one kill event.
+    #[test]
+    fn a_predation_kill_emits_an_event() {
+        let mut w = emergent_world();
+        cluster(&mut w, Kind::Rabbit, 14, 0.0, 0.0, 6.0, 500);
+        let lion = spawn_kind(&mut w, Kind::Lion, 0.0, 0.0, 99);
+        w.agents[lion].energy = 0.15; // famished → it hunts in earnest
+        let (tr, _, _) = run(&mut w, 800, Kind::Rabbit);
+        eprintln!("[kill events] EV_KILL count = {}", tr.kills);
+        assert!(tr.kills >= 1, "a famished lion amid 14 rabbits emitted no EV_KILL — predation isn't reaching the event log");
+    }
+
+    // SCENARIO (emergent · telemetry): a COMBAT death (health hits 0 from a mob / rival scrap / retaliatory slash)
+    // emits EV_SLAIN — so the most dramatic deaths reach the world-log + telemetry. This was a real gap: health-zero
+    // deaths set `dead` + a carcass but emitted nothing. Force a fatal wound and tick; the death must announce itself.
+    #[test]
+    fn a_combat_death_emits_ev_slain() {
+        let mut w = emergent_world();
+        w.set_player(1e4, 1e4); // isolate the lone agent → no player/predator interaction muddies the path
+        let lion = spawn_kind(&mut w, Kind::Lion, 0.0, 0.0, 7);
+        w.agents[lion].health = 0.0; // a scrap just emptied its health bar
+        w.tick_once(1);
+        let slain = w.events().chunks_exact(4).any(|c| c[0] == EV_SLAIN);
+        assert!(slain, "a health-zero (combat) death emitted no EV_SLAIN — combat deaths are silent in the log");
+        assert!(w.agents[lion].dead, "the fatally-wounded lion should be dead");
     }
 
     // SCENARIO (emergent · JOBS close the loop): digging a well is only half the story — the dug well must actually

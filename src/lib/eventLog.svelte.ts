@@ -13,7 +13,8 @@ const FMT: Record<number, (k: string) => { icon: string; text: string }> = {
 	4: (k) => ({ icon: '🐣', text: `a ${k} was born` }), // EV_BIRTH
 	5: () => ({ icon: '🏠', text: `a house was raised` }), // EV_BUILD
 	6: (k) => ({ icon: '❤️', text: `a ${k} pair mated` }), // EV_CONCEIVE
-	7: () => ({ icon: '⛲', text: `a well was dug` }) // EV_WELL
+	7: () => ({ icon: '⛲', text: `a well was dug` }), // EV_WELL
+	8: (k) => ({ icon: '⚔️', text: `a ${k} was slain` }) // EV_SLAIN (combat: mobbed / a rival scrap / a slash)
 };
 
 export type LogEntry = { id: number; icon: string; text: string; n: number };
