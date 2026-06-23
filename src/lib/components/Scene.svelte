@@ -44,7 +44,7 @@
 	import { streamRegions, regionOf, fastForwardDormant } from '$lib/streaming';
 	import { playerState } from '$lib/playerState.svelte';
 	import { heightAt } from '$lib/terrain';
-	import { inWater } from '$lib/water';
+	import { inWater, waterSurfaceY } from '$lib/water';
 	import { nature } from '$lib/nature.svelte';
 	import { wind } from '$lib/wind';
 	import { weather } from '$lib/weather';
@@ -110,29 +110,43 @@
 	// NATURAL PONDS — Rust owns the world's water (an even, infinite, deterministic pond field). We just DRAW the
 	// ones near the player, refreshed as they roam. The sim reads the same field internally for thirst, so animals
 	// settle by their local pond instead of all dragging to one shore.
-	const POND_RENDER_R = 360; // metres around the player we draw natural ponds (covers the ~live region)
-	let naturalPonds = $state<{ id: string; material: string; shape: string; pos: [number, number, number]; size: number }[]>([]);
+	// WATER LOD: only the ponds right next to you get the full <Water> shader; everything farther is a CHEAP flat
+	// blue disc (one shared MeshBasic — no shader pass, no fish). Rendering full Water + a per-frame LakeFish shoal
+	// for all ~16 nearby ponds was a real mount-storm (the grey flicker on load) for zero gain at distance/in fog.
+	const POND_RENDER_R = 360; // draw natural ponds within this (near = Water, far = blob); beyond is fogged out
+	const POND_NEAR_R2 = 130 * 130; // within this → full Water; beyond → the cheap flat blob
+	const POND_BLOB_GEO = new THREE.CircleGeometry(1, 18).rotateX(-Math.PI / 2); // a flat unit disc laid on the ground
+	const POND_BLOB_MAT = new THREE.MeshBasicMaterial({ color: '#3f6f9e' }); // flat water-blue; cheap, no lighting
+	type PondZone = { id: string; material: string; shape: string; pos: [number, number, number]; size: number };
+	let nearPonds = $state<PondZone[]>([]); // full Water shader (the few right next to you)
+	let farPonds = $state<{ id: string; x: number; y: number; z: number; r: number }[]>([]); // cheap blue discs
 	let lastPondX = NaN;
 	let lastPondZ = NaN;
 	function refreshPonds(px: number, pz: number): void {
 		const flat = math.pondsNear(px, pz, POND_RENDER_R);
 		if (!flat) return; // wasm not ready yet
-		// REUSE existing pond objects by id (stable identity) so an unchanged pond keeps the SAME object — otherwise
-		// each refresh hands Water/LakeFish a fresh `zone` prop and they rebuild (a flicker). Only reassign the array
-		// when the set actually changes (a pond entered/left the radius).
-		const byId = new Map(naturalPonds.map((z) => [z.id, z]));
-		const out: typeof naturalPonds = [];
-		let changed = false;
+		// reuse NEAR pond objects by id (stable identity) so an unchanged one keeps the SAME object → Water doesn't
+		// rebuild on a refresh. FAR blobs are cheap, so they just get rebuilt each time.
+		const byId = new Map(nearPonds.map((z) => [z.id, z]));
+		const near: PondZone[] = [];
+		const far: typeof farPonds = [];
+		let nearChanged = false;
 		for (let k = 0; k < flat.length; k += 3) {
 			const x = flat[k]; // flat is [x, z, r] per pond
 			const z = flat[k + 1];
 			const r = flat[k + 2];
 			const id = `np${Math.round(x)}_${Math.round(z)}`;
-			const existing = byId.get(id);
-			if (existing) out.push(existing);
-			else ((changed = true), out.push({ id, material: 'water', shape: 'blob', pos: [x, 0, z], size: r }));
+			if ((x - px) ** 2 + (z - pz) ** 2 < POND_NEAR_R2) {
+				const existing = byId.get(id);
+				if (existing) near.push(existing);
+				else ((nearChanged = true), near.push({ id, material: 'water', shape: 'blob', pos: [x, 0, z], size: r }));
+			} else {
+				// far → a flat blob at the water surface height (matches Water so there's no jump at the LOD boundary)
+				far.push({ id, x, y: waterSurfaceY({ id, material: 'water', shape: 'blob', pos: [x, 0, z], size: r }, world.terrain), z, r });
+			}
 		}
-		if (changed || out.length !== naturalPonds.length) naturalPonds = out; // only churn the array on a real change
+		if (nearChanged || near.length !== nearPonds.length) nearPonds = near; // only churn Water on a real change
+		farPonds = far;
 		lastPondX = px;
 		lastPondZ = pz;
 	}
@@ -704,10 +718,13 @@
 		<Zone zone={z} />
 	{/if}
 {/each}
-<!-- NATURAL ponds — Rust-owned water field, drawn near the player (the source of truth lives in the sim) -->
-{#each naturalPonds as z (z.id)}
+<!-- NATURAL ponds (Rust-owned water field). WATER LOD: full shader for the few NEAR you; a cheap flat blue disc
+     for the rest. No per-pond LakeFish shoal (a per-frame breeding sim ×N ponds was a needless mount-storm). -->
+{#each nearPonds as z (z.id)}
 	<Water zone={z} sky={world.sky} terrain={world.terrain} />
-	<LakeFish zone={z} terrain={world.terrain} />
+{/each}
+{#each farPonds as p (p.id)}
+	<T.Mesh geometry={POND_BLOB_GEO} material={POND_BLOB_MAT} position={[p.x, p.y, p.z]} scale={[p.r, 1, p.r]} />
 {/each}
 
 {#each world.paths ?? [] as p (p.id)}
