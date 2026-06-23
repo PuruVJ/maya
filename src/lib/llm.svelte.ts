@@ -15,20 +15,18 @@ export type ModelKey = 'fast' | 'smart' | 'tuned' | 'tuned-sm';
 // to a Hugging Face resolve URL (WebLLM fetches MLC models from HF natively — free CDN + CORS), e.g.
 // 'https://huggingface.co/puruvj/WorldGen-1.5B/resolve/main/' (TRAILING SLASH). Empty map = hidden.
 type TunedDef = { id: string; url: string; stockId: string };
+// THE model — our 0.5B WorldGen fine-tune, the only one (the 1.5B is gone; the mini is enough). WebLLM fetches the
+// converted MLC weights straight from Hugging Face (free CDN + CORS), so the ~280 MB doesn't ship in the app/deploy.
+// (The training pipeline still produces BOTH sizes — see training/README.md — we just ship the mini.)
 const TUNED: Partial<Record<ModelKey, TunedDef>> = {
-	tuned: { id: 'WorldGen-1.5B', url: '/models/WorldGen-1.5B/', stockId: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC' },
-	'tuned-sm': { id: 'WorldGen-0.5B', url: '/models/WorldGen-0.5B/', stockId: 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC' }
+	'tuned-sm': { id: 'WorldGen-0.5B', url: 'https://huggingface.co/puruvj/WorldGen-0.5B/resolve/main/', stockId: 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC' }
 };
 const isTuned = (k: ModelKey | null): k is ModelKey => k != null && k in TUNED;
 
-// LOCAL choices (all WebLLM/WebGPU, all free): Fast runs anywhere; Smart is sharper on big, messy,
-// multi-step builds (44/49 vs 37/49 on the scenario battery); the Tuned pair are our fine-tunes —
-// lighter AND sharper on our grammar (Tuned = 1.5B, Tuned Mini = 0.5B, ~280 MB for low-end devices).
+// ONE model, no picker (user: "the mini is enough, no options"). Reuses the stock Qwen2.5-0.5B MLC model lib (WASM);
+// only the fine-tuned weights differ, fetched from HF.
 export const MODELS: Partial<Record<ModelKey, { id: string; label: string; sub: string }>> = {
-	fast: { id: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC', label: 'Fast', sub: 'Qwen 1.5B · ~1 GB · snappy, runs on any GPU' },
-	smart: { id: 'Qwen2.5-3B-Instruct-q4f16_1-MLC', label: 'Smart', sub: 'Qwen 3B · ~2 GB · sharper on big, detailed builds' },
-	...(TUNED.tuned ? { tuned: { id: TUNED.tuned.id, label: 'Tuned', sub: 'WorldGen 1.5B · fine-tuned for this game · sharpest' } } : {}),
-	...(TUNED['tuned-sm'] ? { 'tuned-sm': { id: TUNED['tuned-sm'].id, label: 'Tuned Mini', sub: 'WorldGen 0.5B · fine-tuned · ~280 MB · lightest, low-end devices' } } : {})
+	...(TUNED['tuned-sm'] ? { 'tuned-sm': { id: TUNED['tuned-sm'].id, label: 'WorldGen', sub: 'WorldGen 0.5B · fine-tuned · ~280 MB · 100% local' } } : {})
 };
 
 const STORE_KEY = 'worldgen:model';
@@ -46,8 +44,8 @@ export class WorldLLM {
 	progress = $state(0);
 	text = $state('AI not loaded');
 	busy = $state(false);
-	// default to the fine-tune when it's available (TUNED_URL set); else null → first-run picker
-	selected = $state((readStored() ?? ('tuned' in MODELS ? 'tuned' : null)) as ModelKey | null);
+	// ONE model now — always the WorldGen mini (no picker). readStored only ever returns it or null.
+	selected = $state((readStored() ?? 'tuned-sm') as ModelKey | null);
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	#engine: any = null;

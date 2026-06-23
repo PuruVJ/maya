@@ -14,7 +14,6 @@
 	import EcoStats from '$lib/components/EcoStats.svelte';
 	import EventLog from '$lib/components/EventLog.svelte';
 	import { nature } from '$lib/nature.svelte';
-	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld, fastForward, type World as WorldData } from '$lib/world';
 	import { math } from '$lib/math';
@@ -44,7 +43,6 @@
 	import { settlementPlan, SIZES } from '$lib/settlementPlanner';
 	import { llm } from '$lib/llm.svelte';
 	import { agentManager } from '$lib/agents.svelte';
-	import { editor } from '$lib/editor.svelte';
 	import { playerState } from '$lib/playerState.svelte';
 	import { sim } from '$lib/sim';
 
@@ -399,13 +397,10 @@
 		<span class="inline-block rounded-full bg-black/35 px-2.5 py-1 text-xs font-semibold backdrop-blur [text-shadow:none]">
 			100% local · no API key · free
 		</span>
-		<button
-			class="pointer-events-auto rounded-full bg-black/35 px-2.5 py-1 text-xs font-semibold backdrop-blur transition hover:bg-black/55 [text-shadow:none]"
-			onclick={() => (editor.modelPickerOpen = true)}
-			title="Switch local model"
-		>
-			AI: {llm.model?.label ?? '…'} ⌄
-		</button>
+		<!-- single fine-tune, no picker → a static label (the WorldGen mini is the only model) -->
+		<span class="inline-block rounded-full bg-black/35 px-2.5 py-1 text-xs font-semibold backdrop-blur [text-shadow:none]">
+			AI: {llm.model?.label ?? '…'}
+		</span>
 		<!-- TIME-LAPSE speed: watch the simulation evolve faster (the sim stays frame-rate-independent) -->
 		<div class="pointer-events-auto flex items-center overflow-hidden rounded-full bg-black/35 backdrop-blur [text-shadow:none]" title="Simulation speed">
 			{#each SPEEDS as s (s)}
@@ -459,7 +454,6 @@
 </div>
 
 <BuildBar {world} />
-<ModelPicker />
 <TouchControls />
 
 <style>
