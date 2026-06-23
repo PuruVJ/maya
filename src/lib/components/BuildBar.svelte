@@ -55,10 +55,10 @@
 			: llm.phase === 'ready'
 			? 'Build one thing at a time…  (e.g. "a house in front of me")  ·  / for commands'
 			: llm.phase === 'loading'
-				? `Loading local AI… ${pct}%`
+				? `Local AI… ${pct}%`
 				: llm.phase === 'error'
 					? 'AI failed to load — tap retry'
-					: 'Starting local AI…'
+					: 'Local AI…'
 	);
 
 	// auto-load the model in the background as soon as the page opens (cached after first time)

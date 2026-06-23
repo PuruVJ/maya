@@ -20,7 +20,9 @@ class PerfScaler {
 	#min = 0.75; // floor — below this it looks too soft; better to miss the target than go blurrier
 	#ema = 1 / 60; // smoothed frame time (s)
 	#minDt = 1 / 120; // fastest frame seen (≈ the vsync interval → the display refresh), slowly decays up
-	#cooldown = 60; // frames until the next adjustment (warm-up before touching anything)
+	#cooldown = 240; // warm-up before the FIRST adjustment (~4 s) — rides out the load/mount storm (objects revealing +
+	// shaders compiling spike frame times) so DRS doesn't thrash the pixel-ratio (each change = a framebuffer resize =
+	// a grey flash) while the scene is still settling. After this it adapts normally.
 	#probeWait = 150; // frames between upward probes; BACKS OFF (×2, capped) each time a probe breaks budget + reverts
 	#probedUp = false; // last change was an upward probe → if the very next adjustment is a drop, that probe FAILED
 	#PROBE_MAX = 3600; // ~60 s ceiling on the probe interval — at the converged edge, probing (and its flash) goes rare
