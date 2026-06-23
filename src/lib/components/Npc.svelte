@@ -12,6 +12,7 @@
 	import { clock } from '$lib/clock';
 	import { NPC, PRIM, creatureMat, EYE_MAT } from '$lib/sharedAssets';
 	import { playerState } from '$lib/playerState.svelte';
+	import { personGestation } from '$lib/math';
 	import type { World, WorldObject } from '$lib/world';
 
 	let { obj, world }: { obj: WorldObject; world: World } = $props();
@@ -88,7 +89,7 @@
 	let guardian = $state(false); // her mate (expectant father) → carries a machete, mirrored from the sim
 	let drinking = $state(false); // mirrored from the sim → folds forward to lap at a water edge (watering hole)
 	let bellyGrow = $state(0); // 0→1 ramp over the gestation window → the belly visibly grows as she progresses
-	const PREG_GROW_SECS = 60; // seconds for the belly to swell from first-trimester to full (≈ a person's gestation)
+	const PREG_GROW_SECS = personGestation(); // belly swells from first-trimester to full over the REAL gestation (from Rust)
 	const bellyScale = $derived(0.5 + 0.5 * bellyGrow); // small bump → full term
 
 	const lean = new Spring(0, 9, 0.7);

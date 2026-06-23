@@ -137,6 +137,15 @@ mod wasm_api {
         [Rabbit, Cat, Kangaroo, Person, Lion, Dinosaur].map(crate::world::migrate_weight).to_vec()
     }
 
+    /// Per-kind GESTATION seconds, by Kind order [rabbit, cat, kangaroo, person, lion, dinosaur] — the sim's source
+    /// of truth (world::gestation), so the renderer paces the pregnancy belly-grow to the REAL delivery time instead
+    /// of a duplicated guess (the belly hit full term well before/after delivery when JS hard-coded its own number).
+    #[wasm_bindgen]
+    pub fn gestation_secs() -> Vec<f64> {
+        use crate::eco::Kind::*;
+        [Rabbit, Cat, Kangaroo, Person, Lion, Dinosaur].map(crate::world::gestation).to_vec()
+    }
+
     /// The RENDER slice of the eco table — [rank, speed_lo, speed_hi] per kind, by Kind order. Rust owns the full
     /// canonical eco.rs; the renderer reads ONLY what it needs (gait speed range + rank) from here, no JS copy.
     #[wasm_bindgen]

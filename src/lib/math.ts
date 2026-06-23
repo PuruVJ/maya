@@ -18,6 +18,7 @@ interface MathGlue {
 	trees_near: (px: number, pz: number, reach: number) => Float64Array;
 	bushes_near: (px: number, pz: number, reach: number) => Float64Array;
 	migrate_weights: () => Float64Array;
+	gestation_secs: () => Float64Array;
 	eco_render: () => Float64Array;
 	gene_bounds: () => Float64Array;
 	tick_hz: () => number;
@@ -100,6 +101,11 @@ class WorldMath {
 		return this.#call((g) => g.migrate_weights());
 	}
 
+	/** Per-kind GESTATION seconds by Kind order [rabbit,cat,kangaroo,person,lion,dinosaur] (prefer `personGestation`). */
+	gestationSecs(): Float64Array | null {
+		return this.#call((g) => g.gestation_secs());
+	}
+
 	/** The render slice of the eco table — [rank, speed_lo, speed_hi] per kind, by Kind order (eco.rs is the truth). */
 	ecoRender(): Float64Array | null {
 		return this.#call((g) => g.eco_render());
@@ -151,4 +157,15 @@ export function tickHz(): number {
 		if (h) tickHzCache = h;
 	}
 	return tickHzCache || 30;
+}
+
+let personGestationCache = 0; // Kind order [rabbit,cat,kangaroo,person,lion,dinosaur] → person is index 3
+/** A person's gestation in seconds from the sim (cached) — so the pregnancy belly-grow lands exactly at delivery.
+ *  72 only as the pre-wasm-load fallback (matches world::gestation(Person)). */
+export function personGestation(): number {
+	if (!personGestationCache) {
+		const g = math.gestationSecs();
+		if (g && g.length > 3) personGestationCache = g[3];
+	}
+	return personGestationCache || 72;
 }

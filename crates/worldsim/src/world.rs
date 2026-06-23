@@ -466,8 +466,9 @@ const CULTURE_R2: f64 = 30.0 * 30.0; // a role model must be within this radius 
 // LITTER (small prey drop several young; big animals one). Game-scaled seconds (small fraction of a lifespan).
 const CH_LITTER: i32 = 22; // RNG channel for the litter-size roll
 
-/// Gestation period (seconds) by kind — bigger animals carry longer.
-fn gestation(kind: Kind) -> f64 {
+/// Gestation period (seconds) by kind — bigger animals carry longer. `pub` so the renderer can pace the
+/// pregnancy belly-grow to the real delivery time (exported via lib::gestation_secs) instead of a JS duplicate.
+pub fn gestation(kind: Kind) -> f64 {
     // TROPHIC PYRAMID via breed SPEED: prey are r-strategists (breed fast), PREDATORS are K-strategists (breed
     // SLOWLY) so apex populations stay rare without a hard cap. Predators MUST out-gestate prey here, else they
     // out-reproduce their food (user: "lions reproduce faster, 25 lions vs 40 humans") and over-predate the world.
