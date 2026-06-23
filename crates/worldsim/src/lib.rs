@@ -102,6 +102,19 @@ mod wasm_api {
         crate::engine::ponds_near(px, pz, reach).into_iter().flat_map(|(x, z, r)| [x, z, r]).collect()
     }
 
+    /// AMBIENT TREES near (px,pz) — Rust owns the forest field. Flat [x, z, scale, scaleY, rot, colorHash] × n.
+    /// The renderer + collision read this ONCE per rebuild (cheap); JS culls trees on its own paths/lakes.
+    #[wasm_bindgen]
+    pub fn trees_near(px: f64, pz: f64, reach: f64) -> Vec<f64> {
+        crate::engine::trees_near(px, pz, reach)
+    }
+
+    /// AMBIENT BUSHES near (px,pz). Flat [x, z, scale, rot, colorHash] × n.
+    #[wasm_bindgen]
+    pub fn bushes_near(px: f64, pz: f64, reach: f64) -> Vec<f64> {
+        crate::engine::bushes_near(px, pz, reach)
+    }
+
     /// Per-kind MIGRATION weight, by Kind order [rabbit, cat, kangaroo, person, lion, dinosaur] — the sim's source
     /// of truth (world::migrate_weight), so the HUD reads it from here instead of hard-coding a duplicate copy.
     #[wasm_bindgen]

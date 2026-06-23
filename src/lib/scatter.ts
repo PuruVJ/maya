@@ -1,19 +1,15 @@
-// Deterministic ambient-forest placement — the SINGLE source of truth for WHERE scatter trees stand, so
-// the renderer (AmbientScatter.svelte) and collision (Player / agents) agree exactly. Pure analytic
-// function of the world cell (same world-stable hashing as Grass/Birds), so anyone can ask "is there a
-// tree here?" without the renderer. See docs/ + [[game-work-queue]] item 5.
+// Ambient-forest placement — now a thin adapter over the RUST field (engine.rs `trees_near`/`bushes_near`), so
+// Rust is the single source of truth for WHERE scatter trees/bushes stand (render AND collision read the same
+// field). One windowed wasm call per query (cheap serialization — not per cell). JS keeps only the render-side
+// AVOIDANCE that depends on JS-owned data: `onPath` (player-dug roads) + `treeRadius` (collision). The deterministic
+// placement that used to live here moved to Rust (its sin-hash is a hair different there → the forest is reshuffled
+// vs the old JS one, but consistent). See the `rust-owns-all-compute` memory.
 import type { Path } from './world';
+import { rustTreesNear, rustBushesNear } from './rustMath';
 
-export const SCATTER_STEP = 16; // forest grid cell (m)
+export const SCATTER_STEP = 16; // forest grid cell (m) — mirrors engine.rs SCATTER_STEP (kept for callers' ranges)
 export const SCATTER_CLEAR = 70; // spawn/build area kept tree-free (radius from origin)
-
-const hash = (i: number, j: number, s: number): number => {
-	const v = Math.sin(i * 127.1 + j * 311.7 + s * 74.7) * 43758.5453;
-	return v - Math.floor(v);
-};
-// clumps trees into forests rather than an even spread
-const forest = (x: number, z: number): number =>
-	Math.sin(x * 0.018 + 2) * Math.cos(z * 0.016 - 1) + 0.4 * Math.sin(x * 0.05) * Math.cos(z * 0.045);
+export const BUSH_STEP = 11;
 
 export interface ScatterTree {
 	x: number;
@@ -21,21 +17,15 @@ export interface ScatterTree {
 	scale: number; // horizontal scale (trunk + canopy)
 	scaleY: number; // vertical scale
 	rot: number; // y rotation
+	colorHash: number; // [0,1) deterministic per-tree → leaf colour (from Rust)
 }
 
-/** The tree standing in cell (ci, cj), or null if that cell has none (clearing / sparse forest). */
-export function treeAt(ci: number, cj: number): ScatterTree | null {
-	const cellX = ci * SCATTER_STEP;
-	const cellZ = cj * SCATTER_STEP;
-	if (cellX * cellX + cellZ * cellZ < SCATTER_CLEAR * SCATTER_CLEAR) return null; // keep spawn clear
-	if (forest(cellX, cellZ) + (hash(ci, cj, 1) - 0.5) < 0.35) return null; // forest clumps only
-	return {
-		x: cellX + (hash(ci, cj, 2) - 0.5) * SCATTER_STEP,
-		z: cellZ + (hash(ci, cj, 3) - 0.5) * SCATTER_STEP,
-		scale: 1.3 + hash(ci, cj, 4) * 1.6,
-		scaleY: 1.3 + hash(ci, cj, 4) * 1.6 + hash(ci, cj, 6) * 0.8,
-		rot: hash(ci, cj, 5) * 6.283
-	};
+export interface ScatterBush {
+	x: number;
+	z: number;
+	scale: number;
+	rot: number;
+	colorHash: number;
 }
 
 /** Trunk collision radius for a tree of this scale (matches the rendered trunk, a touch generous). */
@@ -43,36 +33,26 @@ export function treeRadius(scale: number): number {
 	return 0.3 * scale;
 }
 
-// Ambient BUSHES — low shrubs sprinkled across the open grassland (not clumped like the forest). Soft, so
-// there's no collision (you brush through them); render-only, world-stable on their own coarse grid.
-export const BUSH_STEP = 11;
-const bhash = (i: number, j: number, s: number): number => {
-	const v = Math.sin(i * 157.3 + j * 271.9 + s * 53.1) * 43758.5453;
-	return v - Math.floor(v);
-};
-export interface ScatterBush {
-	x: number;
-	z: number;
-	scale: number;
-	rot: number;
-}
-/** The bush in cell (ci, cj), or null — ~1 in 5 cells, jittered, so bushes dot the meadow sparsely. */
-export function bushAt(ci: number, cj: number): ScatterBush | null {
-	const cellX = ci * BUSH_STEP;
-	const cellZ = cj * BUSH_STEP;
-	if (cellX * cellX + cellZ * cellZ < SCATTER_CLEAR * SCATTER_CLEAR) return null; // keep spawn clear
-	if (bhash(ci, cj, 1) > 0.2) return null;
-	return {
-		x: cellX + (bhash(ci, cj, 2) - 0.5) * BUSH_STEP,
-		z: cellZ + (bhash(ci, cj, 3) - 0.5) * BUSH_STEP,
-		scale: 0.55 + bhash(ci, cj, 4) * 0.75,
-		rot: bhash(ci, cj, 5) * 6.283
-	};
+/** Visit every TREE within `reach` of (x,z) — from the Rust forest field (one wasm call). No-op until wasm loads. */
+export function forEachTreeNear(x: number, z: number, reach: number, cb: (t: ScatterTree) => void): void {
+	const f = rustTreesNear(x, z, reach);
+	if (!f) return;
+	for (let k = 0; k < f.length; k += 6) {
+		cb({ x: f[k], z: f[k + 1], scale: f[k + 2], scaleY: f[k + 3], rot: f[k + 4], colorHash: f[k + 5] });
+	}
 }
 
-/** Is (x, z) on/over any path (road or river)? Used to keep ambient trees out of streets — matching the
- *  grass carve — and shared by AmbientScatter (cull) + Player (don't collide with a culled tree). Half-width
- *  plus a small margin so trunks don't poke the verge. */
+/** Visit every BUSH within `reach` of (x,z) — from the Rust field (one wasm call). No-op until wasm loads. */
+export function forEachBushNear(x: number, z: number, reach: number, cb: (b: ScatterBush) => void): void {
+	const f = rustBushesNear(x, z, reach);
+	if (!f) return;
+	for (let k = 0; k < f.length; k += 5) {
+		cb({ x: f[k], z: f[k + 1], scale: f[k + 2], rot: f[k + 3], colorHash: f[k + 4] });
+	}
+}
+
+/** Is (x, z) on/over any path (road or river)? Keeps ambient trees out of streets — matching the grass carve —
+ *  shared by AmbientScatter (cull) + Player (don't collide with a culled tree). Half-width plus a small margin. */
 export function onPath(paths: Path[] | undefined, x: number, z: number): boolean {
 	for (const p of paths ?? []) {
 		const ax = p.from[0];
@@ -86,18 +66,4 @@ export function onPath(paths: Path[] | undefined, x: number, z: number): boolean
 		if (dx * dx + dz * dz < r * r) return true;
 	}
 	return false;
-}
-
-/** Visit every tree whose cell could place it within `reach` metres of (x, z) — for collision push-out. */
-export function forEachTreeNear(x: number, z: number, reach: number, cb: (t: ScatterTree) => void): void {
-	// a tree is jittered up to ±STEP/2 from its cell centre, so widen the cell search by that margin
-	const span = Math.ceil((reach + SCATTER_STEP / 2) / SCATTER_STEP);
-	const cx = Math.round(x / SCATTER_STEP);
-	const cz = Math.round(z / SCATTER_STEP);
-	for (let ci = cx - span; ci <= cx + span; ci++) {
-		for (let cj = cz - span; cj <= cz + span; cj++) {
-			const t = treeAt(ci, cj);
-			if (t) cb(t);
-		}
-	}
 }

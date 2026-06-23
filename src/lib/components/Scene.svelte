@@ -35,7 +35,7 @@
 	import Critter from './Critter.svelte';
 	import SkyDome from './SkyDome.svelte';
 	import { SKY_FOG, kindDef } from '$lib/kinds';
-	import { treeAt, treeRadius, onPath, SCATTER_STEP } from '$lib/scatter';
+	import { forEachTreeNear, treeRadius, onPath } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { drainBirths, drainBuilds, drainWells, rustTick } from '$lib/rustSim';
 	import { rustPondsNear } from '$lib/rustMath';
@@ -139,18 +139,13 @@
 	// very trees you see, no divergence. Combined with the static props/ponds each feed.
 	function feedObstacles(px: number, pz: number): void {
 		const trees: Obstacle[] = [];
-		const c0 = Math.floor((px - TREE_FEED_R) / SCATTER_STEP);
-		const c1 = Math.floor((px + TREE_FEED_R) / SCATTER_STEP);
-		const d0 = Math.floor((pz - TREE_FEED_R) / SCATTER_STEP);
-		const d1 = Math.floor((pz + TREE_FEED_R) / SCATTER_STEP);
 		const paths = world.paths;
-		for (let ci = c0; ci <= c1; ci++) {
-			for (let cj = d0; cj <= d1; cj++) {
-				const tr = treeAt(ci, cj);
-				if (!tr || onPath(paths, tr.x, tr.z)) continue; // culled on roads → not drawn → don't collide
-				trees.push({ x: tr.x, z: tr.z, r: treeRadius(tr.scale) });
-			}
-		}
+		// the SAME Rust forest field the renderer draws (forEachTreeNear), path-culled → animals route around the
+		// very trunks you see, no divergence. One wasm call. Combined with the static props/ponds each feed.
+		forEachTreeNear(px, pz, TREE_FEED_R, (tr) => {
+			if (onPath(paths, tr.x, tr.z)) return; // culled on roads → not drawn → don't collide
+			trees.push({ x: tr.x, z: tr.z, r: treeRadius(tr.scale) });
+		});
 		lastTreeFeedX = px;
 		lastTreeFeedZ = pz;
 		setRustObstacles([...baseObstacles, ...trees]); // the Rust sim resolves these solids (push-out, no tunnelling)

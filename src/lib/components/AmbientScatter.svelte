@@ -7,7 +7,7 @@
 	import * as THREE from 'three';
 	import { heightAt } from '$lib/terrain';
 	import { playerState } from '$lib/playerState.svelte';
-	import { treeAt, bushAt, onPath, SCATTER_STEP as STEP, BUSH_STEP } from '$lib/scatter';
+	import { forEachTreeNear, forEachBushNear, onPath } from '$lib/scatter';
 	import { inWater } from '$lib/water';
 	import { kindDef } from '$lib/kinds';
 	import { leafColorHex, LEAF_GREENS } from '$lib/sharedAssets';
@@ -119,7 +119,6 @@
 	// canopy COLOUR VARIETY — a real forest is mixed greens with the odd autumn tree, not a monoculture. Each
 	// canopy gets a per-tree colour (instanceColor, base = white) hashed by its WORLD CELL → world-stable, the
 	// dapple shader multiplies through. Same SHARED palette as placed trees (leafColorHex) so they blend.
-	const cellHash = (a: number, b: number) => { const v = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453; return v - Math.floor(v); };
 	const tmpLeaf = new THREE.Color(); // reused → no per-tree alloc in the rebuild
 
 	const trunks = new THREE.InstancedMesh(trunkGeo, windMat('#6b4a2b'), MAX);
@@ -198,42 +197,35 @@
 
 		const px = playerState.pos[0];
 		const pz = playerState.pos[2];
-		const ci0 = Math.floor((px - RADIUS) / STEP);
-		const ci1 = Math.floor((px + RADIUS) / STEP);
-		const cj0 = Math.floor((pz - RADIUS) / STEP);
-		const cj1 = Math.floor((pz + RADIUS) / STEP);
-		const r2 = RADIUS * RADIUS;
 		const blobR2 = BLOB_R * BLOB_R;
 		let n = 0;
 		let nbs = 0;
-		for (let ci = ci0; ci <= ci1 && n < MAX; ci++) {
-			for (let cj = cj0; cj <= cj1 && n < MAX; cj++) {
-				const t = treeAt(ci, cj); // shared placement → collision matches what's drawn
-				if (!t) continue;
-				const td2 = (t.x - px) ** 2 + (t.z - pz) ** 2;
-				if (td2 > r2) continue;
-				if (inWater(world.zones, t.x, t.z) || onPath(world.paths, t.x, t.z)) continue; // no ambient tree in a lake or on a road (matches the grass carve)
-				if (solidBlocked(t.x, t.z)) continue; // ...or clipping a placed building/prop
-				const gy = heightAt(t.x, t.z, world.terrain);
-				dummy.position.set(t.x, gy, t.z);
-				dummy.rotation.set(0, t.rot, 0);
-				dummy.scale.set(t.scale, t.scaleY, t.scale);
-				dummy.updateMatrix();
-				trunks.setMatrixAt(n, dummy.matrix);
-				canopies.setMatrixAt(n, dummy.matrix);
-				canopies.setColorAt(n, tmpLeaf.set(leafColorHex(cellHash(ci, cj))).convertSRGBToLinear()); // mixed greens + odd autumn
-				n++;
-				// ground the NEAR trees with a soft contact-shadow disc sized to the canopy footprint
-				if (td2 < blobR2 && nbs < MAX_BLOBS) {
-					const br = 1.5 * t.scale;
-					blobDummy.position.set(t.x, gy + 0.05, t.z);
-					blobDummy.scale.set(br, 1, br);
-					blobDummy.updateMatrix();
-					treeShadows.setMatrixAt(nbs, blobDummy.matrix);
-					nbs++;
-				}
+		// trees come from the RUST forest field (forEachTreeNear, one wasm call, already bounded to RADIUS); JS only
+		// culls the ones on its own lakes/roads/placed solids, then instances them. Collision (Scene) reads the SAME field.
+		forEachTreeNear(px, pz, RADIUS, (t) => {
+			if (n >= MAX) return;
+			if (inWater(world.zones, t.x, t.z) || onPath(world.paths, t.x, t.z)) return; // no ambient tree in a lake or on a road
+			if (solidBlocked(t.x, t.z)) return; // ...or clipping a placed building/prop
+			const gy = heightAt(t.x, t.z, world.terrain);
+			dummy.position.set(t.x, gy, t.z);
+			dummy.rotation.set(0, t.rot, 0);
+			dummy.scale.set(t.scale, t.scaleY, t.scale);
+			dummy.updateMatrix();
+			trunks.setMatrixAt(n, dummy.matrix);
+			canopies.setMatrixAt(n, dummy.matrix);
+			canopies.setColorAt(n, tmpLeaf.set(leafColorHex(t.colorHash)).convertSRGBToLinear()); // mixed greens + odd autumn
+			n++;
+			// ground the NEAR trees with a soft contact-shadow disc sized to the canopy footprint
+			const td2 = (t.x - px) ** 2 + (t.z - pz) ** 2;
+			if (td2 < blobR2 && nbs < MAX_BLOBS) {
+				const br = 1.5 * t.scale;
+				blobDummy.position.set(t.x, gy + 0.05, t.z);
+				blobDummy.scale.set(br, 1, br);
+				blobDummy.updateMatrix();
+				treeShadows.setMatrixAt(nbs, blobDummy.matrix);
+				nbs++;
 			}
-		}
+		});
 		trunks.count = n;
 		canopies.count = n;
 		trunks.instanceMatrix.needsUpdate = true;
@@ -244,30 +236,21 @@
 
 		// BUSHES on their own coarser grid — sparser and only out to RADIUS_B (small → not worth the far horizon).
 		// Same avoidance as trees (water / road / placed object), but NO collision (you brush through a shrub).
-		const bi0 = Math.floor((px - RADIUS_B) / BUSH_STEP);
-		const bi1 = Math.floor((px + RADIUS_B) / BUSH_STEP);
-		const bj0 = Math.floor((pz - RADIUS_B) / BUSH_STEP);
-		const bj1 = Math.floor((pz + RADIUS_B) / BUSH_STEP);
-		const rb2 = RADIUS_B * RADIUS_B;
 		let nb = 0;
-		for (let ci = bi0; ci <= bi1 && nb < MAXB; ci++) {
-			for (let cj = bj0; cj <= bj1 && nb < MAXB; cj++) {
-				const b = bushAt(ci, cj);
-				if (!b) continue;
-				if ((b.x - px) ** 2 + (b.z - pz) ** 2 > rb2) continue;
-				if (inWater(world.zones, b.x, b.z) || onPath(world.paths, b.x, b.z)) continue;
-				if (solidBlocked(b.x, b.z)) continue;
-				dummy.position.set(b.x, heightAt(b.x, b.z, world.terrain), b.z);
-				dummy.rotation.set(0, b.rot, 0);
-				dummy.scale.set(b.scale, b.scale, b.scale);
-				dummy.updateMatrix();
-				bushes.setMatrixAt(nb, dummy.matrix);
-				// shrub green varies too (greens only — shrubs are evergreen, no autumn), so the undergrowth isn't
-				// a clone field either; offset hash so a bush isn't the exact shade of the canopy above it
-				bushes.setColorAt(nb, tmpLeaf.set(LEAF_GREENS[Math.floor(cellHash(ci + 4, cj - 7) * LEAF_GREENS.length)]).convertSRGBToLinear());
-				nb++;
-			}
-		}
+		forEachBushNear(px, pz, RADIUS_B, (b) => {
+			if (nb >= MAXB) return;
+			if (inWater(world.zones, b.x, b.z) || onPath(world.paths, b.x, b.z)) return;
+			if (solidBlocked(b.x, b.z)) return;
+			dummy.position.set(b.x, heightAt(b.x, b.z, world.terrain), b.z);
+			dummy.rotation.set(0, b.rot, 0);
+			dummy.scale.set(b.scale, b.scale, b.scale);
+			dummy.updateMatrix();
+			bushes.setMatrixAt(nb, dummy.matrix);
+			// shrub green varies too (greens only — evergreen, no autumn); Rust's bush colorHash already offsets it
+			// from the canopy above, so the undergrowth isn't a clone field of the trees.
+			bushes.setColorAt(nb, tmpLeaf.set(LEAF_GREENS[Math.floor(b.colorHash * LEAF_GREENS.length)]).convertSRGBToLinear());
+			nb++;
+		});
 		bushes.count = nb;
 		bushes.instanceMatrix.needsUpdate = true;
 		if (bushes.instanceColor) bushes.instanceColor.needsUpdate = true;

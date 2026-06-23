@@ -216,6 +216,113 @@ pub fn nearest_natural_pond(x: f64, z: f64) -> Option<(f64, f64, f64)> {
     best
 }
 
+// ───────────────────────── AMBIENT SCATTER (Rust owns the forest field) ─────────────────────────
+// Deterministic placement of ambient TREES (clumped into forests) + BUSHES — ported from src/lib/scatter.ts so
+// Rust is the single source of truth (render + collision both read the SAME field). Window queries (trees_near /
+// bushes_near) so it crosses the wasm boundary ONCE per forest rebuild, not per cell (cheap serialization). Uses
+// f64::sin like the JS original — not bit-identical to JS's Math.sin, so the forest is a hair reshuffled vs the old
+// JS placement, but consistent (render == collision). JS keeps only the render-side avoidance (paths/lakes it owns).
+const SCATTER_STEP: f64 = 16.0; // forest grid cell (m)
+const SCATTER_CLEAR: f64 = 70.0; // spawn/build area kept tree-free (radius from origin)
+const BUSH_STEP: f64 = 11.0;
+
+fn sfract(v: f64) -> f64 {
+    v - v.floor()
+}
+fn shash(i: f64, j: f64, s: f64) -> f64 {
+    sfract((i * 127.1 + j * 311.7 + s * 74.7).sin() * 43758.5453)
+}
+fn bhash(i: f64, j: f64, s: f64) -> f64 {
+    sfract((i * 157.3 + j * 271.9 + s * 53.1).sin() * 43758.5453)
+}
+fn forest(x: f64, z: f64) -> f64 {
+    (x * 0.018 + 2.0).sin() * (z * 0.016 - 1.0).cos() + 0.4 * (x * 0.05).sin() * (z * 0.045).cos()
+}
+fn color_hash(a: f64, b: f64) -> f64 {
+    sfract((a * 12.9898 + b * 78.233).sin() * 43758.5453)
+}
+
+/// The tree in cell (ci,cj): (x, z, scale, scaleY, rot, colorHash), or None. Mirrors scatter.ts `treeAt`.
+fn tree_in_cell(ci: i32, cj: i32) -> Option<(f64, f64, f64, f64, f64, f64)> {
+    let (ci, cj) = (ci as f64, cj as f64);
+    let cell_x = ci * SCATTER_STEP;
+    let cell_z = cj * SCATTER_STEP;
+    if cell_x * cell_x + cell_z * cell_z < SCATTER_CLEAR * SCATTER_CLEAR {
+        return None; // keep spawn clear
+    }
+    if forest(cell_x, cell_z) + (shash(ci, cj, 1.0) - 0.5) < 0.35 {
+        return None; // forest clumps only
+    }
+    let scale = 1.3 + shash(ci, cj, 4.0) * 1.6;
+    Some((
+        cell_x + (shash(ci, cj, 2.0) - 0.5) * SCATTER_STEP,
+        cell_z + (shash(ci, cj, 3.0) - 0.5) * SCATTER_STEP,
+        scale,
+        scale + shash(ci, cj, 6.0) * 0.8,
+        shash(ci, cj, 5.0) * 6.283,
+        color_hash(ci, cj),
+    ))
+}
+
+/// The bush in cell (ci,cj): (x, z, scale, rot, colorHash), or None. Mirrors scatter.ts `bushAt` (offset color hash).
+fn bush_in_cell(ci: i32, cj: i32) -> Option<(f64, f64, f64, f64, f64)> {
+    let (cif, cjf) = (ci as f64, cj as f64);
+    let cell_x = cif * BUSH_STEP;
+    let cell_z = cjf * BUSH_STEP;
+    if cell_x * cell_x + cell_z * cell_z < SCATTER_CLEAR * SCATTER_CLEAR {
+        return None;
+    }
+    if bhash(cif, cjf, 1.0) > 0.2 {
+        return None; // ~1 in 5 cells
+    }
+    Some((
+        cell_x + (bhash(cif, cjf, 2.0) - 0.5) * BUSH_STEP,
+        cell_z + (bhash(cif, cjf, 3.0) - 0.5) * BUSH_STEP,
+        0.55 + bhash(cif, cjf, 4.0) * 0.75,
+        bhash(cif, cjf, 5.0) * 6.283,
+        color_hash(cif + 4.0, cjf - 7.0),
+    ))
+}
+
+/// All trees within `reach` of (px,pz) — flat [x, z, scale, scaleY, rot, colorHash] × n. The renderer + collision
+/// read this (one wasm call per rebuild); JS still culls trees on its player-made paths/lakes (data it owns).
+pub fn trees_near(px: f64, pz: f64, reach: f64) -> Vec<f64> {
+    let span = ((reach + SCATTER_STEP * 0.5) / SCATTER_STEP).ceil() as i32;
+    let cx = (px / SCATTER_STEP).round() as i32;
+    let cz = (pz / SCATTER_STEP).round() as i32;
+    let r2 = reach * reach;
+    let mut out = Vec::new();
+    for ci in (cx - span)..=(cx + span) {
+        for cj in (cz - span)..=(cz + span) {
+            if let Some((x, z, s, sy, rot, ch)) = tree_in_cell(ci, cj) {
+                if (x - px).powi(2) + (z - pz).powi(2) <= r2 {
+                    out.extend_from_slice(&[x, z, s, sy, rot, ch]);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// All bushes within `reach` of (px,pz) — flat [x, z, scale, rot, colorHash] × n.
+pub fn bushes_near(px: f64, pz: f64, reach: f64) -> Vec<f64> {
+    let span = ((reach + BUSH_STEP * 0.5) / BUSH_STEP).ceil() as i32;
+    let cx = (px / BUSH_STEP).round() as i32;
+    let cz = (pz / BUSH_STEP).round() as i32;
+    let r2 = reach * reach;
+    let mut out = Vec::new();
+    for ci in (cx - span)..=(cx + span) {
+        for cj in (cz - span)..=(cz + span) {
+            if let Some((x, z, s, rot, ch)) = bush_in_cell(ci, cj) {
+                if (x - px).powi(2) + (z - pz).powi(2) <= r2 {
+                    out.extend_from_slice(&[x, z, s, rot, ch]);
+                }
+            }
+        }
+    }
+    out
+}
+
 // ───────────────────────── op application (mirror of src/lib/engine.ts applyOps) ─────────────────────────
 use jzon::{array, object, JsonValue};
 

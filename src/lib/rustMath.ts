@@ -13,6 +13,8 @@ interface MathGlue {
 	ff_gene: (gene: number, rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, dt: number) => number;
 	band_spread: (count: number, ax: number, az: number, r: number) => Float64Array;
 	ponds_near: (px: number, pz: number, reach: number) => Float64Array;
+	trees_near: (px: number, pz: number, reach: number) => Float64Array;
+	bushes_near: (px: number, pz: number, reach: number) => Float64Array;
 	migrate_weights: () => Float64Array;
 	eco_render: () => Float64Array;
 	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
@@ -72,6 +74,16 @@ export function rustBandSpread(count: number, ax: number, az: number, r: number)
  *  field); the renderer calls this once per area to draw them. Flat [x, z, radius, …], or null if wasm isn't loaded. */
 export function rustPondsNear(px: number, pz: number, reach: number): Float64Array | null {
 	return glue ? glue.ponds_near(px, pz, reach) : null;
+}
+
+/** Ambient TREES near (px,pz) — Rust owns the forest field. Flat [x,z,scale,scaleY,rot,colorHash]×n, or null. */
+export function rustTreesNear(px: number, pz: number, reach: number): Float64Array | null {
+	return glue ? glue.trees_near(px, pz, reach) : null;
+}
+
+/** Ambient BUSHES near (px,pz). Flat [x,z,scale,rot,colorHash]×n, or null. */
+export function rustBushesNear(px: number, pz: number, reach: number): Float64Array | null {
+	return glue ? glue.bushes_near(px, pz, reach) : null;
 }
 
 /** Per-kind MIGRATION weight from the sim (the source of truth), by Kind order [rabbit,cat,kangaroo,person,lion,
