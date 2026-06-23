@@ -420,8 +420,8 @@ const DRY_AMP: f64 = 0.3; // peak DRY season multiplies thirst drain by 1+DRY_AM
 // A baby's VIGOR gene = the average of its parents' genes, ± a small mutation. Vigor scales max speed, so
 // selection has something to act on: faster prey survive predators, faster predators catch prey → the
 // population ADAPTS over generations. Clamped so a runaway lineage can't become absurd.
-const GENE_MIN: f64 = 0.6;
-const GENE_MAX: f64 = 1.6;
+pub const GENE_MIN: f64 = 0.6;
+pub const GENE_MAX: f64 = 1.6;
 const GENE_MUT: f64 = 0.05; // ± mutation magnitude per birth
 const CH_GENE: i32 = 20; // RNG channel for the mutation roll (distinct from eco/steering channels)
 

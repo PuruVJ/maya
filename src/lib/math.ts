@@ -19,6 +19,8 @@ interface MathGlue {
 	bushes_near: (px: number, pz: number, reach: number) => Float64Array;
 	migrate_weights: () => Float64Array;
 	eco_render: () => Float64Array;
+	gene_bounds: () => Float64Array;
+	tick_hz: () => number;
 	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
 }
 
@@ -103,6 +105,16 @@ class WorldMath {
 		return this.#call((g) => g.eco_render());
 	}
 
+	/** The VIGOR gene bounds [min, max] — the sim's source of truth (prefer the cached `clampGene` helper below). */
+	geneBounds(): Float64Array | null {
+		return this.#call((g) => g.gene_bounds());
+	}
+
+	/** Sim ticks per second (1/DT) from the sim's clock — region streaming derives dormant-span seconds from this. */
+	tickHz(): number | null {
+		return this.#call((g) => g.tick_hz());
+	}
+
 	/** THE ENGINE — apply `ops` to a world (both JSON strings) for a player at (px,pz,yaw). New world + conflicts. */
 	applyOps(worldJson: string, opsJson: string, px: number, pz: number, yaw: number): { world: unknown; conflicts: unknown[] } | null {
 		return this.#call((g) => JSON.parse(g.apply_ops(worldJson, opsJson, px, pz, yaw)) as { world: unknown; conflicts: unknown[] });
@@ -117,3 +129,26 @@ class WorldMath {
 /** The world's MATH — the single main-thread wasm-math instance. Use `math.pondsNear(...)`, `math.init()`, etc.
  *  (The name says what it is, not how it's built; the wasm is an implementation detail.) */
 export const math = new WorldMath();
+
+// ── cached sim constants (read ONCE from the source of truth, no duplicated literals scattered around) ───────────
+let geneLo = 0.6; // overwritten from Rust on first use (these literals are only the pre-wasm-load fallback)
+let geneHi = 1.6;
+let geneSynced = false;
+/** Clamp a vigor gene to the sim's [GENE_MIN, GENE_MAX] — bounds come from Rust (gene_bounds), not a copied 0.6/1.6. */
+export function clampGene(v: number): number {
+	if (!geneSynced) {
+		const b = math.geneBounds();
+		if (b) ((geneLo = b[0]), (geneHi = b[1]), (geneSynced = true));
+	}
+	return v < geneLo ? geneLo : v > geneHi ? geneHi : v;
+}
+
+let tickHzCache = 0;
+/** Sim ticks per second from the sim's clock (cached). 30 only as the pre-wasm-load fallback. */
+export function tickHz(): number {
+	if (!tickHzCache) {
+		const h = math.tickHz();
+		if (h) tickHzCache = h;
+	}
+	return tickHzCache || 30;
+}

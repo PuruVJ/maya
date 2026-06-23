@@ -115,6 +115,20 @@ mod wasm_api {
         crate::engine::bushes_near(px, pz, reach)
     }
 
+    /// The VIGOR gene bounds [GENE_MIN, GENE_MAX] — the sim's source of truth, so the JS clamps that defensively
+    /// keep a read-back/aggregate gene in range read it from here instead of hard-coding 0.6/1.6 in six places.
+    #[wasm_bindgen]
+    pub fn gene_bounds() -> Vec<f64> {
+        vec![crate::world::GENE_MIN, crate::world::GENE_MAX]
+    }
+
+    /// Sim ticks per second (1 / DT) — the fixed-timestep rate, so JS region-streaming derives dormant-span seconds
+    /// from the sim's clock instead of a duplicated `TICK_HZ = 30`.
+    #[wasm_bindgen]
+    pub fn tick_hz() -> f64 {
+        1.0 / crate::clock::DT
+    }
+
     /// Per-kind MIGRATION weight, by Kind order [rabbit, cat, kangaroo, person, lion, dinosaur] — the sim's source
     /// of truth (world::migrate_weight), so the HUD reads it from here instead of hard-coding a duplicate copy.
     #[wasm_bindgen]

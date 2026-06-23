@@ -1,5 +1,5 @@
 // Canonical world-state types + builders. This is what gets gzip+base64'd into the URL.
-import { math } from './math';
+import { math, clampGene } from './math';
 import { inWater } from './water';
 import DEMO_SNAPSHOT from './demoWorld.json';
 
@@ -146,7 +146,7 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 			for (let i = 0; i < want - have; i++) {
 				const x = minX + Math.random() * (maxX - minX);
 				const z = minZ + Math.random() * (maxZ - minZ);
-				const gene = Math.max(0.6, Math.min(1.6, avgGene - 0.05 + Math.random() * 0.1));
+				const gene = clampGene(avgGene - 0.05 + Math.random() * 0.1);
 				world.objects.push({ id: idPrefix + nid++, kind: k, pos: [x, 0, z], gene });
 				net++;
 			}
