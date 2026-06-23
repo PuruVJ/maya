@@ -160,7 +160,23 @@
 				const pondsNearPlayer: { x: number; z: number; r: number }[] = [];
 				if (flat) for (let k = 0; k < flat.length; k += 3) pondsNearPlayer.push({ x: r1(flat[k]), z: r1(flat[k + 1]), r: r1(flat[k + 2]) });
 				let live = 0;
-				agentManager.forEach(() => live++);
+				// nearby agents (≤45 m) — what you're actually watching; captures a jittering/dying couple's state
+				const nearbyAgents: unknown[] = [];
+				agentManager.forEach((m) => {
+					live++;
+					const d2 = (m.agent.x - px) ** 2 + (m.agent.z - pz) ** 2;
+					if (d2 <= 45 * 45)
+						nearbyAgents.push({
+							kind: m.kind,
+							pos: [r1(m.agent.x), r1(m.agent.z)],
+							dist: r1(Math.sqrt(d2)),
+							behavior: m.agent.behavior,
+							health: r1(m.health),
+							ageFrac: m.ageFrac != null ? r1(m.ageFrac) : undefined,
+							flags: [m.dead && 'dead', m.asleep && 'asleep', m.pregnant && 'pregnant', m.guardian && 'guardian', m.migrating && 'migrating', m.drinking && 'drinking'].filter(Boolean)
+						});
+				});
+				nearbyAgents.sort((a, b) => (a as { dist: number }).dist - (b as { dist: number }).dist);
 				const dumpStore = (s: Storage) => Object.fromEntries(Array.from({ length: s.length }, (_, i) => [s.key(i)!, s.getItem(s.key(i)!)!]));
 				let cache: unknown = null;
 				try {
@@ -173,6 +189,7 @@
 					player: { pos: playerState.pos.map(r1), yaw: r1(playerState.yaw), state: playerState.state, grounded: playerState.grounded },
 					world: { name: world.name, ground: world.ground, sky: world.sky, objects: world.objects.length, byKind, zones: world.zones, paths: world.paths?.length ?? 0, terrain: world.terrain?.length ?? 0, start: world.start, regions: Object.keys(world.regions ?? {}).length },
 					pondsNearPlayer,
+					nearbyAgents,
 					sim: { status: sim.status(), danger: r1(sim.danger()), liveAgents: live },
 					clock: { tick: clock.tick, rate: clock.rate, paused: clock.paused },
 					nature: { aridity: r1(nature.aridity) },
