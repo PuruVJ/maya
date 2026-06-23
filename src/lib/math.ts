@@ -29,6 +29,14 @@ class WorldMath {
 	#glue: MathGlue | null = null;
 	#loading: Promise<void> | null = null;
 
+	// cached sim constants — read ONCE from the source of truth (Rust) on first use, then memoised. The literals
+	// are ONLY the pre-wasm-load fallback (they match the Rust defaults). All this state lives on the instance.
+	#geneLo = 0.6;
+	#geneHi = 1.6;
+	#geneSynced = false;
+	#tickHzCache = 0;
+	#personGestationCache = 0;
+
 	/** True once the wasm math instance is callable. */
 	get ready(): boolean {
 		return this.#glue !== null;
@@ -116,9 +124,14 @@ class WorldMath {
 		return this.#call((g) => g.gene_bounds());
 	}
 
-	/** Sim ticks per second (1/DT) from the sim's clock — region streaming derives dormant-span seconds from this. */
-	tickHz(): number | null {
-		return this.#call((g) => g.tick_hz());
+	/** Sim ticks per second (1/DT) from the sim's clock (cached) — region streaming derives dormant-span seconds from
+	 *  this, no duplicated `30`. 30 only as the pre-wasm-load fallback. */
+	tickHz(): number {
+		if (!this.#tickHzCache) {
+			const h = this.#call((g) => g.tick_hz());
+			if (h) this.#tickHzCache = h;
+		}
+		return this.#tickHzCache || 30;
 	}
 
 	/** THE ENGINE — apply `ops` to a world (both JSON strings) for a player at (px,pz,yaw). New world + conflicts. */
@@ -130,42 +143,29 @@ class WorldMath {
 	ffGene(gene: number, c: Record<string, number>, dtSec: number): number {
 		return this.#call((g) => g.ff_gene(gene, c.rabbit ?? 0, c.cat ?? 0, c.kangaroo ?? 0, c.person ?? 0, c.lion ?? 0, c.dinosaur ?? 0, dtSec), gene) as number;
 	}
+
+	/** Clamp a vigor gene to the sim's [GENE_MIN, GENE_MAX] — bounds come from Rust (gene_bounds, cached), not a
+	 *  copied 0.6/1.6 in six places. */
+	clampGene(v: number): number {
+		if (!this.#geneSynced) {
+			const b = this.geneBounds();
+			if (b) ((this.#geneLo = b[0]), (this.#geneHi = b[1]), (this.#geneSynced = true));
+		}
+		return v < this.#geneLo ? this.#geneLo : v > this.#geneHi ? this.#geneHi : v;
+	}
+
+	/** A person's gestation in seconds from the sim (cached) — so the pregnancy belly-grow lands exactly at delivery.
+	 *  72 only as the pre-wasm-load fallback (matches world::gestation(Person)); person is index 3 in Kind order. */
+	personGestation(): number {
+		if (!this.#personGestationCache) {
+			const g = this.gestationSecs();
+			if (g && g.length > 3) this.#personGestationCache = g[3];
+		}
+		return this.#personGestationCache || 72;
+	}
 }
 
-/** The world's MATH — the single main-thread wasm-math instance. Use `math.pondsNear(...)`, `math.init()`, etc.
+/** The world's MATH — the single main-thread wasm-math instance, owning the wasm handle, the load lifecycle, AND
+ *  the cached sim constants. Use `math.pondsNear(...)`, `math.clampGene(...)`, `math.tickHz()`, `math.init()`, etc.
  *  (The name says what it is, not how it's built; the wasm is an implementation detail.) */
 export const math = new WorldMath();
-
-// ── cached sim constants (read ONCE from the source of truth, no duplicated literals scattered around) ───────────
-let geneLo = 0.6; // overwritten from Rust on first use (these literals are only the pre-wasm-load fallback)
-let geneHi = 1.6;
-let geneSynced = false;
-/** Clamp a vigor gene to the sim's [GENE_MIN, GENE_MAX] — bounds come from Rust (gene_bounds), not a copied 0.6/1.6. */
-export function clampGene(v: number): number {
-	if (!geneSynced) {
-		const b = math.geneBounds();
-		if (b) ((geneLo = b[0]), (geneHi = b[1]), (geneSynced = true));
-	}
-	return v < geneLo ? geneLo : v > geneHi ? geneHi : v;
-}
-
-let tickHzCache = 0;
-/** Sim ticks per second from the sim's clock (cached). 30 only as the pre-wasm-load fallback. */
-export function tickHz(): number {
-	if (!tickHzCache) {
-		const h = math.tickHz();
-		if (h) tickHzCache = h;
-	}
-	return tickHzCache || 30;
-}
-
-let personGestationCache = 0; // Kind order [rabbit,cat,kangaroo,person,lion,dinosaur] → person is index 3
-/** A person's gestation in seconds from the sim (cached) — so the pregnancy belly-grow lands exactly at delivery.
- *  72 only as the pre-wasm-load fallback (matches world::gestation(Person)). */
-export function personGestation(): number {
-	if (!personGestationCache) {
-		const g = math.gestationSecs();
-		if (g && g.length > 3) personGestationCache = g[3];
-	}
-	return personGestationCache || 72;
-}

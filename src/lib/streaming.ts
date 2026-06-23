@@ -9,7 +9,7 @@
 // a region cell. Determinism: positions come from the seeded hash RNG so the same region re-materialises consistently.
 import type { World, WorldObject } from './world';
 import { worldAreaScale } from './world';
-import { math, clampGene, tickHz } from './math';
+import { math } from './math';
 import { heightAt } from './terrain';
 import { kindDef } from './kinds';
 import { rand } from './rng';
@@ -19,7 +19,7 @@ const FF_KINDS = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] as 
 
 export const REGION_SIZE = 200; // metres per region tile
 const ACTIVE_RING = 1; // regions within this Chebyshev ring of the player's stay LIVE (3×3 → ~600 m live span)
-// tick rate comes from the sim clock (math.tickHz) — see the tickHz import, no duplicated 30 here
+// tick rate comes from the sim clock (math.tickHz(), cached) — no duplicated 30 here
 
 export const regionKey = (cx: number, cz: number): string => `${cx},${cz}`;
 export const regionOf = (x: number, z: number): [number, number] => [Math.floor(x / REGION_SIZE), Math.floor(z / REGION_SIZE)];
@@ -59,7 +59,7 @@ export function collapseRegion(world: World, key: string, tick: number): void {
 	for (const k in counts) merged[k] = (merged[k] ?? 0) + counts[k];
 	world.regions[key] = {
 		counts: merged,
-		gene: clampGene(geneN > 0 ? geneSum / geneN : (prev?.gene ?? 1)),
+		gene: math.clampGene(geneN > 0 ? geneSum / geneN : (prev?.gene ?? 1)),
 		statics: [...(prev?.statics ?? []), ...statics],
 		lastTick: tick
 	};
@@ -71,7 +71,7 @@ export function wakeRegion(world: World, key: string, tick: number, idPrefix: st
 	const agg = world.regions?.[key];
 	if (!agg) return 0;
 	const [cx, cz] = key.split(',').map(Number);
-	const dtSec = Math.max(0, (tick - agg.lastTick) / tickHz());
+	const dtSec = Math.max(0, (tick - agg.lastTick) / math.tickHz());
 	const c = agg.counts;
 	const scale = worldAreaScale(world.objects);
 	// fast-forward the dormant population toward carrying capacity (Rust). Wasm not loaded / no time → keep the counts.
@@ -110,7 +110,7 @@ export function fastForwardDormant(world: World, tick: number): void {
 	const scale = worldAreaScale(world.objects);
 	for (const key in world.regions) {
 		const agg = world.regions[key];
-		const dtSec = (tick - agg.lastTick) / tickHz();
+		const dtSec = (tick - agg.lastTick) / math.tickHz();
 		if (dtSec <= 0) continue;
 		const c = agg.counts;
 		const adv = math.ffTargets(c.rabbit ?? 0, c.cat ?? 0, c.kangaroo ?? 0, c.person ?? 0, c.lion ?? 0, c.dinosaur ?? 0, scale, dtSec);
@@ -120,7 +120,7 @@ export function fastForwardDormant(world: World, tick: number): void {
 			// evolve vigor over the span (BEFORE overwriting counts). CLAMP defensively to the gene band: ff_gene
 			// should already, but a stale/mismatched main-thread wasm must never let agg.gene drift past 1.6 — that
 			// was inflating the HUD "vigor" readout over time (and region-dependent, as dormant regions came/went).
-			agg.gene = clampGene(math.ffGene(agg.gene, c, dtSec));
+			agg.gene = math.clampGene(math.ffGene(agg.gene, c, dtSec));
 			agg.counts = next;
 		}
 		agg.lastTick = tick;

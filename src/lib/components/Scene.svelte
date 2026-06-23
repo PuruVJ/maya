@@ -38,7 +38,7 @@
 	import { forEachTreeNear, treeRadius, onPath } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { sim } from '$lib/sim';
-	import { math, clampGene } from '$lib/math';
+	import { math } from '$lib/math';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { worldAreaScale } from '$lib/world';
 	import { streamRegions, regionOf, fastForwardDormant } from '$lib/streaming';
@@ -468,7 +468,7 @@
 				for (let k = 0; k < bring; k++) {
 					const x = bx + (Math.random() - 0.5) * 12; // jittered within the group, all near one another
 					const z = bz + (Math.random() - 0.5) * 12;
-					const gene = clampGene(center - 0.06 + Math.random() * 0.34);
+					const gene = math.clampGene(center - 0.06 + Math.random() * 0.34);
 					world.objects.push({ id: migrantPrefix + migrantN++, kind, pos: [x, 0, z], gene });
 				}
 			}
@@ -540,7 +540,7 @@
 				for (let k = 0; k < wc.count; k++) {
 					const x = bx + (Math.random() - 0.5) * 14;
 					const z = bz + (Math.random() - 0.5) * 14;
-					const gene = clampGene(wc.gene - 0.08 + Math.random() * 0.2);
+					const gene = math.clampGene(wc.gene - 0.08 + Math.random() * 0.2);
 					world.objects.push({ id: migrantPrefix + migrantN++, kind: wc.kind, pos: [x, 0, z], gene });
 				}
 				nature.announce(wc.banner);

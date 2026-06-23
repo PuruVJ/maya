@@ -8,7 +8,7 @@
 	import { agentManager } from '$lib/agents.svelte';
 	import { sim } from '$lib/sim';
 	import { nature } from '$lib/nature.svelte';
-	import { math, clampGene } from '$lib/math';
+	import { math } from '$lib/math';
 	import type { World } from '$lib/world';
 
 	// CLIMATE chip — the macro-director's current drought level (nature.aridity, fed to the sim's set_aridity). A
@@ -90,7 +90,7 @@
 			agentManager.forEach((m) => {
 				if (m.dead) return; // live only (corpses excluded)
 				c[m.kind] = (c[m.kind] ?? 0) + 1;
-				geneSum += clampGene(m.gene ?? 1); // gene is defined 0.6..1.6; clamp the readout defensively
+				geneSum += math.clampGene(m.gene ?? 1); // gene is defined 0.6..1.6; clamp the readout defensively
 				// sex: even seedId = female (matches Rust is_female); migrating = the Rust roamer flag (bit4)
 				if ((m.seedId & 1) === 0) f[m.kind] = (f[m.kind] ?? 0) + 1;
 				else mle[m.kind] = (mle[m.kind] ?? 0) + 1;
@@ -144,7 +144,7 @@
 						mig[k] = (mig[k] ?? 0) + agg.counts[k] * (MIGRATE_WEIGHT[k] ?? 0.3) * DORMANT_MIGRATE_FRAC;
 					}
 					live += regN;
-					geneSum += clampGene(agg.gene) * regN; // clamp the dormant aggregate's gene too
+					geneSum += math.clampGene(agg.gene) * regN; // clamp the dormant aggregate's gene too
 				}
 			}
 			for (const k in mig) mig[k] = Math.round(mig[k]); // live (exact) + dormant (estimated) → whole-world ✈
