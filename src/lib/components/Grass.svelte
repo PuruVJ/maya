@@ -287,6 +287,8 @@
 	const WATER_EDGE = 1.05;
 	let lastPondSyncX = NaN; // re-sync the player-relative natural ponds when you walk this far
 	let lastPondSyncZ = NaN;
+	let syncedWithWasm = false; // false until a sync ran with the wasm READY — so a reload AT a lake (wasm still
+	// loading at first sync, player stationary → no move-resync) still gets its natural ponds carved once it loads
 	function syncWorldUniforms() {
 		const feats = world.terrain ?? [];
 		uniforms.uFeatCount.value = Math.min(feats.length, MAXF);
@@ -294,22 +296,27 @@
 			const f = feats[i];
 			uniforms.uFeatures.value[i].set(f.center[0], f.center[1], f.radius, f.height);
 		}
+		// Gather every grass-carving candidate — placed SKIP zones (water/path/plaza) + the nearby NATURAL ponds —
+		// each with its distance² to the player, then keep the NEAREST MAXZ. This GUARANTEES the water you're standing
+		// in is always culled: it can never be starved of a uniform slot by a distant zone (the bug where a lake you
+		// stand in shows grass over most of it). Water (×WATER_EDGE to the blob's max edge) also seeds the reed band.
+		const px = playerState.pos[0];
+		const pz = playerState.pos[2];
+		const skips: { x: number; z: number; size: number; water: boolean; d2: number }[] = [];
+		for (const z of world.zones ?? []) {
+			if (!SKIP.has(z.material)) continue;
+			const water = z.material === 'water';
+			skips.push({ x: z.pos[0], z: z.pos[2], size: water ? z.size * WATER_EDGE : z.size, water, d2: (z.pos[0] - px) ** 2 + (z.pos[2] - pz) ** 2 });
+		}
+		const np = math.pondsNear(px, pz, GRASS_POND_R);
+		if (np) for (let k = 0; k < np.length; k += 3) skips.push({ x: np[k], z: np[k + 1], size: np[k + 2] * WATER_EDGE, water: true, d2: (np[k] - px) ** 2 + (np[k + 1] - pz) ** 2 });
+		skips.sort((a, b) => a.d2 - b.d2); // nearest first → the water under/around you always makes the cut
 		let n = 0;
 		let wr = 0;
-		for (const z of world.zones ?? []) {
-			const isWater = z.material === 'water';
-			// water carves + reeds out to the blob's MAX edge (×WATER_EDGE); other zones (path/plaza) use their size.
-			if (isWater && wr < MAXWR) uniforms.uWater.value[wr++].set(z.pos[0], z.pos[2], z.size * WATER_EDGE); // reed beds
-			if (n >= MAXZ || !SKIP.has(z.material)) continue;
-			uniforms.uSkip.value[n++].set(z.pos[0], z.pos[2], isWater ? z.size * WATER_EDGE : z.size);
-		}
-		// NATURAL ponds (procedural, player-relative) carve grass + grow a reed bank too — feed the nearby ones into
-		// the remaining slots so grass doesn't grow in the water (out to the blob's max edge). Re-synced as you walk.
-		const np = math.pondsNear(playerState.pos[0], playerState.pos[2], GRASS_POND_R);
-		if (np) for (let k = 0; k < np.length; k += 3) {
-			const r = np[k + 2] * WATER_EDGE;
-			if (wr < MAXWR) uniforms.uWater.value[wr++].set(np[k], np[k + 1], r);
-			if (n < MAXZ) uniforms.uSkip.value[n++].set(np[k], np[k + 1], r);
+		for (const s of skips) {
+			if (n < MAXZ) uniforms.uSkip.value[n++].set(s.x, s.z, s.size);
+			if (s.water && wr < MAXWR) uniforms.uWater.value[wr++].set(s.x, s.z, s.size);
+			if (n >= MAXZ && wr >= MAXWR) break;
 		}
 		uniforms.uSkipCount.value = n;
 		uniforms.uWaterCount.value = wr;
@@ -367,9 +374,11 @@
 		// resync on a zone/terrain change OR once the player has walked far enough that the nearby NATURAL ponds
 		// (player-relative, sparse on a 300 m grid) may have changed — keeps grass carved out of the water you're near.
 		const movedPond = (playerState.pos[0] - lastPondSyncX) ** 2 + (playerState.pos[2] - lastPondSyncZ) ** 2 > 60 * 60;
-		if (tl !== lastTerrain || zl !== lastZones || movedPond) {
+		const wasmJustReady = !syncedWithWasm && math.ready; // one-shot: re-feed natural ponds the moment wasm loads
+		if (tl !== lastTerrain || zl !== lastZones || movedPond || wasmJustReady) {
 			lastTerrain = tl;
 			lastZones = zl;
+			if (math.ready) syncedWithWasm = true;
 			syncWorldUniforms();
 		}
 	});
