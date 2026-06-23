@@ -5,9 +5,9 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
-		"build": "npm run build:wasm && vite build",
+		"build": "vite build",
 		"preview": "vite preview",
-		"deploy": "vite build && wrangler deploy",
+		"deploy": "npm run build:wasm && vite build && wrangler deploy",
 		"cf-types": "wrangler types",
 		"test": "vitest run",
 		"test:watch": "vitest",
