@@ -185,10 +185,12 @@
 		if (legR) legR.rotation.x = -swing;
 		if (armL) armL.rotation.x = -swing * 0.85; // arms opposite their same-side leg
 		if (armR) armR.rotation.x = swing * 0.85;
-		// PREGNANT → both hands cradle the belly (forward + inward), with a tiny residual sway from the gait
+		// PREGNANT → both hands cradle the belly (forward + inward), with a tiny residual sway from the gait. The arm
+		// hangs down from the shoulder and FRONT is +z (the eyes face +z), so a NEGATIVE x-rotation swings the hands
+		// FORWARD onto the bump (positive swung them behind the back — the "ninja" pose). z tilts them inward to meet.
 		if (pregnant && female) {
-			if (armL) ((armL.rotation.x = 1.05 + swing * 0.1), (armL.rotation.z = 0.32));
-			if (armR) ((armR.rotation.x = 1.05 - swing * 0.1), (armR.rotation.z = -0.32));
+			if (armL) ((armL.rotation.x = -1.0 + swing * 0.1), (armL.rotation.z = -0.34));
+			if (armR) ((armR.rotation.x = -1.0 - swing * 0.1), (armR.rotation.z = 0.34));
 		} else if (armL && armR) {
 			armL.rotation.z = 0; // clear any cradle lean when not (or no longer) carrying
 			armR.rotation.z = 0;
@@ -234,7 +236,7 @@
 		<T.Mesh position={[0, 1.05, 0]} geometry={NPC.torso} material={creatureMat(SHIRT)} castShadow />
 		<!-- PREGNANT → a rounded belly that grows over gestation (females only; bellyScale ramps 0.5→1 in the task) -->
 		{#if female && pregnant}
-			<T.Mesh geometry={PRIM.sphere} scale={[0.34 * bellyScale, 0.32 * bellyScale, 0.36 * bellyScale]} position={[0, 0.92, 0.12 + 0.08 * bellyScale]} material={creatureMat(SHIRT)} castShadow />
+			<T.Mesh geometry={PRIM.sphere} scale={[0.34 * bellyScale, 0.34 * bellyScale, 0.4 * bellyScale]} position={[0, 1.02, 0.22 + 0.1 * bellyScale]} material={creatureMat(SHIRT)} castShadow />
 		{/if}
 		<!-- head pivot -->
 		<T.Group bind:ref={head} position={[0, 1.62, 0]}>
