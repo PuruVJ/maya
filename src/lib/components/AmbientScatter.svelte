@@ -154,13 +154,19 @@
 		const len = world.terrain.length;
 		const zl = world.zones?.length ?? 0; // re-scatter when zones/paths/SOLID objects change (a new lake/road/house clears its trees)
 		const pl = world.paths?.length ?? 0;
-		// count only SOLID, FOREST-CLEARING objects (buildings/props) — NOT creatures, and NOT graves. Creatures
-		// were already excluded (re-scattering 3000 trees on every birth/death was a 10-15ms hitch for no visual
-		// change). GRAVES are added on EVERY death (tiny, cosmetic, don't meaningfully clear forest) → counting them
-		// re-scattered the whole forest every few seconds in a lively world → a periodic frame hitch the adaptive
-		// resolution turned into a visible flicker. Skip them here (a stray tree on a headstone is invisible anyway).
+		// count only SOLID, FOREST-CLEARING objects (buildings/props) that are NEAR the player — not creatures, not
+		// graves, and not far-away builds. A house/well a settler raises 400 m away can't change the trees you SEE
+		// (render radius), yet counting it globally re-scattered the whole 3000-tree forest every few seconds in a
+		// lively world → a periodic hitch the adaptive resolution flickered on. Counting only near solids means the
+		// re-scatter fires solely when a building actually appears/leaves your forest view. (RADIUS + a clear margin.)
+		const ppx = playerState.pos[0];
+		const ppz = playerState.pos[2];
+		const nearR2 = (RADIUS + 40) ** 2;
 		let ol = 0;
-		for (const o of world.objects) if (!CREATURES.has(o.kind) && o.kind !== 'grave') ol++;
+		for (const o of world.objects) {
+			if (CREATURES.has(o.kind) || o.kind === 'grave') continue;
+			if ((o.pos[0] - ppx) ** 2 + (o.pos[2] - ppz) ** 2 < nearR2) ol++;
+		}
 		if (pcx === lastCx && pcz === lastCz && len === lastLen && zl === lastZones && pl === lastPaths && ol === lastObjs) return;
 		lastCx = pcx;
 		lastCz = pcz;
