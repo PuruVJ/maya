@@ -144,6 +144,15 @@ mod wasm_api {
         crate::engine::water_seed(id)
     }
 
+    /// Kind FOOTPRINT [radius, height] — engine.rs `kind_rh` is the collision source of truth. The JS `KINDS` table
+    /// keeps its own r/h copy (it also carries render geometry), so a parity test (src/lib/kinds.test.ts) pins the JS
+    /// numbers to these — a drift would mean placement/collision disagreeing with what's drawn. Unknown → fallback.
+    #[wasm_bindgen]
+    pub fn kind_rh(kind: &str) -> Vec<f64> {
+        let (r, h) = crate::engine::kind_rh(kind);
+        vec![r, h]
+    }
+
     /// Pond SHORELINE radius factor at `ang` for a `seed` — the organic-blob edge. The render keeps a native copy
     /// (player wade check runs per frame, pre-wasm-load), so this exists to PARITY-TEST that copy against Rust.
     #[wasm_bindgen]

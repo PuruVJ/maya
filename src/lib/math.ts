@@ -22,6 +22,7 @@ interface MathGlue {
 	bushes_near: (px: number, pz: number, reach: number) => Float64Array;
 	migrate_weights: () => Float64Array;
 	gestation_secs: () => Float64Array;
+	kind_rh: (kind: string) => Float64Array;
 	water_seed: (id: string) => number;
 	water_edge_factor: (seed: number, ang: number) => number;
 	eco_render: () => Float64Array;
@@ -126,6 +127,12 @@ class WorldMath {
 	/** Pond per-id SEED — Rust's source of truth for the shoreline (the render keeps a native copy; a test pins it). */
 	waterSeed(id: string): number | null {
 		return this.#call((g) => g.water_seed(id));
+	}
+
+	/** Kind FOOTPRINT [radius, height] — the collision source of truth (engine.rs kind_rh); a test pins the JS KINDS
+	 *  copy to this. Unknown kind → the fallback [1, 2]. */
+	kindRh(kind: string): Float64Array | null {
+		return this.#call((g) => g.kind_rh(kind));
 	}
 
 	/** Pond SHORELINE radius factor at `ang` for `seed` — Rust's source of truth (render copy pinned by a test). */
