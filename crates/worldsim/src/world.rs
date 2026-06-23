@@ -2272,10 +2272,16 @@ impl World {
                     }
                 }
             } else if !is_person && wanderer {
-                // animal NOMAD: commit to a seeded OUTWARD heading (fanned ±90°) → relocate the herd to fresh range
+                // animal NOMAD: strike OUTWARD from the LOCAL crowd centroid (±90° fan) → herds relocate to fresh range,
+                // fanning to BOTH sides. Was anchored to the WORLD ORIGIN (az.atan2(ax)), so a cluster sitting off the
+                // origin dispersed only away from origin — one-directional. Centroid (coh/n_near) is already computed above.
                 let rng = crate::simrng::rand(&[m.seed_id, CH_DISPERSE]);
-                let r0 = (ax * ax + az * az).sqrt();
-                let ang = if r0 > 1.0 { az.atan2(ax) + (rng - 0.5) * std::f64::consts::PI } else { rng * std::f64::consts::TAU };
+                let ang = if n_near > 0 {
+                    let (ox, oz) = (ax - coh_x / n_near as f64, az - coh_z / n_near as f64); // away from local centre
+                    if ox.abs() + oz.abs() > 0.01 { oz.atan2(ox) + (rng - 0.5) * std::f64::consts::PI } else { rng * std::f64::consts::TAU }
+                } else {
+                    rng * std::f64::consts::TAU // no neighbours → any direction is outward
+                };
                 fx += ang.cos() * w;
                 fz += ang.sin() * w;
                 migrating = true;
@@ -2366,14 +2372,13 @@ impl World {
                 fx += bx / bd * bw;
                 fz += bz / bd * bw;
             } else {
-                // head OUTWARD — away from the world centre/valley, toward the curved edges — so migration POPULATES
-                // the wider world (civilisations form out toward the rim) instead of drifting back inward. Fanned by
-                // the seed within a ±90° cone so bands spread out, not in a single line. (At the very centre, where
-                // "outward" is undefined, any direction is outward → plain random.)
+                // strike OUTWARD from the LOCAL crowd centroid (±90° fan) so bands found new settlements to BOTH sides.
+                // Was anchored to the WORLD ORIGIN (az.atan2(ax)), so a settlement off the origin sent ALL colonists the
+                // same way — extending one direction, never back. Centroid (coh/n_near) was already computed above.
                 let rng = crate::simrng::rand(&[m.seed_id, CH_DISPERSE]);
-                let r0 = (ax * ax + az * az).sqrt();
-                let ang = if r0 > 1.0 {
-                    az.atan2(ax) + (rng - 0.5) * std::f64::consts::PI
+                let ang = if n_near > 0 {
+                    let (ox, oz) = (ax - coh_x / n_near as f64, az - coh_z / n_near as f64); // away from local centre
+                    if ox.abs() + oz.abs() > 0.01 { oz.atan2(ox) + (rng - 0.5) * std::f64::consts::PI } else { rng * std::f64::consts::TAU }
                 } else {
                     rng * std::f64::consts::TAU
                 };
