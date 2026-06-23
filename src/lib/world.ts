@@ -1,5 +1,5 @@
 // Canonical world-state types + builders. This is what gets gzip+base64'd into the URL.
-import { rustFfTargets } from './rustMath';
+import { math } from './math';
 import { inWater } from './water';
 import DEMO_SNAPSHOT from './demoWorld.json';
 
@@ -130,7 +130,7 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 	const avgGene = geneN > 0 ? geneSum / geneN : 1;
 	const scale = worldAreaScale(world.objects);
 	// The whole relaxation (rates + floors + logistic, prey-before-predators) is one Rust call — single source of truth.
-	const adv = rustFfTargets(count.rabbit ?? 0, count.cat ?? 0, count.kangaroo ?? 0, count.person ?? 0, count.lion ?? 0, count.dinosaur ?? 0, scale, dt);
+	const adv = math.ffTargets(count.rabbit ?? 0, count.cat ?? 0, count.kangaroo ?? 0, count.person ?? 0, count.lion ?? 0, count.dinosaur ?? 0, scale, dt);
 	if (!adv) return { creatures: 0, houses: 0 }; // wasm not loaded → don't guess, leave the world as-is
 	const target: Record<string, number> = {};
 	FF_KINDS.forEach((k, i) => {

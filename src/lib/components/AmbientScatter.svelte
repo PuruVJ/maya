@@ -8,7 +8,7 @@
 	import { heightAt } from '$lib/terrain';
 	import { playerState } from '$lib/playerState.svelte';
 	import { forEachTreeNear, forEachBushNear, onPath } from '$lib/scatter';
-	import { rustMathReady } from '$lib/rustMath';
+	import { math } from '$lib/math';
 	import { inWater } from '$lib/water';
 	import { kindDef } from '$lib/kinds';
 	import { leafColorHex, LEAF_GREENS } from '$lib/sharedAssets';
@@ -147,7 +147,7 @@
 		uPlayer.value.set(playerState.pos[0], playerState.pos[2]); // every frame → bushes part as you brush past (cheap)
 		// the forest field lives in Rust now — until the wasm math instance has loaded, skip the rebuild WITHOUT
 		// caching, so it retries each frame and the trees pop in the moment Rust is ready (not stuck empty).
-		if (!rustMathReady()) return;
+		if (!math.ready) return;
 		const pcx = Math.round(playerState.pos[0] / REBUILD) * REBUILD;
 		const pcz = Math.round(playerState.pos[2] / REBUILD) * REBUILD;
 		const len = world.terrain.length;

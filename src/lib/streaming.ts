@@ -9,7 +9,7 @@
 // a region cell. Determinism: positions come from the seeded hash RNG so the same region re-materialises consistently.
 import type { World, WorldObject } from './world';
 import { worldAreaScale } from './world';
-import { rustFfTargets, rustFfGene } from './rustMath';
+import { math } from './math';
 import { heightAt } from './terrain';
 import { kindDef } from './kinds';
 import { rand } from './rng';
@@ -75,13 +75,13 @@ export function wakeRegion(world: World, key: string, tick: number, idPrefix: st
 	const c = agg.counts;
 	const scale = worldAreaScale(world.objects);
 	// fast-forward the dormant population toward carrying capacity (Rust). Wasm not loaded / no time → keep the counts.
-	const adv = dtSec > 0 ? rustFfTargets(c.rabbit ?? 0, c.cat ?? 0, c.kangaroo ?? 0, c.person ?? 0, c.lion ?? 0, c.dinosaur ?? 0, scale, dtSec) : null;
+	const adv = dtSec > 0 ? math.ffTargets(c.rabbit ?? 0, c.cat ?? 0, c.kangaroo ?? 0, c.person ?? 0, c.lion ?? 0, c.dinosaur ?? 0, scale, dtSec) : null;
 	const final: Record<string, number> = {};
 	if (adv) FF_KINDS.forEach((k, i) => (final[k] = adv[i]));
 	else for (const k in c) final[k] = c[k];
 	// EVOLVE the dormant region's vigor over the away span (Rust closed-form) — dormant regions evolve via the clock,
 	// they don't freeze. Under predation the mean gene climbs; with no predators it holds.
-	const gene = dtSec > 0 ? rustFfGene(agg.gene, c, dtSec) : agg.gene;
+	const gene = dtSec > 0 ? math.ffGene(agg.gene, c, dtSec) : agg.gene;
 	// restore the durable STATIC structures verbatim (exact ids/positions — they're the persistent delta).
 	// `?? []` tolerates aggregates persisted before the statics field existed (older saved worlds).
 	for (const s of agg.statics ?? []) world.objects.push(s);
@@ -113,14 +113,14 @@ export function fastForwardDormant(world: World, tick: number): void {
 		const dtSec = (tick - agg.lastTick) / TICK_HZ;
 		if (dtSec <= 0) continue;
 		const c = agg.counts;
-		const adv = rustFfTargets(c.rabbit ?? 0, c.cat ?? 0, c.kangaroo ?? 0, c.person ?? 0, c.lion ?? 0, c.dinosaur ?? 0, scale, dtSec);
+		const adv = math.ffTargets(c.rabbit ?? 0, c.cat ?? 0, c.kangaroo ?? 0, c.person ?? 0, c.lion ?? 0, c.dinosaur ?? 0, scale, dtSec);
 		if (adv) {
 			const next: Record<string, number> = {};
 			FF_KINDS.forEach((k, i) => (next[k] = adv[i]));
 			// evolve vigor over the span (BEFORE overwriting counts). CLAMP defensively to the gene band: ff_gene
 			// should already, but a stale/mismatched main-thread wasm must never let agg.gene drift past 1.6 — that
 			// was inflating the HUD "vigor" readout over time (and region-dependent, as dormant regions came/went).
-			agg.gene = Math.min(1.6, Math.max(0.6, rustFfGene(agg.gene, c, dtSec)));
+			agg.gene = Math.min(1.6, Math.max(0.6, math.ffGene(agg.gene, c, dtSec)));
 			agg.counts = next;
 		}
 		agg.lastTick = tick;

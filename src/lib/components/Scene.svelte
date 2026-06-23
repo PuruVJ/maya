@@ -38,7 +38,7 @@
 	import { forEachTreeNear, treeRadius, onPath } from '$lib/scatter';
 	import { setEyeshine } from '$lib/sharedAssets';
 	import { drainBirths, drainBuilds, drainWells, rustTick } from '$lib/rustSim';
-	import { rustPondsNear } from '$lib/rustMath';
+	import { math } from '$lib/math';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { setRustObstacles, setRustPopScale, setRustRefuges, setRustWater, setRustAridity } from '$lib/rustSim';
 	import { worldAreaScale } from '$lib/world';
@@ -116,7 +116,7 @@
 	let lastPondX = NaN;
 	let lastPondZ = NaN;
 	function refreshPonds(px: number, pz: number): void {
-		const flat = rustPondsNear(px, pz, POND_RENDER_R);
+		const flat = math.pondsNear(px, pz, POND_RENDER_R);
 		if (!flat) return; // wasm not ready yet
 		// REUSE existing pond objects by id (stable identity) so an unchanged pond keeps the SAME object — otherwise
 		// each refresh hands Water/LakeFish a fresh `zone` prop and they rebuild (a flicker). Only reassign the array

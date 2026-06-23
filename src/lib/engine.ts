@@ -1,10 +1,10 @@
 // Thin façade over the RUST engine (crates/worldsim/src/engine.rs, via wasm). The LLM emits intent + a symbolic
 // anchor; RUST resolves exact, collision-free geometry — the deterministic op→world layer. There is NO JS engine
 // anymore: this module only (de)serializes across the wasm boundary. Behaviour + JS-parity are tested in the crate
-// (`cargo test -p worldsim engine::`). Callers must have the wasm loaded (await initRustMath()) before applyOps —
+// (`cargo test -p worldsim engine::`). Callers must have the wasm loaded (await math.init()) before applyOps —
 // in the app +page's onMount awaits it before any build; in node tests scenarios.ts top-level-awaits it.
 import type { World, Player } from './world';
-import { rustApplyOps } from './rustMath';
+import { math } from './math';
 import { derror } from './debug';
 
 export type Op =
@@ -35,7 +35,7 @@ export interface PlacementConflict {
  * big-footprint placement conflicts. Returns the same `world` for convenience.
  */
 export function applyOps(world: World, ops: Op[], player: Player = { pos: [0, 0, 0], yaw: 0 }, out?: { conflicts: PlacementConflict[] }): World {
-	const res = rustApplyOps(JSON.stringify(world), JSON.stringify(ops), player.pos[0], player.pos[2], player.yaw);
+	const res = math.applyOps(JSON.stringify(world), JSON.stringify(ops), player.pos[0], player.pos[2], player.yaw);
 	if (!res) {
 		derror('engine', 'apply_ops called before the wasm engine loaded — world unchanged', { ops });
 		return world;

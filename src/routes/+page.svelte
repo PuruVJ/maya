@@ -16,7 +16,7 @@
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld, fastForward, type World as WorldData } from '$lib/world';
-	import { initRustMath } from '$lib/rustMath';
+	import { math } from '$lib/math';
 	import { heightAt } from '$lib/terrain';
 	import { encodeWorld, decodeWorld } from '$lib/share';
 	import { loadWorld, saveWorld } from '$lib/worldStore';
@@ -64,7 +64,7 @@
 	onMount(async () => {
 		// Load the main-thread Rust math BEFORE fastForward, so the away-growth uses the real Rust numbers, not the
 		// permissive fallback. Same .wasm the worker uses — browser-cached.
-		await initRustMath();
+		await math.init();
 		const m = location.hash.match(/[#&]w=([^&]+)/);
 		if (m) {
 			// opened a SHARED link → load that world, persist it (store + local cache), then SCRUB the hash from

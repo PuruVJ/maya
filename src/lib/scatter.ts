@@ -5,7 +5,7 @@
 // placement that used to live here moved to Rust (its sin-hash is a hair different there → the forest is reshuffled
 // vs the old JS one, but consistent). See the `rust-owns-all-compute` memory.
 import type { Path } from './world';
-import { rustTreesNear, rustBushesNear } from './rustMath';
+import { math } from './math';
 
 export const SCATTER_STEP = 16; // forest grid cell (m) — mirrors engine.rs SCATTER_STEP (kept for callers' ranges)
 export const SCATTER_CLEAR = 70; // spawn/build area kept tree-free (radius from origin)
@@ -35,7 +35,7 @@ export function treeRadius(scale: number): number {
 
 /** Visit every TREE within `reach` of (x,z) — from the Rust forest field (one wasm call). No-op until wasm loads. */
 export function forEachTreeNear(x: number, z: number, reach: number, cb: (t: ScatterTree) => void): void {
-	const f = rustTreesNear(x, z, reach);
+	const f = math.treesNear(x, z, reach);
 	if (!f) return;
 	for (let k = 0; k < f.length; k += 6) {
 		cb({ x: f[k], z: f[k + 1], scale: f[k + 2], scaleY: f[k + 3], rot: f[k + 4], colorHash: f[k + 5] });
@@ -44,7 +44,7 @@ export function forEachTreeNear(x: number, z: number, reach: number, cb: (t: Sca
 
 /** Visit every BUSH within `reach` of (x,z) — from the Rust field (one wasm call). No-op until wasm loads. */
 export function forEachBushNear(x: number, z: number, reach: number, cb: (b: ScatterBush) => void): void {
-	const f = rustBushesNear(x, z, reach);
+	const f = math.bushesNear(x, z, reach);
 	if (!f) return;
 	for (let k = 0; k < f.length; k += 5) {
 		cb({ x: f[k], z: f[k + 1], scale: f[k + 2], rot: f[k + 3], colorHash: f[k + 4] });

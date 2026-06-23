@@ -14,7 +14,7 @@
 // render storms. See docs/npc-movement.md.
 import { Agent, type Behavior } from './steering';
 import { Rng } from './rng';
-import { rustEcoRender } from './rustMath';
+import { math } from './math';
 
 // Deterministic per-individual trait RNG (docs/self-sustaining-world.md §1.6): every birth-time draw is keyed
 // by the agent's stable `seedId` + a CHANNEL, so spawns are reproducible (same obj.id ⇒ same traits → a shared
@@ -24,7 +24,7 @@ const CH = { speed: 2 } as const; // only the render-gait speed roll is still do
 
 // ── Per-kind RENDER trait, READ FROM RUST ──────────────────────────────────────────────────────────────
 // Rust (crates/worldsim/src/eco.rs) owns the CANONICAL eco table + runs ALL the sim. The renderer needs only two
-// fields — each kind's gait `speed` range and `rank` (player-stun check) — and reads them FROM Rust (rustEcoRender,
+// fields — each kind's gait `speed` range and `rank` (player-stun check) — and reads them FROM the sim (math.ecoRender,
 // the source of truth) instead of keeping a duplicate copy here (which had to be edited twice on every tweak).
 // Cached after the first successful read; a generic placeholder covers the rare pre-wasm-load call (render-only,
 // self-correcting — an agent's real sim speed always comes from Rust regardless).
@@ -32,7 +32,7 @@ const KIND_ORDER = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'] a
 let ecoCache: Record<string, { rank: number; speed: [number, number] }> | null = null;
 function ecoTable(): Record<string, { rank: number; speed: [number, number] }> | null {
 	if (ecoCache) return ecoCache;
-	const d = rustEcoRender(); // [rank, speed_lo, speed_hi] × 6, by Kind order
+	const d = math.ecoRender(); // [rank, speed_lo, speed_hi] × 6, by Kind order
 	if (!d) return null; // wasm not ready yet → callers use a placeholder
 	ecoCache = {};
 	KIND_ORDER.forEach((k, i) => (ecoCache![k] = { rank: d[i * 3], speed: [d[i * 3 + 1], d[i * 3 + 2]] }));

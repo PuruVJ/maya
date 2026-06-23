@@ -8,7 +8,7 @@
 	import { agentManager } from '$lib/agents.svelte';
 	import { rustBehaviorIsEmergent, setRustBehaviorMode, rustAgeMeans } from '$lib/rustSim';
 	import { nature } from '$lib/nature.svelte';
-	import { rustMigrateWeights } from '$lib/rustMath';
+	import { math } from '$lib/math';
 	import type { World } from '$lib/world';
 
 	// CLIMATE chip — the macro-director's current drought level (nature.aridity, fed to the sim's set_aridity). A
@@ -36,7 +36,7 @@
 		{ k: 'dinosaur', icon: '🦖' }
 	] as const;
 
-	// per-species migratory tendency — read FROM THE SIM (rustMigrateWeights, Rust is the source of truth; no
+	// per-species migratory tendency — read FROM THE SIM (math.migrateWeights, Rust is the source of truth; no
 	// duplicated copy here). Used to ESTIMATE how many of the DORMANT (streamed-away) population are roaming, so ✈
 	// stays a whole-world stat. Populated once the wasm math instance loads (SPECIES order = Rust Kind order).
 	let MIGRATE_WEIGHT = $state<Record<string, number>>({});
@@ -73,7 +73,7 @@
 		let n = 0;
 		const sample = () => {
 			if (Object.keys(MIGRATE_WEIGHT).length === 0) {
-				const mw = rustMigrateWeights(); // Rust is the source of truth; SPECIES order = Kind order
+				const mw = math.migrateWeights(); // Rust is the source of truth; SPECIES order = Kind order
 				if (mw) MIGRATE_WEIGHT = Object.fromEntries(SPECIES.map(({ k }, i) => [k, mw[i]]));
 			}
 			const c: Record<string, number> = {};

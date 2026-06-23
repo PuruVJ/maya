@@ -3,10 +3,10 @@
 // in the sim worker. This is a SECOND, tiny wasm instance (no Sim state, no per-tick loop) — the same .wasm bytes
 // the worker already fetched (browser-cached), just a second WebAssembly instance for stateless calls.
 //
-// ONE stateful class (RustMath) owns the wasm handle + the load lifecycle, with a SINGLE `#call` guard so each
-// method is a one-liner — no `if (glue)` repeated per function. `await rustMath.init()` once at startup. Methods
-// return the Rust result, or a permissive sentinel (usually null) if the wasm somehow isn't loaded yet (never a
-// duplicated JS formula). The legacy `rust*` free functions below are thin delegators kept for existing callers.
+// ONE stateful object — `math` — owns the wasm handle + the load lifecycle, with a SINGLE `#call` guard so each
+// method is a one-liner (no `if (glue)` repeated per function). `await math.init()` once at startup, then call
+// `math.pondsNear(...)`, `math.ffTargets(...)`, etc. Methods return the result, or a permissive sentinel (usually
+// null) if the wasm somehow isn't loaded yet (never a duplicated JS formula). Names say WHAT, not the technology.
 
 interface MathGlue {
 	default: (input?: unknown) => Promise<unknown>;
@@ -22,7 +22,7 @@ interface MathGlue {
 	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
 }
 
-class RustMath {
+class WorldMath {
 	#glue: MathGlue | null = null;
 	#loading: Promise<void> | null = null;
 
@@ -114,22 +114,6 @@ class RustMath {
 	}
 }
 
-/** The single main-thread wasm-math instance. Prefer `rustMath.method()`; the `rust*` exports below delegate to it. */
-export const rustMath = new RustMath();
-
-// ── legacy free-function API (thin delegators to the singleton — kept so existing callers don't churn) ──────────
-export const initRustMath = (): Promise<void> => rustMath.init();
-export const rustMathReady = (): boolean => rustMath.ready;
-export const rustPopCaps = (rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number): Uint32Array | null =>
-	rustMath.popCaps(rabbit, cat, kangaroo, person, lion, dino, scale);
-export const rustFfTargets = (rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number, dt: number): Uint32Array | null =>
-	rustMath.ffTargets(rabbit, cat, kangaroo, person, lion, dino, scale, dt);
-export const rustBandSpread = (count: number, ax: number, az: number, r: number): Float64Array | null => rustMath.bandSpread(count, ax, az, r);
-export const rustPondsNear = (px: number, pz: number, reach: number): Float64Array | null => rustMath.pondsNear(px, pz, reach);
-export const rustTreesNear = (px: number, pz: number, reach: number): Float64Array | null => rustMath.treesNear(px, pz, reach);
-export const rustBushesNear = (px: number, pz: number, reach: number): Float64Array | null => rustMath.bushesNear(px, pz, reach);
-export const rustMigrateWeights = (): Float64Array | null => rustMath.migrateWeights();
-export const rustEcoRender = (): Float64Array | null => rustMath.ecoRender();
-export const rustApplyOps = (worldJson: string, opsJson: string, px: number, pz: number, yaw: number): { world: unknown; conflicts: unknown[] } | null =>
-	rustMath.applyOps(worldJson, opsJson, px, pz, yaw);
-export const rustFfGene = (gene: number, c: Record<string, number>, dtSec: number): number => rustMath.ffGene(gene, c, dtSec);
+/** The world's MATH — the single main-thread wasm-math instance. Use `math.pondsNear(...)`, `math.init()`, etc.
+ *  (The name says what it is, not how it's built; the wasm is an implementation detail.) */
+export const math = new WorldMath();
