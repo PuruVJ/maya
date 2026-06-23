@@ -2334,19 +2334,20 @@ impl World {
             }
         }
 
-        // PREDATORS AVOID SETTLEMENTS — a carnivore steers AWAY from a nearby town UNLESS it's REALLY hungry
-        // (desperation drives it in to hunt) or a mother shadowing her young (she'll risk the edge). Towns stay safer.
-        if matches!(eco(m.kind).hunts, Hunts::Lower) {
-            let really_hungry = m.energy < PRED_DESPERATE;
-            let mother = is_female(m.seed_id) && m.breed_cd > 0.0; // recently bred → has young about
-            if !really_hungry && !mother {
-                if let Some((rx, rz)) = self.nearest_refuge(ax, az, SETTLEMENT_AVOID_R) {
-                    let (dx, dz) = (ax - rx, az - rz); // push away from the town centre
-                    let d = dx.hypot(dz).max(0.1);
-                    let falloff = 1.0 - d / SETTLEMENT_AVOID_R; // stronger the closer it is
-                    fx += dx / d * a_max * SETTLEMENT_AVOID_W * falloff;
-                    fz += dz / d * a_max * SETTLEMENT_AVOID_W * falloff;
-                }
+        // SETTLEMENT AVOIDANCE — steer AWAY from a nearby town centre:
+        //  • PREDATORS (carnivores) keep their distance UNLESS really hungry (desperation drives a raid) or a mother
+        //    shadowing her young (she'll risk the edge), so towns stay safer.
+        //  • WILD GRAZERS (kangaroos) give settlements a wide berth too — they belong in the open, not milling about
+        //    a human town (user). RABBITS are exempt: people HUNT them, so rabbits naturally gather near the colony.
+        let is_pred = matches!(eco(m.kind).hunts, Hunts::Lower);
+        let pred_avoids = is_pred && m.energy >= PRED_DESPERATE && !(is_female(m.seed_id) && m.breed_cd > 0.0);
+        if pred_avoids || matches!(m.kind, Kind::Kangaroo) {
+            if let Some((rx, rz)) = self.nearest_refuge(ax, az, SETTLEMENT_AVOID_R) {
+                let (dx, dz) = (ax - rx, az - rz); // push away from the town centre
+                let d = dx.hypot(dz).max(0.1);
+                let falloff = 1.0 - d / SETTLEMENT_AVOID_R; // stronger the closer it is
+                fx += dx / d * a_max * SETTLEMENT_AVOID_W * falloff;
+                fz += dz / d * a_max * SETTLEMENT_AVOID_W * falloff;
             }
         }
 
@@ -3936,6 +3937,132 @@ mod tests {
             }
         }
         assert!(fed, "a meat-hungry person should stalk + catch a nearby rabbit and replenish its meat");
+    }
+
+    // Materialise this tick's BIRTHS exactly as the JS layer does (drainBirths → spawn_at + set_lineage/genome +
+    // JUVENILE_CD): the Rust sim only EMITS births to a buffer; the host round-trips them into live agents. A pure
+    // Rust test must do the same, else population can never grow in-test (the trap that made this scenario read 8→8).
+    fn materialise_births(w: &mut World, processed: &mut usize, baby_seed: &mut i32) {
+        let tail: Vec<f32> = {
+            let b = w.births();
+            let t = b[*processed..].to_vec();
+            *processed = b.len();
+            t
+        };
+        for c in tail.chunks_exact(11) {
+            let kind = crate::eco::kind_from_code(c[0] as u8);
+            *baby_seed += 1;
+            let idx = w.spawn(Agent::new(c[1] as f64, c[2] as f64, *baby_seed, &opts_for(kind, *baby_seed)), kind, radius_of(kind), *baby_seed);
+            w.set_lineage(idx, c[4] as u32, c[5] as u32);
+            w.set_genome(idx, c[6] as f64, c[7] as f64, c[8] as f64, c[9] as f64, c[10] as f64);
+            let jcd = w.juvenile_cd();
+            w.set_breed_cooldown(idx, jcd); // a newborn matures before it can breed (age reset to 0)
+        }
+    }
+
+    // SCENARIO (the relayout's GOAL + the sim's FIRST end-to-end growth test): a human colony with a predator-free
+    // rabbit hunting-base GROWS — the people hunt rabbits (meat = food + the breeding gate), pair, gestate, and the
+    // litters (round-tripped like JS) mature into new breeders. Proves "humans won't come up" is fixed once they have
+    // prey to hunt and no predator camping them. (NB: pure-Rust delivery only EMITS births — see materialise_births.)
+    #[test]
+    fn a_hunter_colony_with_a_rabbit_base_grows() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        for k in 0..8 {
+            let p = spawn_kind(&mut w, Kind::Person, (k % 4) as f64 * 4.0 - 6.0, (k / 4) as f64 * 4.0, 100 + k); // 4♀/4♂ by seed parity
+            w.agents[p].age = 0.35 * w.agents[p].lifespan; // ADULTS (past JUVENILE_FRAC) so the run isn't all maturation lag
+        }
+        for k in 0..60 {
+            let a = k as f64 / 60.0 * std::f64::consts::TAU;
+            let r = 30.0 + (k % 5) as f64 * 16.0; // a wide 30–94 m ring → low density so the rabbits keep recruiting
+            spawn_kind(&mut w, Kind::Rabbit, a.cos() * r, a.sin() * r, 200 + k);
+        }
+        let p0 = 8usize;
+        let cnt = |w: &World, k: Kind| w.agents.iter().filter(|a| !a.dead && a.kind == k).count();
+        let (mut processed, mut baby_seed) = (0usize, 50_000i32);
+        for t in 1..=9000 {
+            w.tick_once(t); // ~300 s
+            materialise_births(&mut w, &mut processed, &mut baby_seed);
+        }
+        let people = cnt(&w, Kind::Person);
+        let total_births = w.births().len() / 11;
+        eprintln!("[colony] people {p0}→{people}, rabbits {}, total births {total_births}", cnt(&w, Kind::Rabbit));
+        assert!(people > p0, "a hunter colony with a rabbit base should GROW ({p0}→{people}; {total_births} births materialised)");
+    }
+
+    // SCENARIO: the ACTUAL shipped Maya demo colony (8 founders + 20 rabbits in a 35–80 m ring, see demoWorld.json)
+    // sustains human growth — guards the real starting layout, not just an idealized 60-rabbit base.
+    #[test]
+    fn the_demo_colony_config_sustains_human_growth() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        for k in 0..8 {
+            let p = spawn_kind(&mut w, Kind::Person, (k % 4) as f64 * 4.0 - 6.0, (k / 4) as f64 * 4.0, 100 + k);
+            w.agents[p].age = 0.35 * w.agents[p].lifespan;
+        }
+        for k in 0..20 {
+            let a = k as f64 / 20.0 * std::f64::consts::TAU;
+            let r = 35.0 + (k % 4) as f64 * 15.0; // 35–80 m ring (matches the demo relayout)
+            spawn_kind(&mut w, Kind::Rabbit, a.cos() * r, a.sin() * r, 200 + k);
+        }
+        let (mut processed, mut baby_seed) = (0usize, 50_000i32);
+        for t in 1..=9000 {
+            w.tick_once(t);
+            materialise_births(&mut w, &mut processed, &mut baby_seed);
+        }
+        let cnt = |w: &World, k: Kind| w.agents.iter().filter(|a| !a.dead && a.kind == k).count();
+        let (people, rabbits) = (cnt(&w, Kind::Person), cnt(&w, Kind::Rabbit));
+        eprintln!("[demo-colony] people 8→{people}, rabbits 20→{rabbits}");
+        assert!(people > 8, "the SHIPPED demo colony should let humans grow (8→{people})");
+        assert!(rabbits > 0, "the demo rabbit base shouldn't be hunted to extinction (got {rabbits})");
+    }
+
+    // SCENARIO (user prod bug): "the place is full of rabbits + kangaroos yet nothing eats, humans won't grow."
+    // A dense prey field with hungry cats + meat-starved people in it: predators must SURVIVE by eating (not starve
+    // amid plenty), and the people must land rabbits to refill their meat (the breeding gate). This guards against
+    // the "surrounded by prey but can't feed" failure mode (give-up loops, mobbing, target-thrash, etc.).
+    #[test]
+    fn predators_and_people_eat_in_a_dense_prey_field() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4); // player far away → no interference
+        for k in 0..40 {
+            let s = 200 + k;
+            spawn_kind(&mut w, Kind::Rabbit, (k % 8) as f64 * 4.0 - 16.0, (k / 8) as f64 * 4.0 - 8.0, s); // a packed 8×5 rabbit field
+        }
+        let cats: Vec<usize> = (0..4).map(|k| spawn_kind(&mut w, Kind::Cat, k as f64 * 3.0, 22.0, 300 + k)).collect();
+        let people: Vec<usize> = (0..6).map(|k| spawn_kind(&mut w, Kind::Person, k as f64 * 3.0 - 8.0, -22.0, 400 + k)).collect();
+        for &c in &cats {
+            w.agents[c].stamina = 0.3; // hungry → will hunt
+            w.agents[c].hungry = true;
+        }
+        for &p in &people {
+            w.agents[p].fed_meat = 0.0; // meat-starved → must hunt a rabbit
+        }
+        for t in 1..=3000 {
+            w.tick_once(t); // ~100 s — long enough to starve if they never eat (ENERGY_DRAIN), so survival ⇒ they fed
+        }
+        let cats_alive = cats.iter().filter(|&&c| !w.agents[c].dead).count();
+        let fed_people = people.iter().filter(|&&p| !w.agents[p].dead && w.agents[p].fed_meat > 0.0).count();
+        eprintln!("[dense-prey] cats {cats_alive}/4 alive, fed people {fed_people}/6");
+        assert!(cats_alive >= 3, "cats must not STARVE amid abundant prey (only {cats_alive}/4 survived 100 s)");
+        assert!(fed_people >= 2, "hunting people should land rabbits + refill meat (only {fed_people}/6 fed)");
+    }
+
+    // SCENARIO: a kangaroo (wild grazer) gives a human settlement a wide berth — it belongs in the open, not milling
+    // about a town (user: "kangaroos constantly in human settlements makes no sense"). Rabbits are exempt (hunted).
+    #[test]
+    fn a_kangaroo_avoids_human_settlements() {
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        w.set_refuges(&[0.0, 0.0]); // a town centre
+        let roo = spawn_kind(&mut w, Kind::Kangaroo, 20.0, 0.0, 5); // within SETTLEMENT_AVOID_R of the town
+        let d0 = w.agents[roo].agent.x.hypot(w.agents[roo].agent.z);
+        for t in 1..=150 {
+            w.tick_once(t);
+        }
+        let d1 = w.agents[roo].agent.x.hypot(w.agents[roo].agent.z);
+        eprintln!("[roo-avoid] kangaroo {d0:.0} → {d1:.0} m from town");
+        assert!(d1 > d0 + 3.0, "a kangaroo should drift out of a settlement ({d0:.0}→{d1:.0} m)");
     }
 
     // SCENARIO: a WELL-FED predator gives a settlement a wide berth (towns are safer); a STARVING one risks it.

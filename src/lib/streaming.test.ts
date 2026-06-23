@@ -105,6 +105,28 @@ describe('sleep / wake', () => {
 		expect(w.objects.length).toBe(10);
 	});
 
+	it('a dense over-budget region survives offload → sleep → wake with its FULL population (no loss, no dupes)', () => {
+		// 500 rabbits packed into one region (0,0) — well over a 200 budget. Exercises the new live cap together with
+		// the existing region sleep/wake, the seam most likely to drop or duplicate creatures.
+		const w = emptyWorld('t');
+		for (let i = 0; i < 500; i++) w.objects.push({ id: 'r' + i, kind: 'rabbit', pos: [i % 13, 0, (i * 2) % 17], gene: 1 } as WorldObject);
+		const alive = (ww: World) => {
+			let n = ww.objects.filter((o) => o.kind === 'rabbit').length;
+			if (ww.regions) for (const k in ww.regions) n += ww.regions[k].counts.rabbit ?? 0;
+			return n;
+		};
+		enforceLiveBudget(w, 0, 0, 2, 200); // budget 200 → 200 nearest live, 300 offloaded to region 0,0's aggregate
+		expect(w.objects.length).toBe(200);
+		expect(alive(w)).toBe(500); // nothing lost in the offload
+		streamRegions(w, 6 * REGION_SIZE + 10, 10, 2); // walk far → region 0,0 sleeps (its 200 live merge into the 300 dormant)
+		expect(w.objects.length).toBe(0);
+		expect(alive(w)).toBe(500); // still all 500, now fully dormant
+		streamRegions(w, 10, 10, 2); // walk back (same tick → dt 0 → no fast-forward drift) → 0,0 wakes with everyone
+		expect(w.objects.filter((o) => o.kind === 'rabbit').length).toBe(500);
+		expect(new Set(w.objects.map((o) => o.id)).size).toBe(w.objects.length); // ids unique → no duplicate materialise
+		expect(alive(w)).toBe(500);
+	});
+
 	it('round-trip conserves the population: sleep far, then walk there to wake it', () => {
 		const w = withCreatures('rabbit', 24, 8, 0); // far region 8,0
 		streamRegions(w, 10, 10, 0); // player at origin → region 8,0 sleeps
