@@ -316,8 +316,9 @@ pub fn band_spread(count: usize, ax: f64, az: f64, r: f64) -> Vec<f64> {
     let ga = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt()); // golden angle → even, deterministic spread
     let group = 10usize;
     let groups = count.div_ceil(group);
-    let spread = 22.0 * (count as f64).sqrt(); // bands fan WIDE — a big spawn populates a large area (the spread is
-    // wanted). The far bands stream into dormant aggregates (still alive — counted via the regions); they don't pile up.
+    let spread = 40.0 * (count as f64).sqrt(); // bands fan WIDE — a big spawn scatters far past the ~600 m LIVE span
+    // so most land in DORMANT regions (still alive, counted as aggregates) → a "make 1000" doesn't pin 1000 live near
+    // you. √count keeps small spawns local; a huge one populates a big area (user: "spread so strong it keeps count low").
     let band_r = (r + 1.4) * 3.0; // a single band's own loose radius
     let snap = |v: f64| (v / 0.5).round() * 0.5;
     let mut out = Vec::with_capacity(count * 2);
@@ -415,7 +416,6 @@ const CH_AGE: i32 = 21; // RNG channel for the lifespan-variation roll
 const BUILD_ENERGY: f64 = 0.82; // a settler must be WELL-fed to afford building
 const BUILD_COST: f64 = 0.55; // energy a build spends (so they must re-feed before the next)
 const BUILD_COOLDOWN: f64 = 160.0; // seconds between one settler's builds → a town rises gradually (slowed: user "a tad too much")
-const FAMILY_R2: f64 = 9.0 * 9.0; // a HOUSEHOLD radius — a home rises only where an adult MALE+FEMALE pair settles
 const CH_BUILD: i32 = 23; // RNG channel for the staggered initial build cooldown
 
 // TELEMETRY event codes — the sim records [code, kind, x, z] so the agent can later READ what actually happened
@@ -1870,9 +1870,10 @@ impl World {
             }
         }
 
-        // 7.6 EMERGENT CITIES — a settled FAMILY (an adult male+female pair) raises a home, which clusters into a
-        // town then a city. Gated on an opposite-sex adult Person nearby (NOT the generic flock `crowd`, which
-        // counts ANY neighbours — so a lone human among rabbits was building houses). The sim emits where to build.
+        // 7.6 EMERGENT CITIES — a BONDED FAMILY raises a home, which clusters into a town then a city. Gated on an
+        // actual PAIR-BOND (m.partner), NOT mere proximity: a couple only bonds by BREEDING together, so "love takes
+        // time" — two strangers who just spawned next to each other can't instantly stamp a house (user's call). The
+        // bond also implies an opposite-sex adult pair by construction. The sim emits where to build.
         for i in 0..n {
             let m = &self.agents[i];
             if m.dead
@@ -1882,7 +1883,7 @@ impl World {
                 || m.energy < BUILD_ENERGY
                 || m.age < m.lifespan * 0.15 // an adult, not a child
                 || self.transient[i].threat.is_some()
-                || !self.has_family(i) // only a pair-bonded household builds — no lone-wanderer houses
+                || m.partner.is_none() // only a BONDED household builds (bond forms via breeding → never instant)
                 || (self.natural_water && crate::engine::in_natural_pond(m.agent.x, m.agent.z)) // never build IN a pond
             {
                 continue;
@@ -1981,29 +1982,6 @@ impl World {
             let d2 = (self.agents[j].agent.x - ax).powi(2) + (self.agents[j].agent.z - az).powi(2);
             if d2 <= r2 && self.breed_ready(j) && !related(&self.agents[i], &self.agents[j]) {
                 found = Some(j); // opposite-sex, fertile, in range, AND not close kin (no incest)
-            }
-        });
-        found
-    }
-
-    /// Is there an adult, opposite-sex PERSON within a household radius of `i`? Gates house-building so only a
-    /// settled FAMILY raises a home (not a lone wanderer). Looser than `find_mate`: the partner needn't be
-    /// breed-ready right now (a couple that just had a child is still a household).
-    fn has_family(&self, i: usize) -> bool {
-        let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
-        let my_sex = is_female(self.agents[i].seed_id);
-        let mut found = false;
-        self.grid.for_each_neighbor(ax, az, |j| {
-            let j = j as usize;
-            if found || j == i || self.agents[j].dead || self.agents[j].kind != Kind::Person || is_female(self.agents[j].seed_id) == my_sex {
-                return;
-            }
-            if self.agents[j].age < self.agents[j].lifespan * 0.15 {
-                return; // a child isn't a partner
-            }
-            let d2 = (self.agents[j].agent.x - ax).powi(2) + (self.agents[j].agent.z - az).powi(2);
-            if d2 <= FAMILY_R2 {
-                found = true;
             }
         });
         found
