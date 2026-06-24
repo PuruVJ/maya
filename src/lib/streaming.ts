@@ -170,17 +170,17 @@ export function enforceLiveBudget(world: World, px: number, pz: number, tick: nu
 	const objs = world.objects;
 	if (objs.length <= budget) return 0;
 	if (!world.regions) world.regions = {};
-	// rank by distance² to the player; the nearest `budget` stay live, the rest are evicted
-	const order = objs.map((_, i) => i);
-	const d2 = objs.map((o) => (o.pos[0] - px) ** 2 + (o.pos[2] - pz) ** 2);
-	order.sort((a, b) => d2[a] - d2[b]);
-	const keepIdx = new Set(order.slice(0, budget));
+	// rank by distance² to the player; the nearest `budget` stay live, the rest are evicted. A single {o,d2} array +
+	// sort (vs. a parallel index array + a Set lookup) keeps the per-call allocation light — this fires whenever a
+	// birth/build/region-wake nudges the live set back over budget, so it wants to stay cheap.
+	const ranked = objs.map((o) => ({ o, d2: (o.pos[0] - px) ** 2 + (o.pos[2] - pz) ** 2 }));
+	ranked.sort((a, b) => a.d2 - b.d2);
 	const kept: WorldObject[] = [];
 	let evicted = 0;
-	for (let i = 0; i < objs.length; i++) {
-		const o = objs[i];
-		if (keepIdx.has(i)) {
-			kept.push(o);
+	for (let i = 0; i < ranked.length; i++) {
+		const o = ranked[i].o;
+		if (i < budget) {
+			kept.push(o); // among the nearest `budget` → stays live
 			continue;
 		}
 		const [cx, cz] = regionOf(o.pos[0], o.pos[2]);
