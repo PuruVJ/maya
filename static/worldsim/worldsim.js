@@ -766,6 +766,17 @@ export function water_seed(id) {
     const ret = wasm.water_seed(ptr0, len0);
     return ret;
 }
+
+/**
+ * World-AREA carrying-capacity multiplier from the built count — the SAME formula the sim + fast-forward use, so
+ * the scale JS feeds into `cap_for`/`ff_targets` can never drift. JS counts the buildings; Rust owns the math.
+ * @param {number} builds
+ * @returns {number}
+ */
+export function world_area_scale(builds) {
+    const ret = wasm.world_area_scale(builds);
+    return ret;
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,

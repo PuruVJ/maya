@@ -71,6 +71,13 @@ mod wasm_api {
             .collect()
     }
 
+    /// World-AREA carrying-capacity multiplier from the built count — the SAME formula the sim + fast-forward use, so
+    /// the scale JS feeds into `cap_for`/`ff_targets` can never drift. JS counts the buildings; Rust owns the math.
+    #[wasm_bindgen]
+    pub fn world_area_scale(builds: u32) -> f64 {
+        crate::world::world_area_scale(builds as usize)
+    }
+
     /// Female fertile WINDOW (seconds) per kind — maturity → menopause/old-age. The SAME numbers the sim breeds by,
     /// so the HUD's per-species TFR estimate (births ÷ fertile females × this window) never drifts from the sim.
     /// Returns [rabbit, cat, kangaroo, person, lion, dino].

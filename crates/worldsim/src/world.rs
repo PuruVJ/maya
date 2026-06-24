@@ -244,6 +244,13 @@ pub fn cap_for(kind: Kind, pop: &[usize; 6], scale: f64) -> usize {
         Kind::Dinosaur => (((r + k + p + c + l) * DINO_PREY_SHARE).round() as usize).max(1),
     }
 }
+
+/// World-AREA carrying-capacity multiplier from the BUILT count — the more a region is developed, the more life it
+/// supports. Single source of truth for the scale fed to `cap_for`/`ff_targets`: JS counts the buildings (data) and
+/// calls THIS for the number (Rust owns the formula), so the two can never drift apart.
+pub fn world_area_scale(builds: usize) -> f64 {
+    (1.0 + builds as f64 / 40.0).clamp(1.0, 3.0) // ~+1 capacity per 40 buildings (softened: a big city hit 300+ agents)
+}
 // ── AGGREGATE FAST-FORWARD (big-world.md §3) ────────────────────────────────────────────────────────────────
 // When a player returns after being away, each species relaxes toward its carrying capacity along a CLOSED-FORM
 // logistic — O(1) per species, so a week away costs the same as a minute. Prey advance first; each predator then
@@ -2592,6 +2599,15 @@ mod tests {
         assert_eq!(a.1.to_bits(), b.1.to_bits());
         assert_eq!(a.2.to_bits(), b.2.to_bits());
         assert!(a.0.is_finite() && a.1.is_finite());
+    }
+
+    #[test]
+    fn world_area_scale_grows_with_builds_and_caps() {
+        assert_eq!(world_area_scale(0), 1.0); // undeveloped → baseline carrying capacity
+        assert_eq!(world_area_scale(40), 2.0); // ~+1 per 40 buildings
+        assert_eq!(world_area_scale(400), 3.0); // capped at 3× so a huge city doesn't melt the sim
+        let mid = world_area_scale(20);
+        assert!(mid > 1.0 && mid < 2.0, "monotonic between the anchors, got {mid}");
     }
 
     #[test]

@@ -14,6 +14,7 @@
 	import EcoStats from '$lib/components/EcoStats.svelte';
 	import EventLog from '$lib/components/EventLog.svelte';
 	import SplashScreen from '$lib/components/SplashScreen.svelte';
+	import { fade } from 'svelte/transition';
 	import { nature } from '$lib/nature.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld, fastForward, WORLD_NAME, LEGACY_WORLD_NAMES, type World as WorldData } from '$lib/world';
@@ -257,18 +258,44 @@
 	// So: (a) a low-frequency periodic save (~15 s — NOT the old 1 Hz URL-gzip that stalled the frame; this is an
 	// async DB write of a detached snapshot) snapshots where everyone has wandered, and (b) a save the moment the
 	// tab is hidden / unloaded captures the freshest pose right before you leave. Result: the world resumes mid-life.
+	let hiddenAt = 0; // wall-clock when the tab went hidden → on return we fast-forward the world by the away span
+	let timeTravel = $state(false); // true while the tab-return catch-up plays behind the "time-travelling" splash
 	$effect(() => {
 		if (!liveUrl) return;
 		const persist = () => !resetting && saveWorld(liveWorldSnapshot());
 		const id = setInterval(persist, 1000); // sync to the DB every second (user request) — captures wandering + builds promptly
-		const onHide = () => {
-			if (document.visibilityState === 'hidden') persist();
+		// TAB-AWAY pauses the sim (visibility gate — no ticks accrue). So on tab-RETURN we FAST-FORWARD the world by
+		// however long you were gone (closed-form, the same path a page reload uses) — otherwise it sits frozen at the
+		// moment you left and the catch-up never happens (user: "tabbed away, tabbed back, 27, no jump → ff is broken").
+		// The live sim then resumes from the advanced state.
+		const onVis = () => {
+			if (document.visibilityState === 'hidden') {
+				persist();
+				hiddenAt = Date.now();
+				return;
+			}
+			if (!hiddenAt || resetting) return;
+			const away = Date.now() - hiddenAt;
+			hiddenAt = 0;
+			if (away <= 60_000) return; // a quick tab-flick → nothing worth catching up
+			timeTravel = true; // cover the catch-up behind the splash so the population JUMP never flashes on screen
+			const ff = fastForward(world, away, 'tf' + Math.random().toString(36).slice(2, 7) + '-', (x, z) => heightAt(x, z, world.terrain));
+			setTimeout(() => (timeTravel = false), 1000); // minimum 1 s block, then reveal the advanced world
+			if (ff.creatures || ff.houses) {
+				const mins = Math.round(away / 60_000);
+				const txt = mins < 90 ? `${mins} min` : `${Math.round(mins / 60)} h`;
+				const parts: string[] = [];
+				if (ff.houses > 0) parts.push(`${ff.houses} new homes`);
+				if (ff.creatures > 0) parts.push(`${ff.creatures} more creatures`);
+				else if (ff.creatures < 0) parts.push(`${-ff.creatures} fewer creatures`);
+				nature.announce(`🌍 Welcome back — ${txt} away${parts.length ? ' · ' + parts.join(', ') : ''}`);
+			}
 		};
-		document.addEventListener('visibilitychange', onHide);
+		document.addEventListener('visibilitychange', onVis);
 		window.addEventListener('pagehide', persist);
 		return () => {
 			clearInterval(id);
-			document.removeEventListener('visibilitychange', onHide);
+			document.removeEventListener('visibilitychange', onVis);
 			window.removeEventListener('pagehide', persist);
 		};
 	});
@@ -373,6 +400,23 @@
 <!-- live FPS / frame-time meter, top-centre -->
 <FpsPanel />
 <SplashScreen name={world.name} />
+
+<!-- TIME-TRAVEL splash — covers the tab-return fast-forward so the population JUMP never flashes on screen.
+     Shows for a minimum of 1 s (set in the visibilitychange handler), then fades to reveal the advanced world. -->
+{#if timeTravel}
+	<div
+		transition:fade={{ duration: 350 }}
+		class="fixed inset-0 z-[60] flex flex-col items-center justify-center gap-5 bg-gradient-to-b from-[#0a0f1e] to-[#070a14] text-white"
+	>
+		<div class="bg-gradient-to-b from-white to-amber-100/70 bg-clip-text text-2xl font-semibold tracking-tight text-transparent">
+			{world.name}
+		</div>
+		<div class="flex items-center gap-2.5 text-sm text-white/65">
+			<span class="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-white/80"></span>
+			Time-travelling to now…
+		</div>
+	</div>
+{/if}
 <EcoStats {world} />
 <EventLog />
 

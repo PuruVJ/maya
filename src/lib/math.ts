@@ -22,6 +22,7 @@ interface MathGlue {
 	bushes_near: (px: number, pz: number, reach: number) => Float64Array;
 	migrate_weights: () => Float64Array;
 	fertile_windows: () => Float64Array;
+	world_area_scale: (builds: number) => number;
 	gestation_secs: () => Float64Array;
 	kind_rh: (kind: string) => Float64Array;
 	terrain_height: (x: number, z: number) => number;
@@ -130,6 +131,12 @@ class WorldMath {
 	 *  by this — using the sim's own breeding numbers, so the readout can't drift from the simulation. */
 	fertileWindows(): Float64Array | null {
 		return this.#call((g) => g.fertile_windows());
+	}
+
+	/** World-AREA carrying-capacity multiplier from the BUILT count — Rust owns the formula (single source of truth);
+	 *  JS just counts the buildings and calls this. Pre-wasm-load → neutral 1 (every real call site has it loaded). */
+	worldAreaScale(builds: number): number {
+		return this.#call((g) => g.world_area_scale(builds)) ?? 1;
 	}
 
 	/** Per-kind GESTATION seconds by Kind order [rabbit,cat,kangaroo,person,lion,dinosaur] (prefer `personGestation`). */

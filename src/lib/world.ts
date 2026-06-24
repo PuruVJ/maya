@@ -83,7 +83,7 @@ const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
 export function worldAreaScale(objects: { kind: string }[]): number {
 	let builds = 0;
 	for (const o of objects) if (BUILDING_KINDS.has(o.kind)) builds++;
-	return Math.max(1, Math.min(3, 1 + builds / 40)); // ~+1 capacity per 40 buildings (softened: a big city hit 300+ agents)
+	return math.worldAreaScale(builds); // Rust owns the FORMULA (single source of truth); JS only counts the buildings
 }
 
 // NOTE: there is deliberately NO load-time population trim. A world's population is DURABLE — it accumulates as
@@ -109,6 +109,7 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 	const dt = Math.min(elapsedMs / 1000, 86_400); // model at most ~1 day of effect (the logistic saturates anyway)
 	if (dt < 30) return { creatures: 0, houses: 0 }; // a blink away → nothing to do
 	const count: Record<string, number> = {};
+	const byKindPos: Record<string, [number, number][]> = {}; // existing positions per kind → new arrivals cluster WITH their kind
 	let geneSum = 0;
 	let geneN = 0;
 	let minX = Infinity;
@@ -119,6 +120,7 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 		if (!CREATURE_KINDS.has(o.kind) && !BUILDING_KINDS.has(o.kind)) continue;
 		if (CREATURE_KINDS.has(o.kind)) {
 			count[o.kind] = (count[o.kind] ?? 0) + 1;
+			(byKindPos[o.kind] ??= []).push([o.pos[0], o.pos[2]]);
 			geneSum += o.gene ?? 1;
 			geneN++;
 		}
@@ -144,9 +146,21 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 		const have = count[k] ?? 0;
 		const want = target[k];
 		if (want > have) {
+			const anchors = byKindPos[k] ?? [];
 			for (let i = 0; i < want - have; i++) {
-				const x = minX + Math.random() * (maxX - minX);
-				const z = minZ + Math.random() * (maxZ - minZ);
+				// grow each kind NEAR an existing member of its kind (its colony/herd) with a small jitter — so the
+				// away-growth appears WHERE that population already lives (your colony fills out, the wild zone thickens)
+				// instead of being smeared uniformly across the whole map (which, with a far-flung layout, hid it all
+				// in the dormant gap and made the return look like nothing happened).
+				let x: number, z: number;
+				if (anchors.length) {
+					const a = anchors[(Math.random() * anchors.length) | 0];
+					x = a[0] + (Math.random() - 0.5) * 24;
+					z = a[1] + (Math.random() - 0.5) * 24;
+				} else {
+					x = minX + Math.random() * (maxX - minX);
+					z = minZ + Math.random() * (maxZ - minZ);
+				}
 				const gene = math.clampGene(avgGene - 0.05 + Math.random() * 0.1);
 				world.objects.push({ id: idPrefix + nid++, kind: k, pos: [x, 0, z], gene });
 				net++;
