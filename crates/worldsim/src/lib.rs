@@ -261,6 +261,59 @@ mod wasm_api {
         crate::worldgen::city_ops(&world, px, pz, yaw).dump()
     }
 
+    /// INCREMENTAL SETTLEMENT WALLS — Rust owns the placement. Reads the world DOM, clusters homes into settlements,
+    /// returns an ops JSON array that keeps each ringed by a haphazard, hole-free perimeter (grows with the town,
+    /// around water, demolishing rocks). Idempotent via a position-diff vs the existing auto-fence. Replaces the old
+    /// JS `replanSettlement` in Scene.svelte (compute now lives in Rust, per "Rust owns all compute").
+    #[wasm_bindgen]
+    pub fn settlement_ops(world_json: &str) -> String {
+        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        crate::worldgen::settlement_ops(&world).dump()
+    }
+
+    /// GRAVE SITE — Rust owns it (the engine knows water → no graves in lakes). Returns `{x,z}` for a dry cemetery plot
+    /// outside the deceased's settlement, or `null` for a wild death. Replaces Scene.svelte `graveyardSpot`.
+    #[wasm_bindgen]
+    pub fn grave_site(world_json: &str, dx: f64, dz: f64) -> String {
+        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        crate::worldgen::grave_site(&world, dx, dz).dump()
+    }
+
+    /// HOUSE PLACEMENT — Rust owns it. Reads the world DOM + this frame's build requests (`builds_json` = `[{x,z},…]`),
+    /// returns add-house ops obeying the colony rules + a water margin (no homes dipping into the lake). Replaces the
+    /// Scene.svelte `drainBuilds` handler.
+    #[wasm_bindgen]
+    pub fn build_ops(world_json: &str, builds_json: &str) -> String {
+        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        let builds = jzon::parse(builds_json).unwrap_or_else(|_| jzon::JsonValue::new_array());
+        crate::worldgen::build_ops(&world, &builds).dump()
+    }
+
+    /// WELL PLACEMENT — Rust owns it. `wells_json` = `[{x,z},…]` dig requests → add-well ops (grid-snapped, never in a
+    /// lake, deduped). Replaces the Scene `drainWells` handler.
+    #[wasm_bindgen]
+    pub fn well_ops(world_json: &str, wells_json: &str) -> String {
+        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        let wells = jzon::parse(wells_json).unwrap_or_else(|_| jzon::JsonValue::new_array());
+        crate::worldgen::well_ops(&world, &wells).dump()
+    }
+
+    /// COLONY VEGETATION — Rust owns it. `seed` varies per call (the sim tick) → at most one add-tree op so a town
+    /// greens over time. Replaces Scene's colony-vegetation block.
+    #[wasm_bindgen]
+    pub fn vegetation_ops(world_json: &str, seed: f64) -> String {
+        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        crate::worldgen::vegetation_ops(&world, seed).dump()
+    }
+
+    /// IMMIGRATION DECISION — Rust owns the species-rescue logic. `counts_json` = `{kind:{n,geneSum},…}` (live counts JS
+    /// gathered from agentManager), → add-creature ops (kind/pos/gene) for deficient kinds. Replaces Scene's rescue loop.
+    #[wasm_bindgen]
+    pub fn immigration_ops(counts_json: &str, px: f64, pz: f64, global_avg: f64, seed: f64) -> String {
+        let counts = jzon::parse(counts_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
+        crate::worldgen::immigration_ops(&counts, px, pz, global_avg, seed).dump()
+    }
+
     // ───────────────────────── the agent-sim bridge ─────────────────────────
     // One `Sim` per world. JS spawns agents (by kind-code + seedId), drives it with `step(dt)` once per frame
     // (the Rust clock sub-steps to fixed DT internally), and reads transforms back as typed-array VIEWS over

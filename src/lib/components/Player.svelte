@@ -379,8 +379,12 @@
 				const sn = Math.sin(th);
 				const lx = dx * cs - dz * sn; // world → local
 				const lz = dx * sn + dz * cs;
-				const hx = (wall.args[0] / 2) * sx + PR;
-				const hz = (wall.args[2] / 2) * sz + PR;
+				// FENCES carry no Rapier collider anymore (they're instanced — see Fences.svelte), so THIS push-out is
+				// the only thing that makes a town wall solid to you. parts[0] is just one post (0.16 wide) → far too
+				// narrow to seal the 1.4-wide panel, leaving walk-through gaps; use the full panel footprint instead.
+				const isFence = o.kind === 'fence';
+				const hx = (isFence ? 0.7 : wall.args[0] / 2) * sx + PR;
+				const hz = (isFence ? 0.15 : wall.args[2] / 2) * sz + PR;
 				if (Math.abs(lx) < hx && Math.abs(lz) < hz) {
 					// inside the inflated box → eject along the axis of least penetration, then rotate back
 					const nlx = hx - Math.abs(lx) < hz - Math.abs(lz) ? (lx >= 0 ? hx : -hx) : lx;

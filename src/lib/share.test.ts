@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { encodeWorld, decodeWorld } from './share';
-import { demoWorld, emptyWorld } from './world';
+import { demoWorld, emptyWorld, type World } from './world';
 import { heightAt } from './terrain';
+
+// total living population = live objects + every dormant region's aggregated counts
+const totalPop = (w: World) => w.objects.length + Object.values(w.regions ?? {}).reduce((s, a) => s + Object.values(a.counts).reduce((x, n) => x + n, 0), 0);
 
 describe('world share link (encode/decode round-trip)', () => {
 	it('round-trips the demo world: settings, object kinds & positions, scenery', async () => {
@@ -38,6 +41,36 @@ describe('world share link (encode/decode round-trip)', () => {
 		expect(back.objects[0].scale).toEqual([2, 2, 2]);
 		expect(back.objects[1].color).toBeUndefined();
 		expect(back.objects[1].scale).toEqual([1, 1, 1]);
+	});
+
+	it('round-trips DORMANT region aggregates — the WHOLE population survives the link, not just the live near-set', async () => {
+		// REGRESSION GUARD for the "2000 objects in the link → only ~500 spawn" bug: a streamed world keeps most of its
+		// population in dormant region aggregates (enforceLiveBudget / streamRegions offload the far objects). encode/
+		// decode used to drop `w.regions` entirely, silently losing everything beyond the ~LIVE_BUDGET live near-set.
+		const w = emptyWorld('p');
+		w.objects.push({ id: 'o0', kind: 'rabbit', pos: [1, 0, 1], gene: 1 }); // the live near-set (1 object)
+		w.regions = {
+			'6,6': { counts: { rabbit: 40, lion: 3 }, gene: 1.2, statics: [{ id: 'h0', kind: 'house', pos: [600, 0, 600] }], lastTick: 900 },
+			'-4,2': { counts: { kangaroo: 25 }, gene: 1.1, statics: [], lastTick: 1200 }
+		};
+		const back = await decodeWorld(await encodeWorld(w));
+		expect(back.regions).toBeDefined();
+		expect(Object.keys(back.regions!).sort()).toEqual(['-4,2', '6,6']);
+		expect(back.regions!['6,6'].counts).toEqual({ rabbit: 40, lion: 3 });
+		expect(back.regions!['6,6'].gene).toBeCloseTo(1.2, 1);
+		expect(back.regions!['6,6'].lastTick).toBe(900);
+		expect(back.regions!['6,6'].statics.length).toBe(1);
+		expect(back.regions!['6,6'].statics[0].kind).toBe('house');
+		expect(back.regions!['-4,2'].counts).toEqual({ kangaroo: 25 });
+		// TOTAL conserved: 1 live + (40+3) + 25 = 69. Pre-fix this collapsed to 1.
+		expect(totalPop(back)).toBe(totalPop(w));
+		expect(totalPop(back)).toBe(69);
+	});
+
+	it('un-streamed world (no regions) encodes regions as nothing — no bloat', async () => {
+		const tok = await encodeWorld(demoWorld()); // demoWorld has no .regions
+		const back = await decodeWorld(tok);
+		expect(back.regions).toBeUndefined();
 	});
 
 	it('produces a compact, url-safe token', async () => {

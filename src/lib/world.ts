@@ -196,10 +196,30 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 		}
 	}
 
+	// REFIT THE WALLS after away-growth — new homes change the settlement footprint, so the perimeter must be re-fitted
+	// or you return to a STALE fence: a home standing ON an old panel, and the wall not reaching the new edge (user:
+	// "one house stands on a fence, one side isn't closed"). Same engine the live sim uses (settlement_ops), an
+	// idempotent position-diff: it removes panels a new home overran / that the grown wall no longer needs and adds the
+	// new perimeter. Skipped if the wasm math isn't up yet (the Scene's on-load fit then catches it).
+	if (houses > 0) {
+		const ops = math.settlementOps(JSON.stringify(world));
+		if (ops) {
+			let fn = 0;
+			for (const op of ops) {
+				if (op.op === 'remove') {
+					const i = world.objects.findIndex((o) => o.id === op.id);
+					if (i >= 0) world.objects.splice(i, 1);
+				} else if (op.op === 'add' && op.pos) {
+					world.objects.push({ id: idPrefix + 'fc' + fn++, kind: op.kind, pos: [op.pos[0], groundY(op.pos[0], op.pos[2]), op.pos[2]], rot: op.rot, scale: op.scale });
+				}
+			}
+		}
+	}
+
 	// GRAVES while away — some of the dead are remembered. A few headstones near the settlement, time-proportional.
 	if (blds.length >= 2 && people >= 4) {
 		const existingGraves = world.objects.reduce((s, o) => s + (o.kind === 'grave' ? 1 : 0), 0);
-		let toAdd = Math.min(Math.round(dt / 1200), 70 - existingGraves, 15); // ≤15 per jump, ≤70 total
+		let toAdd = Math.min(Math.round(dt / 1200), 14 - existingGraves, 6); // ≤6 per jump, ≤14 total (matches GRAVE_CAP — a small cemetery, not a 70-stone pile)
 		const cx = blds.reduce((s, b) => s + b.pos[0], 0) / blds.length;
 		const cz = blds.reduce((s, b) => s + b.pos[2], 0) / blds.length;
 		for (let g = 0; toAdd > 0; g++, toAdd--) {

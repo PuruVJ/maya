@@ -1,6 +1,14 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import Prop from './Prop.svelte';
+	import Fences from './Fences.svelte';
+	import Graves from './Graves.svelte';
+	import Rocks from './Rocks.svelte';
+	import Flowers from './Flowers.svelte';
+	import Bushes from './Bushes.svelte';
+	import Wells from './Wells.svelte';
+	import Bridges from './Bridges.svelte';
 	import Npc from './Npc.svelte';
 	import Zone from './Zone.svelte';
 	import Water from './Water.svelte';
@@ -42,10 +50,11 @@
 	import { vitals } from '$lib/vitals.svelte';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { worldAreaScale } from '$lib/world';
-	import { streamRegions, regionOf, fastForwardDormant, enforceLiveBudget, LIVE_BUDGET } from '$lib/streaming';
+	import { streamRegions, regionOf, fastForwardDormant, enforceLiveBudget } from '$lib/streaming';
+	import { quality } from '$lib/quality.svelte';
 	import { playerState } from '$lib/playerState.svelte';
 	import { heightAt } from '$lib/terrain';
-	import { inWater, waterSurfaceY, waterEdgeFactor } from '$lib/water';
+	import { waterSurfaceY, waterEdgeFactor } from '$lib/water';
 	import { nature } from '$lib/nature.svelte';
 	import { wind } from '$lib/wind';
 	import { weather } from '$lib/weather';
@@ -206,7 +215,11 @@
 
 	$effect(() => {
 		const props: Obstacle[] = world.objects
-			.filter((o) => !CREATURES.has(o.kind))
+			// FENCES are NOT animal collision — the settlement-avoidance (Rust) is what keeps wildlife OUT, and a
+			// collidable wall only TRAPPED any creature caught inside when it went up (it'd jam against the inner face
+			// and mill there). Animals now get pushed cleanly out through the wall line; the PLAYER still collides with
+			// fences via its own push-out (Player.svelte), so the wall is still solid to you.
+			.filter((o) => !CREATURES.has(o.kind) && o.kind !== 'fence')
 			.map((o) => {
 				const def = kindDef(o.kind);
 				const sx = o.scale?.[0] ?? 1;
@@ -229,7 +242,12 @@
 			.filter((z) => z.material === 'water')
 			.map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
 		baseObstacles = [...props, ...ponds];
-		feedObstacles(playerState.pos[0], playerState.pos[2]); // re-feed with the current near-forest
+		// UNTRACK the player position: this effect rebuilds the STATIC obstacle list (filter+map over every world
+		// object), and it must run ONLY when the WORLD changes (a build/birth/stream) — NOT every frame the player
+		// moves. Reading playerState.pos directly made it a per-frame dep → rebuilding the whole obstacle list +
+		// onPath-culling every frame (profiled: ~40% of the main thread at 300 objects, scaling with object count →
+		// the "it got slow as my world grew" regression). Ongoing movement re-feeds via the THROTTLED useTask below.
+		untrack(() => feedObstacles(playerState.pos[0], playerState.pos[2]));
 		// WATER SOURCES (thirst): the same ponds are where animals drink — every creature must reach a bank to slake
 		// hydration or it dies of thirst. Changes only when a pond is added/removed.
 		feedWaterSources(); // ponds + settler-dug WELLS -> the sim drink sources (re-runs on each new well)
@@ -261,14 +279,13 @@
 	let graveN = 0;
 	const wellPrefix = 'w' + Math.random().toString(36).slice(2, 8) + '-';
 	let wellN = 0;
-	const GRAVE_CAP = 70;
+	const GRAVE_CAP = 14; // a small cemetery (was 70 — a stone-per-death clump that ate the live budget; see the burial block)
 	// VEGETATION: broadleaf (non-pine) trees slowly take root around a SETTLEMENT — people tend gardens/orchards,
 	// so a colony greens over time and reads as inhabited, not a bare cluster of boxes (user request). Bounded per
 	// building so it stays a leafy town, not a forest swallowing the streets.
 	const treePrefix = 'ct' + Math.random().toString(36).slice(2, 8) + '-';
 	let treeN = 0;
 	const BUILDING_KINDS = new Set(['house', 'cabin', 'tower']);
-	const HOUSE_CAP = 140;
 	const corpseReap = new Set<string>(); // reused each frame → ids of fully-decayed corpses to remove (no per-frame alloc)
 	// HABITATION DECAY: an emergent (NPC-built) home that nobody lives in for too long is reclaimed, so a town only
 	// persists where people actually settle (big-world "churning steady state"). PLAYER/LLM builds carry `keep` and
@@ -283,9 +300,6 @@
 	// is the rescue-effect half of a self-sustaining ecosystem; natural breeding (Rust) carries it from there.
 	const migrantPrefix = 'm' + Math.random().toString(36).slice(2, 8) + '-';
 	let migrantN = 0;
-	const IMMIGRATION: Record<string, number> = { rabbit: 6, kangaroo: 4, person: 4, cat: 4, lion: 2 }; // lion 1→2: a lone apex can never pair-breed
-	const GENEFLOW_MAX = 8; // a population this small still gets occasional FRESH BLOOD (anti-inbreeding gene flow)
-	const GENEFLOW_CHANCE = 0.18; // ...with this probability per restock check
 	const RESTOCK_EVERY = 9; // seconds between restock checks (gradual — a collapsed species trickles back over time)
 	let restockT = RESTOCK_EVERY - 2; // first check soon after load (so a barren reloaded world revives quickly)
 	// MOTHER NATURE wildcards (see nature.svelte.ts): every couple of minutes a pack/herd/boom rolls in to stir the
@@ -310,8 +324,20 @@
 	// animation), they're the landmarks you navigate by, and the freed scatter budget affords it. Beyond this the
 	// SettlementGlows lamp-blooms take over (their fade-in NEAR is matched to ~BUILD_KEEP so there's no double-draw).
 	const BUILDINGS = new Set(['house', 'cabin', 'tower', 'manor']);
-	const BUILD_SHOW_R2 = 300 * 300;
-	const BUILD_KEEP_R2 = 340 * 340;
+	const BUILD_SHOW_R2 = 340 * 340; // reveal structures within this (kept moderate — too far floods the keyed {#each}
+	const BUILD_KEEP_R2 = 380 * 380; // with house/fence Props that mount/unmount as you move = the jitter the user hit)
+
+
+	// ── INCREMENTAL SETTLEMENT PLANNER (EF11) — a house cluster accretes town structure as it grows. The PROTECTIVE
+	// PERIMETER FENCE appears at 2 homes and RE-FITS every time a home is added, so a town is ALWAYS walled and the
+	// wall GROWS with it (user). Roads, a well/pond and watchtowers layer on at larger sizes (follow-up tiers). A LONE
+	// house (n<2) gets nothing — it stays exposed: the in-world incentive to migrate into a town or grow into one.
+	// Towns are ≥500 m apart (NEW_COLONY_GAP), so a 75 m gather + footprint-radius cleanup never touch a neighbour.
+	const fencePrefix = 'fc' + Math.random().toString(36).slice(2, 8) + '-';
+	let fenceN = 0;
+	let fenceInitDone = false; // ONE-TIME reconcile after load/reset: a demo or legacy settlement ships with homes but no
+	// wall (demoWorld.json has 2 homes, 0 fence), and event-driven fitting never fires for it. Fit once when homes first
+	// appear; settlement_ops is idempotent, so a world that already has its stored wall emits nothing (no regeneration).
 	const RECHECK_MOVE2 = 6 * 6;
 	const CREATURE_KINDS = new Set(['person', 'cat', 'lion', 'rabbit', 'kangaroo', 'dinosaur']);
 	let visible = $state<WorldObject[]>([]);
@@ -329,6 +355,14 @@
 	let reflashN = 0; // return strokes left in the current strike (real lightning FLICKERS, it doesn't single-flash)
 	let reflashCd = 0; // seconds to the next return stroke
 	useTask((dt) => {
+		// PERF (P3, docs/spread-redesign.md): build/well/grave/vegetation ops read only PLACED objects (buildings,
+		// wells, graves, trees) + zones — NEVER creatures or the terrain heightfield. Serialize that filtered payload
+		// ONCE per frame (memoised below) instead of JSON.stringify(world) — which copied every creature + the whole
+		// terrain array — at each call site. That whole-world stringify was the per-event main-thread HITCH the spread
+		// eased but didn't remove. (settlement_ops already filters; this extends the same pattern to the other ops.)
+		let _structJson: string | null = null;
+		const structWorld = () => (_structJson ??= JSON.stringify({ objects: world.objects.filter((o) => !CREATURES.has(o.kind)), zones: world.zones ?? [] }));
+
 		// REPRODUCTION: Rust bred new animals → turn each into a world-object (a baby of that kind), which mounts
 		// its renderer + spawns into the sim (as a maturing juvenile). The per-kind cap keeps this bounded.
 		const babies = sim.drainBirths();
@@ -340,113 +374,93 @@
 			}
 		}
 
-		// EMERGENT CITIES: place the houses settlers raised this frame. Snap to an 8 m grid (→ aligned blocks),
-		// skip an already-occupied plot, and stop at HOUSE_CAP so a town grows but never sprawls without bound.
+		// fence walls are (re)fitted ONLY when a STRUCTURE is added or removed (a build / well / decay) — NOT on a timer
+		// and NOT when the player approaches a settlement (user: "I hate that the fence is generated based on my
+		// presence; it should be around structure addition/removal"). This flag is set at each real structure mutation
+		// below; the wall fit at the end of the frame runs only if it's set. Region wake/sleep does NOT set it — a
+		// built fence is a durable static that travels with its region into/out of dormancy, so it's already correct.
+		let fenceDirty = false;
+
+		// EMERGENT CITIES — house placement is RUST now (worldgen::build_ops): colony rules (<=10/town, a new town >=500 m
+		// away), grave-avoidance, and a WATER MARGIN so a home never dips into the lake. JS applies the add ops + renders.
 		const builds = sim.drainBuilds();
 		if (builds.length) {
-			let houses = 0;
-			for (const o of world.objects) if (BUILDING_KINDS.has(o.kind)) houses++;
-			for (const bd of builds) {
-				if (houses >= HOUSE_CAP) break;
-				const gx = Math.round(bd.x / 8) * 8;
-				const gz = Math.round(bd.z / 8) * 8;
-				// COLONY RULES (perf + "they build their own distinct cities"): a colony holds ≤ COLONY_MAX structures,
-				// and a NEW colony must be ≥ NEW_COLONY_GAP from any existing building — so settlers can't pile a dense
-				// sprawl on top of spawn (which nuked the frame rate); they grow a hamlet to 10 then must MIGRATE far
-				// to found the next. One scan finds the plot's colony size + the nearest building.
-				const COLONY_R2 = 75 * 75; // buildings within this of the plot = the same colony
-				const COLONY_MAX = 5; // HOUSES per settlement (user: max 5; wells + other supporting objects don't count)
-				const NEW_COLONY_GAP2 = 500 * 500; // a brand-new colony must be this far from any other building
-				let nearInColony = 0;
-				let nearest2 = Infinity;
-				let taken = false;
-				for (const o of world.objects) {
-					if (!BUILDING_KINDS.has(o.kind)) continue;
-					const d2 = (o.pos[0] - gx) ** 2 + (o.pos[2] - gz) ** 2;
-					if (d2 < 36) {
-						taken = true;
-						break;
-					} // plot occupied (≤6 m)
-					if (d2 < COLONY_R2) nearInColony++;
-					if (d2 < nearest2) nearest2 = d2;
-				}
-				if (taken) continue; // plot taken
-				if (nearInColony >= COLONY_MAX) continue; // this colony is full → settle elsewhere (keep walking)
-				if (nearInColony === 0 && nearest2 < NEW_COLONY_GAP2) continue; // a NEW colony too close to another → walk farther first
-				if (inWater(world.zones, gx, gz)) continue; // never raise a home in a lake (a settler picks dry ground)
-				// VARIED HOMES — a town shouldn't be identical boxes. Roll a size/kind: cosy cabins, modest houses,
-				// the occasional big manor (scale up). Sit it ON the ground (terrain height), not y=0 (else it buries
-				// into a hill and only the roof shows). heightAt mirrors the renderer's ground.
-				const roll = Math.random();
-				const kind = roll < 0.3 ? 'cabin' : 'house';
-				const s = roll < 0.3 ? 0.85 + Math.random() * 0.25 : roll < 0.8 ? 0.9 + Math.random() * 0.35 : 1.35 + Math.random() * 0.4; // small cabins · modest houses · big manors
-				world.objects.push({ id: housePrefix + houseN++, kind, pos: [gx, heightAt(gx, gz, world.terrain), gz], scale: [s, s, s] });
-				houses++;
-			}
-		}
-
-		// EMERGENT WELLS (jobs): an industrious settler with no water in reach dug one → place it as a `well` object
-		// AND register it as a new drink source (feedWaterSources), so life can now slake thirst there and the
-		// settlement grows around the water it made. Dedup so a cluster of diggers makes ONE well, not a stack.
-		const wells = sim.drainWells();
-		if (wells.length) {
-			let placed = 0;
-			for (const wl of wells) {
-				const gx = Math.round(wl.x / 4) * 4;
-				const gz = Math.round(wl.z / 4) * 4;
-				if (inWater(world.zones, gx, gz)) continue; // a well in a lake is pointless
-				let near = false;
-				for (const o of world.objects) {
-					if (o.kind !== 'well') continue;
-					if ((o.pos[0] - gx) ** 2 + (o.pos[2] - gz) ** 2 < 35 * 35) {
-						near = true;
-						break;
+			const ops = math.buildOps(structWorld(), JSON.stringify(builds));
+			if (ops) {
+				for (const op of ops) {
+					if (op.op === "add" && op.pos) {
+						world.objects.push({ id: housePrefix + houseN++, kind: op.kind, pos: [op.pos[0], heightAt(op.pos[0], op.pos[2], world.terrain), op.pos[2]], scale: op.scale });
+						fenceDirty = true; // a new home → re-fit this town's wall
 					}
 				}
-				if (near) continue; // a well already serves this spot
-				world.objects.push({ id: wellPrefix + wellN++, kind: 'well', pos: [gx, heightAt(gx, gz, world.terrain), gz], keep: true });
-				placed++;
 			}
-			if (placed) feedWaterSources(); // the new wells join the thirst sim
 		}
-
+		// EMERGENT WELLS — placement is RUST now (worldgen::well_ops): grid-snapped, never in a lake, deduped. JS applies
+		// the add ops + re-runs feedWaterSources so the new wells join the thirst sim.
+		const wells = sim.drainWells();
+		if (wells.length) {
+			const ops = math.wellOps(structWorld(), JSON.stringify(wells));
+			let placed = 0;
+			if (ops) {
+				for (const op of ops) {
+					if (op.op === "add" && op.pos) {
+						world.objects.push({ id: wellPrefix + wellN++, kind: "well", pos: [op.pos[0], heightAt(op.pos[0], op.pos[2], world.terrain), op.pos[2]], keep: true });
+						placed++;
+					}
+				}
+			}
+			if (placed) {
+				feedWaterSources();
+				fenceDirty = true; // a new well sits inside the walled set → the ring may extend to enclose it
+			}
+		}
 		// CORPSE REAPER: a body that's fully decayed (sunk into the earth, see Critter/Npc) is removed from the
 		// world — unmounting its renderer + despawning it from the Rust sim, and dropping it from the save. Keeps
 		// the now-cyclic world (births ↔ deaths) bounded. Only allocates the id-set on the rare frame one expires.
 		corpseReap.clear();
-		const gravePts: [number, number][] = []; // PERSONS reaped this frame → a headstone rises at each spot
+		const gravePts: [number, number][] = []; // PERSONS reaped this frame → buried in their settlement's graveyard
+		const deadPeople: [number, number][] = [];
 		agentManager.forEach((m) => {
 			if (m.dead && m.objId && m.corpseAge > CORPSE_DECAY_SECS) {
 				corpseReap.add(m.objId);
-				if (m.kind === 'person') gravePts.push([m.agent.x, m.agent.z]);
+				if (m.kind === 'person') deadPeople.push([m.agent.x, m.agent.z]);
 			}
 		});
+		if (deadPeople.length) {
+			// the ENGINE picks the grave site (dry plot outside the settlement, or null for a wild death) — Rust owns it,
+			// so it knows water → no more graves in lakes. Serialize the world ONCE for the batch (deaths are rare).
+			const wj = structWorld();
+			for (const [dpx, dpz] of deadPeople) {
+				const r = math.graveSite(wj, dpx, dpz);
+				if (r) gravePts.push([r.x, r.z]);
+			}
+		}
 		if (corpseReap.size > 0) {
 			for (let i = world.objects.length - 1; i >= 0; i--) {
 				if (corpseReap.has(world.objects[i].id)) world.objects.splice(i, 1);
 			}
 		}
-		for (const [gx, gz] of gravePts) {
-			world.objects.push({ id: gravePrefix + graveN++, kind: 'grave', pos: [gx, heightAt(gx, gz, world.terrain), gz], rot: Math.random() * Math.PI * 2 });
-		}
 		if (gravePts.length) {
-			// FIFO cap: once there are too many headstones, reclaim the oldest (lowest grave-counter id)
+			// GRAVES — a small CEMETERY, NOT a headstone per death (user: "we don't need 1:1 gravestones"). Each burial
+			// only SOMETIMES raises a new stone, jittered into a plot and never within GRAVE_MIN of an existing one, so a
+			// town's graveyard fills to a handful of weathered stones then STOPS growing. (A stone-per-death stacked ~70
+			// headstones in a tight clump: pure clutter, and it ate ~70 of the live-object slots — starving distant
+			// wildlife out of the live set, which is a big part of why everything collapsed into the settlement.)
+			const GRAVE_MIN2 = 4 * 4;
 			let graves = 0;
 			for (const o of world.objects) if (o.kind === 'grave') graves++;
-			while (graves > GRAVE_CAP) {
-				let oldestIdx = -1;
-				let oldestN = Infinity;
-				for (let i = 0; i < world.objects.length; i++) {
-					const o = world.objects[i];
-					if (o.kind !== 'grave') continue;
-					const num = parseInt(o.id.slice(o.id.indexOf('-') + 1), 10);
-					if (num < oldestN) ((oldestN = num), (oldestIdx = i));
-				}
-				if (oldestIdx < 0) break; // no more graves to reclaim (shouldn't happen) — guard the loop
-				world.objects.splice(oldestIdx, 1);
-				graves--;
+			for (const [gx0, gz0] of gravePts) {
+				if (graves >= GRAVE_CAP) break;
+				if (Math.random() > 0.34) continue; // sparse — most deaths add no stone (atmosphere, not a census)
+				const gx = gx0 + (Math.random() - 0.5) * 14;
+				const gz = gz0 + (Math.random() - 0.5) * 14;
+				if (world.objects.some((o) => o.kind === 'grave' && (o.pos[0] - gx) ** 2 + (o.pos[2] - gz) ** 2 < GRAVE_MIN2)) continue; // a stone already marks this plot
+				world.objects.push({ id: gravePrefix + graveN++, kind: 'grave', pos: [gx, heightAt(gx, gz, world.terrain), gz], rot: Math.random() * Math.PI * 2 });
+				graves++;
 			}
 		}
+		// (The cemetery's FIFO cap is enforced on the slow restock cadence below — see trimGraves — so a freshly LOADED
+		// world sheds a legacy pile of headstones promptly, not only when the next person happens to die.)
 
 		// IMMIGRATION: rescue any species that's dropped below its floor (extinction-proofing). Counts the LIVE
 		// agents, and for each deficient kind walks in a couple of adults from the edge so a wiped-out herd can
@@ -454,6 +468,16 @@
 		restockT += dt;
 		if (restockT >= RESTOCK_EVERY) {
 			restockT = 0;
+			// trimGraves: enforce the cemetery FIFO cap — clears a legacy save's pile down to GRAVE_CAP within one
+			// restock of load, and bounds ongoing growth. Remove excess graves from the FRONT of the array (insertion
+			// order ≈ chronological → oldest first); position-based, NOT id-parsed (legacy saves used dashless grave ids
+			// that parsed to NaN → the old trim broke immediately and a 70-grave pile never shed). Cheap O(n), per restock.
+			let graveCount = 0;
+			for (const o of world.objects) if (o.kind === 'grave') graveCount++;
+			if (graveCount > GRAVE_CAP) {
+				let toRemove = graveCount - GRAVE_CAP;
+				world.objects = world.objects.filter((o) => !(o.kind === 'grave' && toRemove > 0 && toRemove--));
+			}
 			// feed the world's AREA to the sim → prey caps scale with the (growing) world/city; predators follow prey
 			sim.setPopScale(worldAreaScale(world.objects));
 			const live: Record<string, number> = {};
@@ -468,66 +492,24 @@
 				allN++;
 			});
 			const globalAvg = allN > 0 ? allGene / allN : 1; // fallback vigor for a species that's gone fully extinct
-			for (const kind in IMMIGRATION) {
-				const n = live[kind] ?? 0;
-				const floor = IMMIGRATION[kind];
-				const avg = n ? geneSum[kind] / n : globalAvg;
-				// HOW MANY arrive — three regimes:
-				//  · near-extinct (≤1): a lone survivor can't pair-breed, so walk in a whole VIABLE FOUNDING GROUP (≥3 →
-				//    both sexes almost certainly present, a non-inbred start).
-				//  · below floor: top up to the floor.
-				//  · small but stable: occasional FRESH BLOOD (gene flow) so a tiny pop doesn't inbreed/stagnate.
-				let bring = 0;
-				if (n <= 1) bring = Math.max(floor, 3);
-				else if (n < floor) bring = floor - n;
-				else if (n < GENEFLOW_MAX && Math.random() < GENEFLOW_CHANCE) bring = 1;
-				if (bring <= 0) continue;
-				// GENETIC RESCUE: migrants are robust dispersers from a thriving distant population — vigour at least
-				// ~1.12, biased above the struggling locals, with real spread. So immigration LIFTS a degraded gene pool
-				// (user: "the AI must intervene when it's getting too low") + injects diversity, rather than cloning the
-				// local average or resetting to 1.0.
-				const center = Math.max(avg, globalAvg, 1.12);
-				// a wave arrives as a CLUSTER (a pack/herd entering together at one spot), not scattered to opposite edges
-				// → the founders land within mate-finding range of each other and can actually pair up.
-				const baseA = Math.random() * Math.PI * 2;
-				const baseR = 55 + Math.random() * 30; // beyond the immediate clearing, within the wander range
-				const bx = playerState.pos[0] + Math.cos(baseA) * baseR;
-				const bz = playerState.pos[2] + Math.sin(baseA) * baseR;
-				for (let k = 0; k < bring; k++) {
-					const x = bx + (Math.random() - 0.5) * 12; // jittered within the group, all near one another
-					const z = bz + (Math.random() - 0.5) * 12;
-					const gene = math.clampGene(center - 0.06 + Math.random() * 0.34);
-					world.objects.push({ id: migrantPrefix + migrantN++, kind, pos: [x, 0, z], gene });
+			// the ENGINE decides the rescue (worldgen::immigration_ops): which deficient kinds, how many, rescued vigour,
+			// clustered near the player. We hand it the live counts gathered above; it returns add-creature ops (with gene).
+			const counts: Record<string, { n: number; geneSum: number }> = {};
+			for (const k in live) counts[k] = { n: live[k], geneSum: geneSum[k] ?? 0 };
+			const migOps = math.immigrationOps(JSON.stringify(counts), playerState.pos[0], playerState.pos[2], globalAvg, sim.tick());
+			if (migOps) {
+				for (const op of migOps) {
+					if (op.op === "add" && op.pos) world.objects.push({ id: migrantPrefix + migrantN++, kind: op.kind, pos: op.pos, gene: op.gene });
 				}
 			}
-
-			// COLONY VEGETATION: a broadleaf tree occasionally takes root near a house, so a settlement greens over
-			// time into a leafy town. Bounded (~1.3 per building) so streets don't vanish under canopy; skips plots.
-			let houseCount = 0;
-			let colonyTrees = 0;
-			for (const o of world.objects) {
-				if (BUILDING_KINDS.has(o.kind)) houseCount++;
-				else if (o.kind === 'tree' && o.id.startsWith(treePrefix)) colonyTrees++;
-			}
-			if (houseCount >= 3 && colonyTrees < houseCount * 1.3 && Math.random() < 0.55) {
-				const blds = world.objects.filter((o) => BUILDING_KINDS.has(o.kind));
-				const h = blds[(Math.random() * blds.length) | 0];
-				const ta = Math.random() * Math.PI * 2;
-				const tr = 4.5 + Math.random() * 6;
-				const tx = h.pos[0] + Math.cos(ta) * tr;
-				const tz = h.pos[2] + Math.sin(ta) * tr;
-				// don't plant on a building plot, right on top of another tree, or in a lake
-				const blocked =
-					inWater(world.zones, tx, tz) ||
-					world.objects.some(
-						(o) => (BUILDING_KINDS.has(o.kind) || o.kind === 'tree' || o.kind === 'pine') && Math.abs(o.pos[0] - tx) < 2.6 && Math.abs(o.pos[2] - tz) < 2.6
-					);
-				if (!blocked) {
-					const s = 0.7 + Math.random() * 0.5;
-					world.objects.push({ id: treePrefix + treeN++, kind: 'tree', pos: [tx, heightAt(tx, tz, world.terrain), tz], scale: [s, s, s] });
-				}
-			}
-			// HABITATION DECAY: an emergent home that nobody lives in for too long is reclaimed — a town persists
+				// COLONY VEGETATION — placement is RUST now (worldgen::vegetation_ops): a broadleaf occasionally roots near a
+				// home so a town greens over time (bounded, never on a plot/tree/lake). Seeded by the tick for the gradual roll.
+				const vegOps = math.vegetationOps(structWorld(), sim.tick());
+				if (vegOps) {
+					for (const op of vegOps) {
+						if (op.op === "add" && op.pos) world.objects.push({ id: treePrefix + treeN++, kind: "tree", pos: [op.pos[0], heightAt(op.pos[0], op.pos[2], world.terrain), op.pos[2]], scale: op.scale });
+					}
+				}			// HABITATION DECAY: an emergent home that nobody lives in for too long is reclaimed — a town persists
 			// only where people actually settle. PLAYER/LLM builds carry `keep` and are NEVER touched; a person
 			// within OCCUPY_R of a home resets its idle clock.
 			const humansAt: [number, number][] = [];
@@ -548,6 +530,7 @@
 					if (BUILDING_KINDS.has(o.kind) && !o.keep && (houseIdle.get(o.id) ?? 0) > DECAY_IDLE) {
 						world.objects.splice(i, 1);
 						houseIdle.delete(o.id);
+						fenceDirty = true; // a home was reclaimed → re-fit (shrink) this town's wall
 					}
 				}
 			}
@@ -640,6 +623,10 @@
 		if (rkey !== lastRegion) {
 			lastRegion = rkey;
 			streamRegions(world, px, pz, sim.tick());
+			// NB: deliberately NO fence re-fit on region wake. Re-fitting on every crossing re-ran settlement_ops
+			// (whole-world JSON → Rust) right as you approached a town — the freeze + "fences drawn on demand" the
+			// user hit. Fences are built ONCE (on a structure add/remove or the one-time load reconcile) and STORED;
+			// a settlement's wall travels with its region as a static and comes back verbatim, no recompute.
 		}
 		// WORLD PULSE: every ~10 s (300 sim ticks @30 Hz), fast-forward EVERY dormant region to now so the far world
 		// keeps living (grows toward carrying capacity + evolves) instead of freezing until visited. Cheap closed-form.
@@ -648,20 +635,71 @@
 			lastPulseTick = simTick;
 			fastForwardDormant(world, simTick);
 		}
-		// HARD LIVE BUDGET (user: "400 that actually EXISTS there, systemically"): if the near area is densely packed
-		// past LIVE_BUDGET, offload the FARTHEST excess (creatures + structures) into dormant aggregates — they leave
-		// the live set entirely (so they despawn from the Rust sim AND stop drawing, not just hide), and rejoin as you
-		// approach. Bounds what truly exists live around you, which is what caps sim + draw cost (and the DRS flicker).
-		if (world.objects.length > LIVE_BUDGET) enforceLiveBudget(world, px, pz, sim.tick());
+		// SETTLEMENT WALLS — placement COMPUTE lives in RUST (worldgen::settlement_ops; same engine that knows
+		// water/rocks → no fences-through-water). The fit runs ONLY when `fenceDirty` was set this frame by a real
+		// STRUCTURE add/remove (a settler raised a home, dug a well, or an empty home decayed) — NOT on a timer and NOT
+		// when you walk up to a town. The wall is thus a consequence of BUILDING, then STORED in world.objects: it
+		// travels with its region into dormancy as a static and comes back verbatim, so returning never regenerates it
+		// (user: "I hate the fence generated based on my presence — it should be around structure addition/removal").
+		// settlement_ops is idempotent (position-diff), so the one call reconciles every live town: adds the new town's
+		// panels, removes a decayed town's stale ones, leaves unchanged towns alone.
+		// ONE-TIME on load/reset: the moment homes are present, reconcile once so a demo/legacy town that shipped with no
+		// wall gets one. Idempotent → a town that already has its stored wall is untouched (NOT presence regeneration).
+		if (!fenceInitDone) {
+			for (const o of world.objects) {
+				if (o.kind === 'house' || o.kind === 'cabin' || o.kind === 'manor') {
+					fenceDirty = true; // request the one-time fit (init marked done below, ONLY once settlement_ops succeeds)
+					break;
+				}
+			}
+		}
+		if (fenceDirty) {
+			// settlement_ops only reads STRUCTURES (homes/towers/wells/rocks/fences) + water zones — so hand it ONLY
+			// those, not the whole world (hundreds of creatures + trees + flowers). Shrinks the JSON it stringifies +
+			// the Rust parses by ~10× → the per-call cost (which used to spike when you neared a town) stays small.
+			const fenceWorld = JSON.stringify({
+				objects: world.objects.filter((o) => o.kind === 'house' || o.kind === 'cabin' || o.kind === 'manor' || o.kind === 'tower' || o.kind === 'well' || o.kind === 'rock' || o.kind === 'fence'),
+				zones: world.zones ?? []
+			});
+			const ops = math.settlementOps(fenceWorld);
+			if (ops) {
+				fenceInitDone = true; // a settlement_ops call landed (wasm was ready) → the one-time load reconcile is done.
+				// (Before this, the init latched on frame 1 while wasm was still loading → ops was null → the demo never got walled.)
+				for (const op of ops) {
+					if (op.op === 'remove') {
+						const i = world.objects.findIndex((o) => o.id === op.id);
+						if (i >= 0) world.objects.splice(i, 1);
+					} else if (op.op === 'add' && op.pos) {
+						// SIT the panel on the ground (settlement_ops emits y=0; the terrain rolls past ~240 m → a panel at
+						// y=0 would bury). heightAt mirrors the renderer's ground, same as houses.
+						world.objects.push({ id: fencePrefix + fenceN++, kind: op.kind, pos: [op.pos[0], heightAt(op.pos[0], op.pos[2], world.terrain), op.pos[2]], rot: op.rot, scale: op.scale });
+					}
+				}
+			}
+		}
+		// HARD LIVE BUDGET — a MAX CAP, not a target (user): if the near area is densely packed past the per-class
+		// budgets, offload the FARTHEST excess into dormant aggregates — they leave the live set entirely (despawn from
+		// the Rust sim AND stop drawing, not just hide), and rejoin as you approach. CREATURES and STRUCTURES have
+		// SEPARATE budgets, so a structure-dense town never evicts distant wildlife to fit its own homes/fences/graves
+		// (that's what collapsed everything into the settlement). enforceLiveBudget early-outs when both are under cap.
+		enforceLiveBudget(world, px, pz, sim.tick());
 		const objLen = world.objects.length;
 		if (objLen !== lastObjLen || Number.isNaN(lastRevealX) || (px - lastRevealX) ** 2 + (pz - lastRevealZ) ** 2 > RECHECK_MOVE2) {
 			lastRevealX = px;
 			lastRevealZ = pz;
 			lastObjLen = objLen;
 			const next: WorldObject[] = [];
+			const seen = new Set<string>(); // GUARD: never feed a duplicate id into the keyed {#each} → it throws
+			// `each_key_duplicate` and white-screens the app. Skips a stray dup (e.g. a legacy persisted wake-id
+			// collision from before the materializeSeq fix) instead of crashing.
 			for (const o of world.objects) {
+				if (seen.has(o.id)) continue;
+				if (o.kind === 'fence' || o.kind === 'grave' || o.kind === 'rock' || o.kind === 'flower' || o.kind === 'bush' || o.kind === 'well' || o.kind === 'bridge') continue;
+				// these all render via INSTANCED renderers (Fences/Graves/Rocks/Flowers/Bushes/Wells/Bridges) — keep them OUT of
+				// the keyed {#each} so a walled town / scattered field no longer mounts/unmounts Props w/ geometry/material/RigidBody.
 				if (CREATURE_KINDS.has(o.kind)) {
 					next.push(o); // creatures always render (few; they wander; LOD/impostors handle their distance)
+					seen.add(o.id);
 					continue;
 				}
 				const d2 = (o.pos[0] - px) ** 2 + (o.pos[2] - pz) ** 2;
@@ -671,6 +709,7 @@
 				const keep = shownIds.has(o.id) ? d2 < keepR : d2 < showR; // hysteresis: hold a shown one until past KEEP
 				if (keep) {
 					next.push(o);
+					seen.add(o.id);
 					shownIds.add(o.id);
 				} else {
 					shownIds.delete(o.id);
@@ -720,19 +759,23 @@
 <Terrain {world} />
 <AmbientScatter {world} />
 <SettlementGlows {world} />
-<LoveHearts {world} />
-<Chimneys {world} />
-<DustPuffs {world} />
-<SpawnPuffs {world} />
-<FootPrints {world} />
-<SplashDrops {world} />
-<AmbientParticles sky={world.sky} />
-<FallingLeaves sky={world.sky} ground={world.ground} />
-<Weather ground={world.ground} sky={world.sky} />
-<Mist {world} />
-<Birds {world} />
-<Birds {world} mode="bat" />
-<Butterflies {world} />
+<!-- DECORATIVE LAYERS — dropped on the LOW quality tier (weak devices) to hold the frame rate. Pure eye-candy with
+     no gameplay effect; the core world (terrain, grass, agents, shadows, settlement glow) always renders. -->
+{#if !quality.low}
+	<LoveHearts {world} />
+	<Chimneys {world} />
+	<DustPuffs {world} />
+	<SpawnPuffs {world} />
+	<FootPrints {world} />
+	<SplashDrops {world} />
+	<AmbientParticles sky={world.sky} />
+	<FallingLeaves sky={world.sky} ground={world.ground} />
+	<Weather ground={world.ground} sky={world.sky} />
+	<Mist {world} />
+	<Birds {world} />
+	<Birds {world} mode="bat" />
+	<Butterflies {world} />
+{/if}
 <Grass {world} />
 <AgentSystem />
 <AgentImpostors {world} />
@@ -763,6 +806,21 @@
 {#each world.paths ?? [] as p (p.id)}
 	<Path path={p} {world} />
 {/each}
+
+<!-- all town walls in two instanced draw calls (no per-panel Prop/RigidBody) -->
+<Fences {world} />
+<!-- all cemetery headstones in four instanced draw calls -->
+<Graves {world} />
+<!-- all scattered boulders in two instanced draw calls (per-rock colour via instanceColor) -->
+<Rocks {world} />
+<!-- all wildflowers in two instanced draw calls (per-bloom palette colour via instanceColor) -->
+<Flowers {world} />
+<!-- all placed shrubs in three instanced draw calls (per-bush palette colour via instanceColor) -->
+<Bushes {world} />
+<!-- all village wells in three instanced draw calls -->
+<Wells {world} />
+<!-- all plank bridges: instanced visual + kept per-bridge deck colliders (walkable) -->
+<Bridges {world} />
 
 {#each visible.slice(0, revealed) as obj (obj.id)}
 	{#if obj.kind === 'person'}

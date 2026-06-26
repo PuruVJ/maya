@@ -24,7 +24,16 @@ const ACTIVE_RING = 1; // regions within this Chebyshev ring of the player's sta
 // (e.g. you spawn 1000 people in one spot). Excess beyond this — the FARTHEST from the player — is offloaded to the
 // dormant region aggregates (still alive there, fast-forwarded, re-materialised as you approach). So only ~this many
 // elements ever actually exist live around you, which is what caps the sim + draw cost (and the DRS flicker).
-export const LIVE_BUDGET = 400;
+// The budget is SPLIT by class — creatures and static structures have SEPARATE caps and never compete for slots.
+// WHY: a single shared pool let a developed town's own structures (its homes + ~60 fence panels + a pile of
+// gravestones) fill the nearest-N slots, so distant WILDLIFE got evicted into dormant aggregates to make room — the
+// wild emptied and every creature collapsed INTO the settlement (user: "everything's in the settlement, not
+// spreading"). With independent budgets the town's structures stay drawn AND the same creatures keep their full
+// ~600 m live span, so the world reads populated again. Neither cap usually bites (a 600 m span rarely holds this
+// many of either) — they're the ceiling that bounds sim+draw cost when a span is genuinely overcrowded.
+export const CREATURE_BUDGET = 240; // live ANIMATED creatures (sim ticks + skinned meshes = the real cost)
+export const STRUCT_BUDGET = 250; // live STATIC structures (houses/fences/graves/trees/…), counted independently — STRICT cap (user: "strict budget only, 250") that bounds the binary-SoA live slice so render+sim never see more than this at once
+export const LIVE_BUDGET = CREATURE_BUDGET; // back-compat alias (the creature cap is what callers gate the sweep on)
 // tick rate comes from the sim clock (math.tickHz(), cached) — no duplicated 30 here
 
 export const regionKey = (cx: number, cz: number): string => `${cx},${cz}`;
@@ -71,6 +80,12 @@ export function collapseRegion(world: World, key: string, tick: number): void {
 	};
 }
 
+// Monotonic id counter for materialised creatures — GUARANTEES globally-unique ids. (The old `${prefix}${made}` was
+// only unique within one wake; but enforceLiveBudget can evict creatures back into a region's aggregate, and that
+// region may then be re-woken AT THE SAME TICK, so the tick-derived prefix collided → duplicate keyed-each keys →
+// `each_key_duplicate` crash on reload. A process-wide counter can never collide.)
+let materializeSeq = 0;
+
 /** WAKE a region: fast-forward its aggregate to `tick` (Rust closed-form), materialise individuals at seeded spots,
  *  clear the aggregate. Returns how many creatures it materialised. No-op (returns 0) if there's no aggregate. */
 export function wakeRegion(world: World, key: string, tick: number, idPrefix: string): number {
@@ -99,7 +114,7 @@ export function wakeRegion(world: World, key: string, tick: number, idPrefix: st
 			const sz = rand(cx * 19349663 + cz * 83492791, kind.charCodeAt(0), i, 2);
 			const x = (cx + sx) * REGION_SIZE;
 			const z = (cz + sz) * REGION_SIZE;
-			world.objects.push({ id: `${idPrefix}${made.toString(36)}`, kind, pos: [x, heightAt(x, z, world.terrain), z], gene, scale: [1, 1, 1] });
+			world.objects.push({ id: `${idPrefix}${(materializeSeq++).toString(36)}`, kind, pos: [x, heightAt(x, z, world.terrain), z], gene, scale: [1, 1, 1] });
 			made++;
 		}
 	}
@@ -166,21 +181,33 @@ export function streamRegions(world: World, px: number, pz: number, tick: number
  *  "only ~budget elements actually exist live around you" true even when the live SPAN is densely packed (region
  *  streaming alone can't help if 1000 are crammed into one 200 m tile). Returns how many it offloaded. Cheap: a
  *  single distance sort, and the caller only invokes it while over budget. */
-export function enforceLiveBudget(world: World, px: number, pz: number, tick: number, budget = LIVE_BUDGET): number {
+export function enforceLiveBudget(world: World, px: number, pz: number, tick: number, creatureBudget = CREATURE_BUDGET, structBudget = STRUCT_BUDGET): number {
 	const objs = world.objects;
-	if (objs.length <= budget) return 0;
+	// COUNT each class + early-out when both are under budget — the common case, and it ALLOCATES NOTHING (this runs
+	// every frame, so the no-op path must stay free of garbage).
+	let nCre = 0;
+	let nStr = 0;
+	for (let i = 0; i < objs.length; i++) CREATURE_KINDS.has(objs[i].kind) ? nCre++ : nStr++;
+	if (nCre <= creatureBudget && nStr <= structBudget) return 0;
 	if (!world.regions) world.regions = {};
-	// rank by distance² to the player; the nearest `budget` stay live, the rest are evicted. A single {o,d2} array +
-	// sort (vs. a parallel index array + a Set lookup) keeps the per-call allocation light — this fires whenever a
-	// birth/build/region-wake nudges the live set back over budget, so it wants to stay cheap.
-	const ranked = objs.map((o) => ({ o, d2: (o.pos[0] - px) ** 2 + (o.pos[2] - pz) ** 2 }));
-	ranked.sort((a, b) => a.d2 - b.d2);
+	const creIdx: number[] = [];
+	const strIdx: number[] = [];
+	for (let i = 0; i < objs.length; i++) (CREATURE_KINDS.has(objs[i].kind) ? creIdx : strIdx).push(i);
+	// rank EACH class by distance² INDEPENDENTLY and keep the nearest `budget` of each — so a structure-dense town can
+	// never evict distant wildlife to make room for its own homes/fences/graves (that starvation collapsed the world's
+	// creatures into the settlement). Emit `kept` in the ORIGINAL array order: world.objects feeds the keyed {#each},
+	// so re-sorting it (nearest-first) made Svelte REORDER the DOM nodes (reconcile→move→insertBefore) every frame the
+	// player moved — ~40% of the main thread during movement. Insertion order keeps the keyed list append/remove-only.
+	const d2 = objs.map((o) => (o.pos[0] - px) ** 2 + (o.pos[2] - pz) ** 2);
+	creIdx.sort((a, b) => d2[a] - d2[b]);
+	strIdx.sort((a, b) => d2[a] - d2[b]);
+	const keep = new Set([...creIdx.slice(0, creatureBudget), ...strIdx.slice(0, structBudget)]); // nearest of EACH class
 	const kept: WorldObject[] = [];
 	let evicted = 0;
-	for (let i = 0; i < ranked.length; i++) {
-		const o = ranked[i].o;
-		if (i < budget) {
-			kept.push(o); // among the nearest `budget` → stays live
+	for (let i = 0; i < objs.length; i++) {
+		const o = objs[i];
+		if (keep.has(i)) {
+			kept.push(o); // among the nearest `budget` → stays live, in ORIGINAL order (no keyed-each reorder)
 			continue;
 		}
 		const [cx, cz] = regionOf(o.pos[0], o.pos[2]);

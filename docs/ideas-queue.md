@@ -10,6 +10,39 @@ Newest ideas added at the top of "Queued". Move items to "Shipped" with the comm
 
 ## 🟢 Queued (priority order — top = next)
 
+### 2026-06-24 BIG DESIGN SESSION — emergent-world reproduction + tuning (slot priority WITH the user)
+
+**R3. 3-SETTLEMENT DEMO SEED — ✅ SHIPPED 2026-06-24 (NOT yet committed).** demoWorld.json now seeds THREE walled colonies
+~1 km apart with distinct genomes — A=(0,0) bold, B=(1000,100) cautious/herd, C=(450,950) industrious — + rabbits as livestock
++ a few wild kangaroo/lion between. Genome via the seed object's `genome:[5]` field (plumbing already existed). B/C dormant on
+load, materialise + wall on arrival (added a fence wake-trigger). Script: scratchpad reseed3.mjs. 75 JS / 0 typecheck / verified.
+
+**R1. REPRODUCTION LIFECYCLE — meet → bond → build → pregnant** (user: "a couple must meet, bond, build a house, THEN
+get pregnant — makes no sense they'd get pregnant without a house"). Today bonding+conception fire TOGETHER (a pair breeds →
+bonds + conceives) and the build needs the bond → so the house comes AFTER the first baby. Decouple: (a) a BONDING pass —
+two ready, unbonded, opposite-sex, unrelated adults nearby pair up, NO pregnancy; (b) build needs the bond (already true);
+(c) PEOPLE conception gated on a HOME within ~50 m (sim `nearest_refuge`). Animals stay "meet→breed" (no house). ⚠️ emergent-
+balance risk — run full `cargo test` (pop growth / banding / boldness).
+
+**R2. NOMADIC HUTS vs PERMANENT SETTLEMENTS — resolves the 1 km tension** (user: "next settlement can't be within 1 km…
+a roaming couple builds a temporary small house, makes a baby, stays around, then moves on to properly build a settlement").
+With R1 a couple needs a house to breed, but can't build within 1 km of a town (NEW_GAP). Fix: a roaming couple in the
+75 m–1 km dead-zone builds a TEMPORARY HUT (exempt from NEW_GAP, small, fast decay), breeds, rears, then MOVES ON to found a
+PROPER settlement (≥1 km) or join a near one. Huts decay when abandoned → don't violate the 1 km spacing for permanent towns.
+build_ops: lone build ≥1 km → house (new colony); 75 m–1 km → hut (temporary); <75 m → join colony.
+
+**R4. PREDATOR FEEDING + appetite/sleep levers** (user: "a cat killing a rabbit then instantly moving away — show it eating
+a few seconds"). On a kill the hunter should HUNKER + eat for a few seconds before moving (partly there: `feeding=FEED_SECS`,
+`full_after`→sleep — tune so it actually pins movement + reads as eating). Expose levers: appetite (hunger threshold to hunt),
+feeding duration, sleep length.
+
+**R5. EMERGENT-WORLD TUNING PASS (meta)** (user: "should we be tuning our emergent world thing better?"). Stop reacting to
+single observations. Use R3's seed + the Rust scenario harness (cargo test scenario_) to tune the big levers DELIBERATELY —
+breeding rate, dispersal/founding, predation/appetite, migration, genomic divergence — one at a time, measured over thousands
+of ticks. [[sim-scenario-testing]] [[emergence-is-endgame]].
+
+---
+
 ### EF11. PLANNED SETTLEMENTS — a matured house-cluster upgrades into a designed town (BIG, top of mind)
 User: settlements must be built to a PLAN, not random. Past a housing threshold a cluster gains a well, a
 perimeter fence, a watchtower, ROADS connecting things, etc. Build a set of ~40 "make-city" layouts, varied by
@@ -20,6 +53,15 @@ SIZE; when an emergent settlement gets big (full of houses) it SNAPS into a plan
   much more authoring). Either way needs NEW renderable prop kinds: well, watchtower, road segment (Prop/new
   components) + the upgrade trigger in Scene (detect a ≥N-house cluster, replace the ad-hoc houses with the plan,
   tag it `planned` so it doesn't re-fire) + keep player/LLM builds exempt. Visual → needs the user's eye to tune.
+  - **2026-06-24 additions (user):** humans' INSTINCT is to clump into settlements; **max 10 houses per settlement**
+    (COLONY_MAX now 10). A lone house in the middle of nowhere is ALLOWED and survives, but its inhabitants are at
+    HIGHER predator risk (less refuge/guard support) → so they're incentivised to migrate to a budding settlement,
+    OR to wait for other humans to arrive and grow the lone house INTO a settlement. So: planner draws fence + ROADS
+    (paths) + central well + watchtower when a cluster matures; lone houses stay un-planned but riskier.
+  - **Already shipped this session toward this:** "reward building" carrying-capacity (`world_area_scale` → builds/25,
+    clamp 4 — cities now grow to ~150 people, Rust 153 tests green, NOT yet wasm-rebuilt); GRAVEYARDS (deaths near a
+    settlement bury into a town-edge plot, wild deaths leave no grave — Scene `graveyardSpot`). Props that already
+    render: house/cabin/tower(=watchtower)/well/fence/lamp + path/plaza colours. Clump-migration already in the sim.
 
 ### 🌊 2026-06-22 idea-flood (emergent-world session) — captured, awaiting priority
 Done this session: **emergent brain is the world default + on par with Manual** (scenario-tested), **genome spread
@@ -46,9 +88,23 @@ to build one at a time:
   (easier to catch / lower health). [sim already half-there + render]
 - **EF6. Setup/loading overlay.** An overlay "setting up…" window showing setup progress; it WAITS for object
   creation / the world to STABILISE, then fades away. [UI — gate on agent/object count settling]
-- **EF7. Predators avoid settlements.** A predator steers AWAY from settlements (refuge/house centres) UNLESS it's
-  really hungry, OR it's a mother with a young child (then it'll risk the edge). Inverse of the refuge pull, gated
-  on the hunger latch + a has-young check. [sim — reuses the refuges channel]
+- **EF7. Predators avoid settlements + RAID/DEFENCE dynamics (2026-06-24 user).** Predators steer AWAY from a
+  settlement's fenced perimeter and, if they end up inside, try to get back OUT. On top of that avoidance:
+  - **Lion:** LOW probability per approach to RAID — sneak in, kill exactly ONE, then flee back out (a "grab-and-go"
+    directive, not a sustained hunt inside). Even if it breaches, it takes one life and runs.
+  - **Dinosaur:** like the lion but HIGHER probability (it's bigger) — and it BREAKS the fence to enter (remove/“break”
+    the nearest fence panel on breach). When a dino is inside a settlement, the WHOLE ADULT population converges and
+    mobs it until it's dead (settlement-scale GUARD_RALLY). Dino doesn't specifically target the fence — same raid
+    instinct as the lion, just a higher chance and it smashes through.
+  - Build needs: the sim to know each settlement's perimeter (derive from refuge/house centres + the wall radius),
+    an avoidance/repel field at the perimeter, a per-approach raid roll (low lion / higher dino), a one-kill-then-flee
+    state, a "break a fence panel" hook back to Scene, and a mob-the-intruder rally for adults. Composes with the
+    existing refuges channel + GUARD_RALLY. [sim — big; do AFTER the fence visual is confirmed]
+- **EF13. Hunter-provider trips (2026-06-24 user).** A male with the HUNTER phenotype (high food/industry genome)
+  whose mate is SAFE inside a fenced settlement may leave her to go out and hunt + provision. Gated by family state:
+  LOW probability of leaving while she's PREGNANT (he stays close/guards); a bit HIGHER once the CHILD is BORN (family
+  established + walled → he can range out to hunt). Composes with the hunt-and-provision loop (carry the kill back to
+  the larder), pair-bonding (EF4), the fence (mate's safety), and the genome phenotype. [sim]
 - **EF10. Prey must SPREAD far (anti-crowding near settlements).** A settlement formed near home and rabbits/rodents
   pool in that area, crowding it. The world's north-star is to SPREAD OUT as far as possible. Push prey dispersal
   harder — stronger outward drive / lower crowd threshold for prey near dense areas, so herds keep colonising new

@@ -3,31 +3,14 @@
 	import { RigidBody, Collider } from '@threlte/rapier';
 	import * as THREE from 'three';
 	import { kindDef } from '$lib/kinds';
-	import { partGeo, propMat, rockMat, stoneMat, woodMat, flowerMat, foliageMat, LEAF_GREENS } from '$lib/sharedAssets';
+	import { partGeo, propMat } from '$lib/sharedAssets';
 	import type { WorldObject } from '$lib/world';
 
 	let { obj }: { obj: WorldObject } = $props();
 
-	// a flower's bloom takes a vivid colour from a wildflower palette, picked deterministically by its id (so a
-	// scatter is a MIXED patch, stable across reloads); explicit paint overrides. Stem stays its green.
-	const FLOWERS = ['#f0c020', '#ec5a8a', '#f4f1ea', '#b06ad8', '#e85a3a', '#5a8fe0', '#f08a30'];
-	const flowerCol = $derived.by(() => {
-		if (obj.kind !== 'flower') return '';
-		if (obj.color) return obj.color;
-		let h = 2166136261;
-		for (let i = 0; i < obj.id.length; i++) ((h ^= obj.id.charCodeAt(i)), (h = Math.imul(h, 16777619)));
-		return FLOWERS[(h >>> 0) % FLOWERS.length];
-	});
-
-	// a placed bush takes ONE green from the shared leaf palette, hashed by id (so a scatter of bushes is a
-	// mixed thicket, stable across reloads — same idea as the ambient-scatter bushes); explicit paint overrides.
-	const bushCol = $derived.by(() => {
-		if (obj.kind !== 'bush') return '';
-		if (obj.color) return obj.color;
-		let h = 2166136261;
-		for (let i = 0; i < obj.id.length; i++) ((h ^= obj.id.charCodeAt(i)), (h = Math.imul(h, 16777619)));
-		return LEAF_GREENS[(h >>> 0) % LEAF_GREENS.length];
-	});
+	// Generic FALLBACK prop renderer. Every concrete object kind now has a dedicated renderer (Tree/Building/Lamp/
+	// Npc/Critter or one of the InstancedMesh renderers Fences/Graves/Rocks/Flowers/Bushes/Wells/Bridges), so this
+	// only fires for an unrecognised kind — a plain propMat box/sphere with a primitive collider. Kept as a safety net.
 
 	const def = $derived(kindDef(obj.kind));
 	const sx = $derived(obj.scale?.[0] ?? 1);
@@ -77,17 +60,7 @@
 				<T.Mesh
 					position={part.pos}
 					geometry={partGeo(part)}
-					material={obj.kind === 'rock'
-						? rockMat(obj.color ?? part.color)
-						: obj.kind === 'well' && i === 0
-							? stoneMat(obj.color ?? part.color) /* the well shaft → stone masonry */
-							: obj.kind === 'fence' || obj.kind === 'bridge'
-								? woodMat(obj.color ?? part.color) /* timber → weathered wood w/ knots */
-								: obj.kind === 'flower' && i === 1
-									? flowerMat(flowerCol) /* bloom → vivid varied petals + yellow eye */
-									: obj.kind === 'bush'
-										? foliageMat(bushCol) /* shrub → wind-swayed, dappled foliage (not a flat ball) */
-										: propMat(obj.color ?? part.color, part.emissive)}
+					material={propMat(obj.color ?? part.color, part.emissive)}
 					castShadow
 					receiveShadow
 				/>

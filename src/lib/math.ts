@@ -40,6 +40,12 @@ interface MathGlue {
 	forest_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
 	lake_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
 	city_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
+	settlement_ops: (world_json: string) => string;
+	grave_site: (world_json: string, dx: number, dz: number) => string;
+	build_ops: (world_json: string, builds_json: string) => string;
+	well_ops: (world_json: string, wells_json: string) => string;
+	vegetation_ops: (world_json: string, seed: number) => string;
+	immigration_ops: (counts_json: string, px: number, pz: number, global_avg: number, seed: number) => string;
 }
 
 class WorldMath {
@@ -224,6 +230,39 @@ class WorldMath {
 	/** CITY generator — engine Ops that build/grow a concentric district-zoned city. Reads the world DOM (JSON). */
 	cityOps(worldJson: string, px: number, pz: number, yaw: number): Op[] | null {
 		return this.#call((g) => JSON.parse(g.city_ops(worldJson, px, pz, yaw)) as Op[]);
+	}
+
+	/** INCREMENTAL SETTLEMENT WALLS — engine Ops that keep every town ringed by a haphazard, hole-free perimeter
+	 *  (grows with the town, around water, demolishing rocks). Idempotent. Reads the world DOM (JSON). */
+	settlementOps(worldJson: string): Op[] | null {
+		return this.#call((g) => JSON.parse(g.settlement_ops(worldJson)) as Op[]);
+	}
+
+	/** GRAVE SITE — engine-computed dry cemetery plot for a death at (dx,dz), or null for a wild death. */
+	graveSite(worldJson: string, dx: number, dz: number): { x: number; z: number } | null {
+		return this.#call((g) => JSON.parse(g.grave_site(worldJson, dx, dz)) as { x: number; z: number } | null);
+	}
+
+	/** HOUSE PLACEMENT — engine Ops (add house/cabin) for this frame's build requests, obeying colony rules + a water
+	 *  margin. `buildsJson` = JSON `[{x,z},…]` from sim.drainBuilds(). */
+	buildOps(worldJson: string, buildsJson: string): Op[] | null {
+		return this.#call((g) => JSON.parse(g.build_ops(worldJson, buildsJson)) as Op[]);
+	}
+
+	/** WELL PLACEMENT — engine Ops (add well) for this frame's dig requests. `wellsJson` = `[{x,z},…]`. */
+	wellOps(worldJson: string, wellsJson: string): Op[] | null {
+		return this.#call((g) => JSON.parse(g.well_ops(worldJson, wellsJson)) as Op[]);
+	}
+
+	/** COLONY VEGETATION — engine Op (≤1 add tree) so a town greens over time; `seed` varies per call (sim tick). */
+	vegetationOps(worldJson: string, seed: number): Op[] | null {
+		return this.#call((g) => JSON.parse(g.vegetation_ops(worldJson, seed)) as Op[]);
+	}
+
+	/** IMMIGRATION — engine add-creature ops (with rescued `gene`) for deficient species. `countsJson` = the live
+	 *  per-kind `{n,geneSum}` JS gathered from agentManager. */
+	immigrationOps(countsJson: string, px: number, pz: number, globalAvg: number, seed: number): Op[] | null {
+		return this.#call((g) => JSON.parse(g.immigration_ops(countsJson, px, pz, globalAvg, seed)) as Op[]);
 	}
 
 	/** Closed-form VIGOR drift for a dormant region over `dtSec` away (Rust). Falls back to the unchanged gene. */

@@ -12,7 +12,9 @@
 // tanking resolution chasing an unreachable 120.
 
 class PerfScaler {
-	target = $state(120); // desired fps (user-facing; the achievable rate is capped to the detected refresh)
+	target = $state(120); // desired fps (achievable rate is capped to the detected refresh). NOTE: tried defaulting to
+	// the full refresh (240→165 on a 165 Hz panel) to fix a standing 120↔165 bounce, but that DEMANDS a 6 ms frame and
+	// the scaler oversheds/dips below 100 whenever the scene can't hit it — strictly worse. 120 is the safe default.
 	dpr = $state(1.5); // current adaptive pixel-ratio — what <Canvas> renders at
 	auto = $state(true); // DRS on? (off → dpr pinned at #max, full native resolution)
 
@@ -27,16 +29,29 @@ class PerfScaler {
 	#probedUp = false; // last change was an upward probe → if the very next adjustment is a drop, that probe FAILED
 	#PROBE_MAX = 3600; // ~60 s ceiling on the probe interval — at the converged edge, probing (and its flash) goes rare
 
+	#nativeMax = 1.5; // the device's full resolution ceiling — restored when leaving the low tier
+
 	constructor() {
 		const full = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1.5;
+		this.#nativeMax = full;
 		this.#max = full;
 		this.#min = Math.min(full, 0.75);
 		this.dpr = full;
 	}
 
+	/** Quality-tier hook (quality.svelte.ts). The LOW tier HARD-CAPS the resolution ceiling at 1.0 — Retina fill-rate
+	 *  (dpr 2–3 = 4–9× the pixels) is the single biggest GPU cost, so this is what lets a weak phone hold its frame
+	 *  rate instead of hanging. A softer floor too, so it can shed even more under load. Restores native on the high tier. */
+	setLowEnd(low: boolean): void {
+		this.#max = low ? Math.min(this.#nativeMax, 1.0) : this.#nativeMax;
+		this.#min = Math.min(this.#max, low ? 0.6 : 0.75);
+		if (this.dpr > this.#max) this.dpr = this.#max;
+	}
+
 	/** Cycle the fps target (UI affordance) — 120 → 60 → uncapped(240). */
 	cycleTarget(): void {
-		this.target = this.target >= 120 ? 60 : this.target >= 60 ? 240 : 120;
+		// 240 (match refresh) → 120 → 60 → back to 240
+		this.target = this.target >= 240 ? 120 : this.target >= 120 ? 60 : 240;
 	}
 
 	/** Feed the real frame dt (seconds) each render frame; adjusts `dpr` toward the target budget. */
@@ -65,7 +80,9 @@ class PerfScaler {
 		// flicker is a one-time settle, not the every-few-seconds strobe it was when the band was narrow (1.05–1.15).
 		const over = this.#ema / budget;
 		if (over > 1.25 && this.dpr > this.#min) {
-			const step = over > 1.6 ? 0.25 : 0.1; // way over → big single drop (fewer reallocs); mildly over → gentle
+			const step = over > 2.0 ? 0.2 : 0.1; // GENTLE: a small resolution step is barely perceptible; only a genuine
+			// 2×-budget stall takes a bigger 0.2 bite. (Was 0.25 on any 1.6× overshoot — that made a single transient
+			// spike drop the resolution VISIBLY, which reads as "the DRS dropping" even while fps stays fine.)
 			this.dpr = Math.max(this.#min, this.dpr - step);
 			this.#cooldown = 60; // hold ~1 s after a drop before re-evaluating — don't thrash while the load settles
 			// if this drop is undoing a probe we JUST made, that probe broke the budget → wait (much) longer before the

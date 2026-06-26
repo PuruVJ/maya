@@ -8,7 +8,7 @@ import { math } from './math';
 import { derror } from './debug';
 
 export type Op =
-	| { op: 'add'; kind: string; count?: number; pos?: [number, number, number]; at?: string; dist?: number; scale?: [number, number, number]; color?: string; rot?: number }
+	| { op: 'add'; kind: string; count?: number; pos?: [number, number, number]; at?: string; dist?: number; scale?: [number, number, number]; color?: string; rot?: number; gene?: number }
 	| { op: 'scatter'; kind: string; count: number; area: string; color?: string }
 	| { op: 'remove'; id: string }
 	| { op: 'move'; id: string; pos?: [number, number, number]; at?: string; dist?: number }

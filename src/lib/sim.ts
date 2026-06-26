@@ -54,7 +54,7 @@ type OutMsg =
 	| { type: 'refuges'; xz: Float64Array }
 	| { type: 'water'; xzr: Float64Array }
 	| { type: 'aridity'; a: number }
-	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
+	| { type: 'tick'; seq: number; ticks: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 type WorkerMsg = { type: 'ready' } | { type: 'failed'; error: string } | Snap;
 
 // ── public payload types (Scene drains these each frame) ────────────────────────────────────────────
@@ -255,9 +255,11 @@ class WorldSim {
 	 * savePrev → set pose → the renderers interpolate; (2) diff the roster into spawn/despawn commands; (3) post the
 	 * next step to the worker. The snapshot for THIS step arrives before the next frame, so we run ~1 tick behind.
 	 */
-	step(dt: number): void {
+	step(ticks: number, dt: number): void {
 		const worker = this.#worker;
 		if (!worker || this.#status !== 'ready') return;
+		const batchDt = Math.max(1, ticks) * dt; // sim-seconds elapsed since the last applied snapshot (whole batch) →
+		// speed/turnRate derive over this, not a single tick, so the gait stays right when the sim runs faster than fps
 		const s = this.#snap;
 		const hasSnap = s !== null && s.seq !== this.#appliedSeq;
 		if (hasSnap) {
@@ -334,11 +336,11 @@ class WorldSim {
 				a.appeared = true;
 			}
 			// derive speed + turnRate from the per-tick delta so the gait (leg swing) + banking animate
-			a.speed = Math.hypot(nx - a.prevX, nz - a.prevZ) / dt;
+			a.speed = Math.hypot(nx - a.prevX, nz - a.prevZ) / batchDt;
 			let dh = nh - a.prevHeading;
 			while (dh > Math.PI) dh -= TAU;
 			while (dh < -Math.PI) dh += TAU;
-			a.turnRate = dh / dt;
+			a.turnRate = dh / batchDt;
 			a.x = nx;
 			a.z = nz;
 			a.heading = nh;
@@ -348,7 +350,7 @@ class WorldSim {
 			m.health = s!.healths[i];
 			const f = s!.flags[i];
 			m.dead = (f & 1) !== 0;
-			m.corpseAge = m.dead ? m.corpseAge + dt : 0; // age corpses → Scene's reaper sinks + removes the old ones
+			m.corpseAge = m.dead ? m.corpseAge + batchDt : 0; // age corpses → Scene's reaper sinks + removes the old ones
 			m.asleep = (f & 2) !== 0;
 			m.hunting = (f & 8) !== 0; // bit3 → this apex is charging the player → the view glares its eyes
 			m.migrating = (f & 16) !== 0; // bit4 → roamer en route to another settlement (HUD)
@@ -365,7 +367,7 @@ class WorldSim {
 
 		// post the step to the worker (transfer the fish buffer — the worker takes ownership)
 		const fish = this.#collectFish();
-		worker.postMessage({ type: 'tick', seq: ++this.#postSeq, dt, px, pz, night: agentManager.nightValue, popScale: this.#popScale, fish, spawns, despawns } satisfies OutMsg, [fish.buffer]);
+		worker.postMessage({ type: 'tick', seq: ++this.#postSeq, ticks, dt, px, pz, night: agentManager.nightValue, popScale: this.#popScale, fish, spawns, despawns } satisfies OutMsg, [fish.buffer]);
 
 		// IS THE HUNTER BEHIND YOU? (recompute the target only on a fresh snapshot; ease every tick for smoothness).
 		if (hasSnap) {

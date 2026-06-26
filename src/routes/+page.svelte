@@ -15,6 +15,7 @@
 	import EventLog from '$lib/components/EventLog.svelte';
 	import SplashScreen from '$lib/components/SplashScreen.svelte';
 	import { fade } from 'svelte/transition';
+	import { quality } from '$lib/quality.svelte';
 	import { nature } from '$lib/nature.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld, fastForward, WORLD_NAME, LEGACY_WORLD_NAMES, type World as WorldData } from '$lib/world';
@@ -82,6 +83,7 @@
 	};
 
 	onMount(async () => {
+		quality.start(); // detect the render tier (weak device → low) + apply the resolution cap BEFORE first paint
 		// restore the saved time-lapse speed (localStorage) → the chosen pace survives reloads
 		const savedSpeed = Number(localStorage.getItem(SPEED_KEY));
 		if (SPEEDS.includes(savedSpeed as (typeof SPEEDS)[number])) setSpeed(savedSpeed);
@@ -125,6 +127,14 @@
 					nature.announce(`🌍 Welcome back — ${txt} passed while you were away${change}`);
 				}
 			}
+		}
+		// GROUND every placed (non-creature) object onto the terrain. The demo seed + legacy saves store y=0, which
+		// BURIES houses/fences wherever the ambient relief rises (it's flat <70 m from spawn, then rolls into hills past
+		// ~240 m — so a settlement seeded 350 m out sank into a hillside, "no fence, houses buried"). heightAt is pure JS
+		// (no wasm) and the Prop renderer draws at pos[1], so re-deriving the ground height here fixes it for every load.
+		const CREATURE_KINDS = new Set(['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur']);
+		for (const o of world.objects) {
+			if (!CREATURE_KINDS.has(o.kind)) o.pos[1] = heightAt(o.pos[0], o.pos[2], world.terrain);
 		}
 		liveUrl = true; // from here on, edits persist to the world store (see effect below)
 
@@ -464,6 +474,15 @@
 			</button>
 		{/each}
 	</div>
+	<!-- QUALITY tier — Lite drops the decorative layers + caps resolution (smoother on weak devices/mobile). Auto-set
+	     on weak hardware; this lets you force either way. -->
+	<button
+		class="pointer-events-auto inline-flex w-fit items-center gap-1.5 rounded-full border border-white/10 bg-zinc-900/55 px-2.5 py-1 text-xs font-semibold backdrop-blur-xl transition {quality.low ? 'text-amber-300' : 'text-white/55 hover:text-white'}"
+		onclick={() => quality.toggle()}
+		title={quality.low ? 'Lite mode — fewer effects + capped resolution (smoother on weak devices). Tap for full quality.' : 'Full quality. Tap for Lite mode — smoother on weak devices / mobile.'}
+	>
+		{quality.low ? '📱 Lite' : '✨ HD'}
+	</button>
 </div>
 
 <!-- Share: the world becomes a link (kept live in the address bar); Reset returns to the demo -->

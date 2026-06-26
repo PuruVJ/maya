@@ -54,4 +54,27 @@ describe('fastForward — welcome-back population catch-up', () => {
 		const w = colony();
 		expect(fastForward(w, 10_000, 'ff-', () => 0)).toEqual({ creatures: 0, houses: 0 });
 	});
+
+	it('REFITS the wall after away-growth — no home left standing on a fence panel, wall encloses the grown town', () => {
+		// the user came back to a town the catch-up had grown: a house ON a fence, and the wall not closed round the new
+		// edge. away-growth must re-fit the perimeter, not leave a stale ring. Seed a colony WITH a small fence already.
+		const w = colony();
+		for (let i = 0; i < 4; i++) w.objects.push({ id: 'p' + (8 + i), kind: 'person', pos: [i, 0, 6], gene: 1 } as WorldObject); // enough people to build
+		const res = fastForward(w, 12 * 3600 * 1000, 'tf-', (x, z) => 0); // 12 h away → city growth raises homes
+		expect(res.houses).toBeGreaterThan(0); // the catch-up actually built
+		const fences = w.objects.filter((o) => o.kind === 'fence');
+		const homes = w.objects.filter((o) => ['house', 'cabin', 'manor'].includes(o.kind));
+		expect(fences.length).toBeGreaterThan(8); // the wall was (re)fitted around the grown town
+		// no HOME sits on top of a fence panel (the user's "house on a fence")
+		for (const h of homes) {
+			const onFence = fences.some((f) => Math.hypot(f.pos[0] - h.pos[0], f.pos[2] - h.pos[2]) < 2.0);
+			expect(onFence, `home ${h.id} at ${h.pos} sits on a fence panel`).toBe(false);
+		}
+		// the wall RINGS the homes: every home is inside the fence's max radius from the home centroid
+		const cx = homes.reduce((s, h) => s + h.pos[0], 0) / homes.length;
+		const cz = homes.reduce((s, h) => s + h.pos[2], 0) / homes.length;
+		const fenceR = Math.max(...fences.map((f) => Math.hypot(f.pos[0] - cx, f.pos[2] - cz)));
+		const homeR = Math.max(...homes.map((h) => Math.hypot(h.pos[0] - cx, h.pos[2] - cz)));
+		expect(fenceR).toBeGreaterThan(homeR); // the perimeter sits OUTSIDE the furthest home (encloses it)
+	});
 });

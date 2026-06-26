@@ -93,16 +93,41 @@ describe('sleep / wake', () => {
 		const w = emptyWorld('t');
 		w.objects.push({ id: 'r0', kind: 'rabbit', pos: [1, 0, 1], gene: 1 } as WorldObject); // near
 		w.objects.push({ id: 'h0', kind: 'house', pos: [9999, 0, 0] } as WorldObject); // far
-		expect(enforceLiveBudget(w, 0, 0, 5, 1)).toBe(1); // budget 1 → keep nearest (rabbit), evict the house
+		expect(enforceLiveBudget(w, 0, 0, 5, 1, 0)).toBe(1); // creatureBudget 1 keeps the rabbit; structBudget 0 evicts the house
 		expect(w.objects.map((o) => o.id)).toEqual(['r0']);
 		const key = regionKey(...regionOf(9999, 0));
 		expect(w.regions?.[key]?.statics[0]?.id).toBe('h0'); // house preserved verbatim for round-trip
+	});
+
+	it('enforceLiveBudget budgets CREATURES and STRUCTURES independently — structures never evict wildlife', () => {
+		// THE FIX: a structure-dense town must not push distant wildlife out of the live set (that collapsed every
+		// creature into the settlement). 300 structures around the player + 50 far creatures, creatureBudget 240,
+		// structBudget 100 → the structures cap themselves (200 evicted) but EVERY creature stays live (50 ≤ 240).
+		const w = emptyWorld('t');
+		for (let i = 0; i < 300; i++) w.objects.push({ id: 'g' + i, kind: 'grave', pos: [i % 10, 0, (i / 10) | 0] } as WorldObject); // dense, near
+		for (let i = 0; i < 50; i++) w.objects.push({ id: 'r' + i, kind: 'rabbit', pos: [500 + i * 5, 0, 0], gene: 1 } as WorldObject); // far
+		const evicted = enforceLiveBudget(w, 0, 0, 10, 240, 100);
+		expect(evicted).toBe(200); // only the farthest 200 STRUCTURES offloaded
+		expect(w.objects.filter((o) => o.kind === 'rabbit').length).toBe(50); // all 50 far creatures STILL LIVE — not starved
+		expect(w.objects.filter((o) => o.kind === 'grave').length).toBe(100);
 	});
 
 	it('enforceLiveBudget is a no-op under budget', () => {
 		const w = withCreatures('rabbit', 10, 0, 0);
 		expect(enforceLiveBudget(w, 0, 0, 0, 400)).toBe(0);
 		expect(w.objects.length).toBe(10);
+	});
+
+	it('enforceLiveBudget keeps survivors in ORIGINAL array order (no keyed-each reorder → no DOM-move thrash)', () => {
+		// REGRESSION GUARD: an earlier version emitted survivors in DISTANCE order. Scene renders objects with a keyed
+		// {#each}, so reordering forced insertBefore() DOM moves every frame the budget bit — `before` hit 41.7% of CPU
+		// and the worst frame was 2.2 s. Survivors MUST keep their original relative order regardless of distance.
+		const w = emptyWorld('t');
+		// interleave near (DECREASING distance) with far objects, so a distance sort would REVERSE the survivors' order
+		const layout = [5, 999, 4, 998, 3, 997, 2, 996, 1]; // r0..r8 ; even idx = near, odd idx = far
+		layout.forEach((x, i) => w.objects.push({ id: 'r' + i, kind: 'rabbit', pos: [x, 0, 0], gene: 1 } as WorldObject));
+		enforceLiveBudget(w, 0, 0, 10, 5); // keep nearest 5 (x = 1..5 → ids r8,r6,r4,r2,r0 by distance)
+		expect(w.objects.map((o) => o.id)).toEqual(['r0', 'r2', 'r4', 'r6', 'r8']); // ORIGINAL order — NOT distance order
 	});
 
 	it('a dense over-budget region survives offload → sleep → wake with its FULL population (no loss, no dupes)', () => {
@@ -136,5 +161,23 @@ describe('sleep / wake', () => {
 		const r = streamRegions(w, 8 * REGION_SIZE + 10, 10, 0);
 		expect(r.woken).toBe(1);
 		expect(creatures(w, 'rabbit').length).toBe(24);
+	});
+
+	it('a settlement FENCE survives the sleep→wake round-trip verbatim (it is a durable static, not regenerated)', () => {
+		// The fence is fitted only on a structure add/remove, then STORED — never rebuilt when the player approaches.
+		// That only holds if the fence panels travel with their region into dormancy and come back unchanged. Guards
+		// against the fence vanishing (or needing a presence-driven rebuild) after you walk away from a town and return.
+		const w = emptyWorld('t');
+		w.objects.push({ id: 'h0', kind: 'house', pos: [8 * REGION_SIZE + 20, 0, 10] } as WorldObject); // a home in region 8,0
+		const fence = { id: 'fc-1', kind: 'fence', pos: [8 * REGION_SIZE + 28, 0, 10], rot: 90, scale: [4, 1, 1] } as WorldObject;
+		w.objects.push(fence);
+		streamRegions(w, 10, 10, 0); // player at origin → region 8,0 sleeps; home + fence → aggregate statics
+		expect(w.objects.find((o) => o.kind === 'fence')).toBeUndefined(); // not live anymore
+		expect(w.regions?.['8,0']?.statics.some((s) => s.id === 'fc-1')).toBe(true); // preserved verbatim
+		streamRegions(w, 8 * REGION_SIZE + 10, 10, 0); // walk back → region wakes
+		const back = w.objects.find((o) => o.id === 'fc-1');
+		expect(back).toBeTruthy(); // the SAME fence panel is back…
+		expect(back!.pos).toEqual([8 * REGION_SIZE + 28, 0, 10]); // …at the exact same spot (no regeneration, no drift)
+		expect(back!.rot).toBe(90);
 	});
 });

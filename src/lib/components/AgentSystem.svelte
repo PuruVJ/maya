@@ -31,6 +31,8 @@
 		if (sim.status() !== 'ready') return; // wasm still loading (or failed) → don't advance the sim
 		if (!visibility.visible) return; // tabbed away → freeze the sim (no advance → no catch-up burst on return)
 		const n = clock.advance(dt);
-		for (let i = 0; i < n; i++) sim.step(DT);
+		if (n > 0) sim.step(n, DT); // BATCHED: advance all n ticks in ONE worker round-trip + ONE roster-diff/apply.
+		// Was a per-tick loop — at 2× (60 Hz sim) that ran the O(agents) diff/apply + a 28 KB snapshot transfer twice
+		// per frame, which is what dropped the frame rate in time-lapse. Cost is now flat regardless of sim speed.
 	});
 </script>

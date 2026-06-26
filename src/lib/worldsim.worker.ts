@@ -73,7 +73,7 @@ type InMsg =
 	| { type: 'refuges'; xz: Float64Array }
 	| { type: 'water'; xzr: Float64Array }
 	| { type: 'aridity'; a: number }
-	| { type: 'tick'; seq: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
+	| { type: 'tick'; seq: number; ticks: number; dt: number; px: number; pz: number; night: number; popScale: number; fish: Float64Array; spawns: Spawn[]; despawns: number[] };
 
 let wasm: WasmExports | null = null;
 let sim: RustSim | null = null;
@@ -167,7 +167,35 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 	sim.set_night(d.night);
 	sim.set_pop_scale(d.popScale);
 	sim.set_fish(d.fish);
-	sim.step(d.dt);
+
+	// Advance the WHOLE batch in ONE message (BATCHED TICKS). The main thread emits `ticks` fixed steps per render
+	// frame (1 at 1× / ≥60 fps, more when the sim runs faster than the frame rate, e.g. 2× time-lapse). Running them
+	// here — instead of one round-trip per tick — keeps the main thread's per-frame cost (roster diff + snapshot apply
+	// + the ~28 KB transfer) FLAT regardless of sim speed; the 2× frame-drop came from doing all that twice per frame.
+	// world.step() CLEARS births/builds/wells/events each tick, so we DRAIN them after every internal step and
+	// accumulate; the heavy agent snapshot (xs/zs/…) is read only ONCE, after the last step.
+	const ticks = d.ticks > 0 ? d.ticks : 1;
+	const births: number[] = []; // [kc,x,z,gene,momFam,dadFam,g0..g4]×n — accumulated across the batch
+	const builds: number[] = []; // [x,z]×n
+	const wells: number[] = []; // [x,z]×n
+	const events: number[] = []; // [code,kind,x,z]×n
+	const drain = (acc: number[], ptr: number, len: number) => {
+		// index loop, NOT push(...spread): a mass-spawn tick can exceed the spread arg-count limit. Read a FRESH view
+		// each tick — wasm memory may have grown (detached the old buffer) while stepping.
+		const v = new Float32Array(wasm!.memory.buffer, ptr, len);
+		for (let j = 0; j < len; j++) acc.push(v[j]);
+	};
+	for (let k = 0; k < ticks; k++) {
+		sim.step(d.dt);
+		const nb = sim.birth_count();
+		if (nb > 0) drain(births, sim.births_ptr(), nb * 11);
+		const nbd = sim.build_count();
+		if (nbd > 0) drain(builds, sim.builds_ptr(), nbd * 2);
+		const nw = sim.well_count();
+		if (nw > 0) drain(wells, sim.wells_ptr(), nw * 2);
+		const ne = sim.event_count();
+		if (ne > 0) drain(events, sim.events_ptr(), ne * 4);
+	}
 
 	// copy the read-back into owned buffers (slice → detached from wasm memory) so we can TRANSFER them
 	refreshViews();
@@ -179,18 +207,14 @@ ctx.onmessage = async (e: MessageEvent<InMsg>) => {
 	const sf = flags.slice();
 	const sb = behaviors.slice();
 	const sp = progress.slice();
-	const nb = sim.birth_count();
-	const births = nb > 0 ? new Float32Array(wasm.memory.buffer, sim.births_ptr(), nb * 11).slice() : new Float32Array(0); // [kc,x,z,gene,momFam,dadFam,g0..g4]×nb
-	const nbd = sim.build_count();
-	const builds = nbd > 0 ? new Float32Array(wasm.memory.buffer, sim.builds_ptr(), nbd * 2).slice() : new Float32Array(0); // [x,z]×nbd
-	const nw = sim.well_count();
-	const wells = nw > 0 ? new Float32Array(wasm.memory.buffer, sim.wells_ptr(), nw * 2).slice() : new Float32Array(0); // [x,z]×nw
-	const ne = sim.event_count();
-	const events = ne > 0 ? new Float32Array(wasm.memory.buffer, sim.events_ptr(), ne * 4).slice() : new Float32Array(0); // [code,kind,x,z]×ne
+	const birthsBuf = Float32Array.from(births);
+	const buildsBuf = Float32Array.from(builds);
+	const wellsBuf = Float32Array.from(wells);
+	const eventsBuf = Float32Array.from(events);
 
 	const ageMeans = sim.age_means(); // 6 floats — mean age fraction per kind (HUD age readout); tiny, not transferred
 	ctx.postMessage(
-		{ type: 'snap', seq: d.seq, count: viewCount, xs: sx, zs: sz, headings: sh, ages: sag, healths: shp, flags: sf, behaviors: sb, progress: sp, births, builds, wells, events, danger: sim.danger(), ageMeans },
-		[sx.buffer, sz.buffer, sh.buffer, sag.buffer, shp.buffer, sf.buffer, sb.buffer, sp.buffer, births.buffer, builds.buffer, wells.buffer, events.buffer]
+		{ type: 'snap', seq: d.seq, count: viewCount, xs: sx, zs: sz, headings: sh, ages: sag, healths: shp, flags: sf, behaviors: sb, progress: sp, births: birthsBuf, builds: buildsBuf, wells: wellsBuf, events: eventsBuf, danger: sim.danger(), ageMeans },
+		[sx.buffer, sz.buffer, sh.buffer, sag.buffer, shp.buffer, sf.buffer, sb.buffer, sp.buffer, birthsBuf.buffer, buildsBuf.buffer, wellsBuf.buffer, eventsBuf.buffer]
 	);
 };

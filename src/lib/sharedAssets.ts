@@ -5,7 +5,7 @@
 // different cached material). See docs/crowd-separation.md §3.3.
 import * as THREE from 'three';
 import type { Part } from './kinds';
-import { wind, swayVertex, WIND_NOISE } from './wind';
+import { WIND_NOISE } from './wind';
 import { applyWeather } from './weather';
 
 const geoCache = new Map<string, THREE.BufferGeometry>();
@@ -337,10 +337,11 @@ export function foliageMat(color: string): THREE.MeshStandardMaterial {
 	if (m) return m;
 	m = new THREE.MeshStandardMaterial({ color, flatShading: true });
 	m.onBeforeCompile = (shader) => {
-		shader.uniforms.uTime = wind.uTime;
+		// NO wind sway — just expose the local position for the static leaf dapple below (the sway was never
+		// visibly working and reads per-object off the modelMatrix, so it can't survive instancing anyway).
 		shader.vertexShader = shader.vertexShader
-			.replace('#include <common>', '#include <common>\nuniform float uTime;\nvarying vec3 vLocalPos;')
-			.replace('#include <begin_vertex>', '#include <begin_vertex>\n' + swayVertex(0.07));
+			.replace('#include <common>', '#include <common>\nvarying vec3 vLocalPos;')
+			.replace('#include <begin_vertex>', '#include <begin_vertex>\nvLocalPos = position;');
 		shader.fragmentShader = shader.fragmentShader
 			.replace('#include <common>', '#include <common>\nvarying vec3 vLocalPos;\n' + WIND_NOISE)
 			.replace(

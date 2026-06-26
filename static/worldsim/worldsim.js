@@ -396,6 +396,31 @@ export function band_spread(count, ax, az, r) {
 }
 
 /**
+ * HOUSE PLACEMENT — Rust owns it. Reads the world DOM + this frame's build requests (`builds_json` = `[{x,z},…]`),
+ * returns add-house ops obeying the colony rules + a water margin (no homes dipping into the lake). Replaces the
+ * Scene.svelte `drainBuilds` handler.
+ * @param {string} world_json
+ * @param {string} builds_json
+ * @returns {string}
+ */
+export function build_ops(world_json, builds_json) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(builds_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.build_ops(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * AMBIENT BUSHES near (px,pz). Flat [x, z, scale, rot, colorHash] × n.
  * @param {number} px
  * @param {number} pz
@@ -546,6 +571,54 @@ export function gestation_secs() {
 }
 
 /**
+ * GRAVE SITE — Rust owns it (the engine knows water → no graves in lakes). Returns `{x,z}` for a dry cemetery plot
+ * outside the deceased's settlement, or `null` for a wild death. Replaces Scene.svelte `graveyardSpot`.
+ * @param {string} world_json
+ * @param {number} dx
+ * @param {number} dz
+ * @returns {string}
+ */
+export function grave_site(world_json, dx, dz) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.grave_site(ptr0, len0, dx, dz);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * IMMIGRATION DECISION — Rust owns the species-rescue logic. `counts_json` = `{kind:{n,geneSum},…}` (live counts JS
+ * gathered from agentManager), → add-creature ops (kind/pos/gene) for deficient kinds. Replaces Scene's rescue loop.
+ * @param {string} counts_json
+ * @param {number} px
+ * @param {number} pz
+ * @param {number} global_avg
+ * @param {number} seed
+ * @returns {string}
+ */
+export function immigration_ops(counts_json, px, pz, global_avg, seed) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(counts_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.immigration_ops(ptr0, len0, px, pz, global_avg, seed);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * Kind FOOTPRINT [radius, height] — engine.rs `kind_rh` is the collision source of truth. The JS `KINDS` table
  * keeps its own r/h copy (it also carries render geometry), so a parity test (src/lib/kinds.test.ts) pins the JS
  * numbers to these — a drift would mean placement/collision disagreeing with what's drawn. Unknown → fallback.
@@ -677,6 +750,29 @@ export function rng_seed_from(s) {
 }
 
 /**
+ * INCREMENTAL SETTLEMENT WALLS — Rust owns the placement. Reads the world DOM, clusters homes into settlements,
+ * returns an ops JSON array that keeps each ringed by a haphazard, hole-free perimeter (grows with the town,
+ * around water, demolishing rocks). Idempotent via a position-diff vs the existing auto-fence. Replaces the old
+ * JS `replanSettlement` in Scene.svelte (compute now lives in Rust, per "Rust owns all compute").
+ * @param {string} world_json
+ * @returns {string}
+ */
+export function settlement_ops(world_json) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.settlement_ops(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * PROCEDURAL SETTLEMENT PLAN — Rust owns the world-gen. Returns a JSON string `{objects, paths, radius}` for a
  * planned town at (cx,cz) of `size` ("hamlet"|"village"|"town"|"city"), deterministic in `seed`. Ported from
  * the old settlementPlanner.ts (parity-pinned by src/lib/worldgen.test.ts).
@@ -744,6 +840,28 @@ export function trees_near(px, pz, reach) {
 }
 
 /**
+ * COLONY VEGETATION — Rust owns it. `seed` varies per call (the sim tick) → at most one add-tree op so a town
+ * greens over time. Replaces Scene's colony-vegetation block.
+ * @param {string} world_json
+ * @param {number} seed
+ * @returns {string}
+ */
+export function vegetation_ops(world_json, seed) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.vegetation_ops(ptr0, len0, seed);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * Pond SHORELINE radius factor at `ang` for a `seed` — the organic-blob edge. The render keeps a native copy
  * (player wade check runs per frame, pre-wasm-load), so this exists to PARITY-TEST that copy against Rust.
  * @param {number} seed
@@ -765,6 +883,30 @@ export function water_seed(id) {
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.water_seed(ptr0, len0);
     return ret;
+}
+
+/**
+ * WELL PLACEMENT — Rust owns it. `wells_json` = `[{x,z},…]` dig requests → add-well ops (grid-snapped, never in a
+ * lake, deduped). Replaces the Scene `drainWells` handler.
+ * @param {string} world_json
+ * @param {string} wells_json
+ * @returns {string}
+ */
+export function well_ops(world_json, wells_json) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(wells_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.well_ops(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
 }
 
 /**
