@@ -48,8 +48,8 @@
 	// bottom (EVE's shape), not a symmetric "humpty-dumpty" ellipsoid. Profile = [radius, height], bottom → top.
 	const eveProfile = (
 		[
-			[0.0, 0.0], [0.09, 0.05], [0.16, 0.15], [0.24, 0.32], [0.33, 0.55], [0.42, 0.82], [0.48, 1.05],
-			[0.5, 1.2], [0.47, 1.32], [0.39, 1.42], [0.27, 1.5], [0.13, 1.55], [0.0, 1.57]
+			[0.0, 0.0], [0.14, 0.06], [0.22, 0.18], [0.3, 0.38], [0.38, 0.65], [0.44, 0.97], [0.49, 1.24],
+			[0.51, 1.42], [0.49, 1.56], [0.41, 1.68], [0.28, 1.77], [0.14, 1.83], [0.0, 1.85]
 		] as [number, number][]
 	).map(([r, y]) => new THREE.Vector2(r, y));
 	const eveBody = new THREE.LatheGeometry(eveProfile, 28); // smooth (28 radial segments); widest ~0.5 high up, tapers down
@@ -499,18 +499,18 @@
 		<!-- EVE floats; this inner group leans forward into movement (local X), under the yaw'd visual. Offset down so
 		     the capsule-centre origin maps to the feet — EVE's body then sits ~0.4 m up, leaving a hover gap (no legs). -->
 		<T.Group bind:ref={tilt} position={[0, -CAPSULE_HALF, 0]}>
-			<!-- the white teardrop body (lathe): base raised so she floats, wide top tapering to a small bottom -->
-			<T.Mesh geometry={eveBody} material={eveWhite} position={[0, 0.32, 0]} castShadow />
+			<!-- the white teardrop body (lathe): base raised so she floats, wide top tapering to a rounded bottom -->
+			<T.Mesh geometry={eveBody} material={eveWhite} position={[0, 0.3, 0]} castShadow />
 			<!-- glossy black face screen on the FRONT (−Z = forward), on the WIDE upper body -->
-			<T.Mesh geometry={eveVisor} material={eveDark} position={[0, 1.58, -0.36]} scale={[0.82, 0.56, 0.42]} />
+			<T.Mesh geometry={eveVisor} material={eveDark} position={[0, 1.82, -0.36]} scale={[0.82, 0.56, 0.42]} />
 			<!-- two glowing blue eyes, angled inward (EVE's neutral look) -->
-			<T.Mesh geometry={eveEye} material={eveEyeMat} position={[0.12, 1.6, -0.5]} rotation={[0, 0, -0.5]} />
-			<T.Mesh geometry={eveEye} material={eveEyeMat} position={[-0.12, 1.6, -0.5]} rotation={[0, 0, 0.5]} />
+			<T.Mesh geometry={eveEye} material={eveEyeMat} position={[0.12, 1.84, -0.54]} rotation={[0, 0, -0.5]} />
+			<T.Mesh geometry={eveEye} material={eveEyeMat} position={[-0.12, 1.84, -0.54]} rotation={[0, 0, 0.5]} />
 			<!-- two floating arms at the sides of the wide upper body, a visible gap (animated in the task) -->
-			<T.Group bind:ref={armL} position={[0.56, 1.4, 0]}>
+			<T.Group bind:ref={armL} position={[0.58, 1.55, 0]}>
 				<T.Mesh geometry={eveArm} material={eveWhite} position={[0, -0.12, 0]} rotation={[0, 0, 0.16]} castShadow />
 			</T.Group>
-			<T.Group bind:ref={armR} position={[-0.56, 1.4, 0]}>
+			<T.Group bind:ref={armR} position={[-0.58, 1.55, 0]}>
 				<T.Mesh geometry={eveArm} material={eveWhite} position={[0, -0.12, 0]} rotation={[0, 0, -0.16]} castShadow />
 			</T.Group>
 		</T.Group>

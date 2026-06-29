@@ -14,6 +14,7 @@
 	import FpsPanel from '$lib/components/FpsPanel.svelte';
 	import EcoStats from '$lib/components/EcoStats.svelte';
 	import EventLog from '$lib/components/EventLog.svelte';
+	import IntroDialog from '$lib/components/IntroDialog.svelte';
 	import SplashScreen from '$lib/components/SplashScreen.svelte';
 	import { fade } from 'svelte/transition';
 	import { quality } from '$lib/quality.svelte';
@@ -435,6 +436,7 @@
 {/if}
 <EcoStats {world} />
 <EventLog />
+<IntroDialog name={world.name} />
 
 <!-- MOTHER NATURE wildcard announcement — a dramatic banner when she sends in a pack/herd/boom -->
 {#if nature.banner}
@@ -528,7 +530,7 @@
 <div
 	class="pointer-events-none fixed bottom-4 left-4 text-[13px] text-white/90 [text-shadow:0_1px_4px_rgba(0,0,0,0.6)] [@media(pointer:coarse)]:hidden"
 >
-	WASD move · Shift sprint · Space jump · drag to look
+	WASD move · Space ↑ / C ↓ fly · Shift sprint · drag to look
 </div>
 
 <BuildBar {world} />
