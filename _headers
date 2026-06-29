@@ -2,14 +2,15 @@
 # APPENDS its own block that caches the content-hashed /_app/immutable/* bundle (~9 MB of JS/CSS) for a YEAR — so the
 # bulk of the app is ALREADY cached forever; do NOT re-declare /_app/immutable here.
 #
-# The WASM is CONTENT-HASHED at build (scripts/postbuild-hash-wasm.mjs renames it worldsim_bg.<hash>.wasm), so its
-# filename changes whenever the engine changes → safe to pin FOREVER. Cloudflare's `*` is a TRAILING splat, so we pin
-# the whole /worldsim/ dir immutable, then OVERRIDE the one fixed-name file below (CF applies the most-specific rule).
+# The glue loads the wasm with a CONTENT-VERSION query — worldsim_bg.wasm?v=<hash> (scripts/version-wasm.mjs, run at
+# build:wasm LOCALLY since CF has no cargo). The wasm FILENAME is fixed (served fine by CF), but the ?v= changes when
+# the engine changes, so each version is a distinct cache entry → safe to pin FOREVER. Cloudflare's `*` is a TRAILING
+# splat, so we pin the whole /worldsim/ dir immutable, then OVERRIDE the glue below (CF applies the most-specific rule).
 /worldsim/*
   Cache-Control: public, max-age=31536000, immutable
 
-# The wasm-pack glue keeps its FIXED name (the worker imports it by a fixed path) and NAMES the hashed wasm, so it must
-# revalidate each deploy to hand out the new hash. Tiny (~52 KB) → a cheap 304 on most loads. (Exact path = more
+# The wasm-pack glue keeps its FIXED name (the worker imports it by a fixed path) and CARRIES the ?v= version, so it
+# must revalidate each deploy to hand out the new one. Tiny (~52 KB) → a cheap 304 on most loads. (Exact path = more
 # specific than the /worldsim/* splat above, so THIS wins for worldsim.js.)
 /worldsim/worldsim.js
   Cache-Control: public, max-age=0, must-revalidate

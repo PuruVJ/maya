@@ -5,7 +5,7 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
-		"build": "vite build && node scripts/postbuild-hash-wasm.mjs",
+		"build": "vite build",
 		"preview": "vite preview",
 		"deploy": "npm run build:wasm && npm run build && wrangler deploy",
 		"cf-types": "wrangler types",
@@ -13,7 +13,7 @@
 		"test:watch": "vitest",
 		"test:llm": "node scripts/fetch-test-model.mjs && vitest run --config vitest.llm.config.ts",
 		"test:rust": "cargo test",
-		"build:wasm": "wasm-pack build crates/worldsim --target web --out-dir ../../static/worldsim",
+		"build:wasm": "wasm-pack build crates/worldsim --target web --out-dir ../../static/worldsim && node scripts/version-wasm.mjs",
 		"gen:dataset": "tsx training/gen-dataset.ts",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
