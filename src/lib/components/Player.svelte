@@ -315,6 +315,12 @@
 			grounded = true;
 		}
 
+		// EVE FLIES OVER the world: once she's lifted clearly off the ground, skip every GROUND-object collision
+		// (trees / houses / animals) AND the camera occlusion below. Those push-outs are XZ-only (ignore altitude), so
+		// without this they shoved her around trees + houses FAR beneath her, and the camera kept grabbing buildings
+		// underneath (the wobble). Within 2 m of the ground the normal collisions apply, so walking + landing still work.
+		const flying = py - groundY > 2;
+
 		// predator-strike knockback + stun decay (the hit is detected in the animal loop below)
 		if (stunT > 0) {
 			stunT -= delta;
@@ -331,7 +337,7 @@
 		// `share` ramps 0→1 as more animals press at once, and is always 1 for an apex predator.
 		const PR = 0.5; // player body radius
 		const overlaps: { m: ManagedAgent; nx: number; nz: number; pen: number }[] = [];
-		agentManager.forEach((m) => {
+		if (!flying) agentManager.forEach((m) => {
 			if (m.dead) return;
 			const dx = px - m.agent.x;
 			const dz = pz - m.agent.z;
@@ -362,7 +368,7 @@
 
 		// solid ambient-forest trees — push out of any trunk you'd walk into (deterministic placement, so
 		// this matches exactly what AmbientScatter draws). PR + max trunk radius ≈ 1.4 m → search reach 1.5.
-		forEachTreeNear(px, pz, 1.5, (tr) => {
+		if (!flying) forEachTreeNear(px, pz, 1.5, (tr) => {
 			if (inWater(world.zones, tr.x, tr.z) || onPath(world.paths, tr.x, tr.z)) return; // AmbientScatter culls trees in lakes / on roads → don't collide with the ghost
 			const dx = px - tr.x;
 			const dz = pz - tr.z;
@@ -379,7 +385,7 @@
 		// can't walk through a house. Creatures are skipped (the animal push-out above handles them). XZ-only.
 		// Box-footprint kinds (houses/cabins) use an ORIENTED BOX so you can walk right up to a wall and follow
 		// streets instead of bumping an oversized circle; round kinds (towers/rocks/wells/lamps) stay circles.
-		for (const o of world.objects) {
+		if (!flying) for (const o of world.objects) {
 			if (CREATURES.has(o.kind)) continue;
 			const def = kindDef(o.kind);
 			const sx = o.scale?.[0] ?? 1;
@@ -454,7 +460,7 @@
 		// in normal play. Pull in promptly for a real wall, but never all the way onto the character.
 		const cdx = Math.sin(yaw);
 		const cdz = Math.cos(yaw);
-		for (const o of world.objects) {
+		if (!flying) for (const o of world.objects) {
 			if (!CAMERA_BLOCKERS.has(o.kind)) continue;
 			const ox = o.pos[0] - px;
 			const oz = o.pos[2] - pz;

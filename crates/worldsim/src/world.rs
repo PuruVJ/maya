@@ -2120,8 +2120,21 @@ impl World {
                 || m.energy < BUILD_ENERGY
                 || m.age < m.lifespan * 0.15 // an adult, not a child
                 || self.transient[i].threat.is_some()
-                || m.partner.is_none() // only a BONDED household builds (bond forms via breeding → never instant)
                 || (self.natural_water && crate::engine::in_natural_pond(m.agent.x, m.agent.z)) // never build IN a pond
+            {
+                continue;
+            }
+            // A BONDED household builds anywhere (the bond forms via BREEDING → no instant house from two strangers who
+            // just spawned adjacent — the town stays a real settlement). But an UNBONDED person may build ONLY when out
+            // in OPEN GROUND (no town within FOUND_GAP) — a PIONEER founding a fresh homestead. THAT is the spread: the
+            // surplus young who leave an over-full town reach open ground and seed DISTANT towns (their gender-balanced
+            // co-founder arrives via the colonising buddy-heading to grow it). WITHOUT this, dispersers (young + unbonded)
+            // reached open ground but could NEVER build → one ever-growing blob, no new towns (user's prod report).
+            if m.partner.is_none()
+                && self
+                    .settle_centroid
+                    .iter()
+                    .any(|&(cx, cz)| (m.agent.x - cx).hypot(m.agent.z - cz) < FOUND_GAP)
             {
                 continue;
             }
@@ -4380,6 +4393,53 @@ mod tests {
         assert!(far1 > 350.0, "committed pioneers should travel to the FAR founding gap, not stall in a close halo ({far0:.0}→{far1:.0} m)");
         assert!(out >= 3, "several surplus people should clear the town to found new ground (got {out})");
         assert!(town_pop < live.len(), "the town should shed its surplus, not keep everyone packed in");
+    }
+
+    #[test]
+    fn scenario_pioneers_found_new_towns_far_away() {
+        // USER (prod): "only ONE settlement grows huge, humans don't spread out / found new towns." A founding requires
+        // a BONDED household (m.partner) to emit a build request in OPEN ground (≥FOUND_GAP from the parent). This checks
+        // the WHOLE chain works: a big over-capacity town should emit build requests FAR away (= new towns) — not just
+        // infill the one blob. (Pure Rust: JS would actually place the houses; here we only assert the sim WANTS to.)
+        let mut w = mw();
+        w.set_player(1e4, 1e4);
+        let houses: Vec<f64> = (0..20)
+            .flat_map(|k| {
+                let a = k as f64 / 20.0 * std::f64::consts::TAU;
+                let r = 8.0 + (k % 3) as f64 * 6.0;
+                [a.cos() * r, a.sin() * r]
+            })
+            .collect();
+        w.set_refuges(&houses); // one packed town
+        for k in 0..60 {
+            let a = k as f64 / 60.0 * std::f64::consts::TAU;
+            let r = 4.0 + (k % 5) as f64 * 3.0;
+            let i = spawn_kind(&mut w, Kind::Person, a.cos() * r, a.sin() * r, 8000 + k as i32);
+            w.agents[i].age = (0.16 + 0.45 * (k as f64 / 60.0)) * w.agents[i].lifespan; // mixed adults
+        }
+        let (mut processed, mut baby_seed) = (0usize, 90_000i32);
+        let (mut near_builds, mut far_builds, mut max_build_r) = (0, 0, 0.0f64);
+        for t in 1..=15000 {
+            w.tick_once(t);
+            materialise_births(&mut w, &mut processed, &mut baby_seed);
+            let b = w.builds();
+            let mut k = 0;
+            while k + 1 < b.len() {
+                let r = (b[k] as f64).hypot(b[k + 1] as f64);
+                max_build_r = max_build_r.max(r);
+                if r > 240.0 {
+                    far_builds += 1;
+                } else {
+                    near_builds += 1;
+                }
+                k += 2;
+            }
+        }
+        let people = alive(&w)[Kind::Person as usize];
+        eprintln!("[spread] people 60→{people}, build reqs: near(<240m)={near_builds} FAR(>240m)={far_builds}, furthest build {max_build_r:.0} m");
+        // the surplus must SEED DISTANT towns — build requests land well past the founding gap, not only infill the blob.
+        assert!(far_builds > 0, "surplus pioneers should emit build requests FAR (>240 m) to found new towns (got 0 — one blob)");
+        assert!(max_build_r > FOUND_GAP, "the furthest founding should clear FOUND_GAP ({max_build_r:.0} m)");
     }
 
     // SCENARIO: a bonded pair sticks together (the tether pulls them close while raising young).
