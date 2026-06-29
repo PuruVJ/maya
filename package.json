@@ -5,9 +5,9 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
-		"build": "vite build",
+		"build": "vite build && node scripts/postbuild-hash-wasm.mjs",
 		"preview": "vite preview",
-		"deploy": "npm run build:wasm && vite build && wrangler deploy",
+		"deploy": "npm run build:wasm && npm run build && wrangler deploy",
 		"cf-types": "wrangler types",
 		"test": "vitest run",
 		"test:watch": "vitest",
