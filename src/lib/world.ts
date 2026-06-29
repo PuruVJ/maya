@@ -245,6 +245,18 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 					founded++;
 					const nc: Cluster = { cx: ax, cz: az, n: 0 };
 					clusters.push(nc);
+					// FOUNDERS: relocate a few people from the parent town to the new site so it's a LIVING colony — an
+					// ANCHOR the next chunk's population FF grows around — not a ghost of empty houses (user: "no new
+					// colonies"). MOVING (not adding) conserves the count, so the FF doesn't trim the founders back.
+					let moved = 0;
+					for (const o of world.objects) {
+						if (moved >= 6) break;
+						if (o.kind !== 'person' || (o.pos[0] - seed.cx) ** 2 + (o.pos[2] - seed.cz) ** 2 > 60 * 60) continue;
+						const fa = moved * GOLDEN;
+						o.pos[0] = ax + Math.cos(fa) * 4;
+						o.pos[2] = az + Math.sin(fa) * 4;
+						moved++;
+					}
 					return nc;
 				}
 				return null;

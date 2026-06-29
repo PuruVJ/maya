@@ -34,6 +34,13 @@ const NOMAD_CAP = 3; // a sub-settlement (wild) region holds at most this many w
 const PEOPLE_PER_HOUSE = 2.8; // equilibrium settlers per home (≈ cap_for(Person, 30 houses)/30) → houses+people converge to the cap
 const COLONY_HOUSE_CAP = 30; // a dormant colony stops building here (matches the live COLONY_MAX*3); surplus simply isn't built
 const GROW_HOUSES_PER_PULSE = 6; // cap on new homes per FF pulse → gradual growth + one cheap wgGrowDormant call
+// DORMANT SPREAD — the far world doesn't just FATTEN, it SPREADS. A FULL dormant settlement (at the colony cap) peels
+// founders into a NEW satellite town FOUND_GAP away, so an absence grows fresh COLONIES, not one ever-capped blob
+// (user: "if I'm not moving, only one settlement grows + no new colonies"). Mirrors the live pioneer spread.
+const FOUND_GAP = 240; // min town spacing (matches Rust world::FOUND_GAP) → a satellite lands ≥ this from its parent
+const SPREAD_POP_MIN = 60; // a town only spreads once genuinely populous (peeling founders then can't empty it)
+const SPREAD_FOUNDERS = 10; // people peeled into each new satellite (its founding stock; grows via FF afterwards)
+const GOLDEN = 2.399963229728653; // golden angle → successive satellites ring OUT evenly around the parent
 
 /** Is there a BUILDING within ~1 region of cell (cx,cz)? Scans the LIVE objects AND every dormant aggregate's statics.
  *  Tells a SETTLEMENT's offloaded people (homes live/dormant nearby → CONSERVE them) apart from wild-land overshoot (no
@@ -137,6 +144,7 @@ export function collapseRegion(world: World, key: string, tick: number): void {
 let materializeSeq = 0;
 // Monotonic id counter for dormant-grown homes (same rationale as materializeSeq — globally-unique keyed-each ids).
 let dormantHouseSeq = 0;
+let dormantTownSeq = 0; // unique ids for satellite-town starter homes (dormant spread)
 
 // IN-PROGRESS WAKE STATE — transient, MODULE-LEVEL (never serialized onto the saved aggregate). A WAKE-STORM used to
 // materialise a dormant region's ENTIRE population into world.objects in ONE frame the instant the player crossed in —
@@ -348,6 +356,47 @@ export function fastForwardDormantAway(world: World, awayMs: number): void {
 		for (const key in world.regions) {
 			if (waking.has(key)) continue;
 			advanceDormant(world, key, world.regions[key], cdt);
+		}
+		spreadDormantSettlements(world, chunk); // FULL towns peel founders into NEW satellites → the far world SPREADS
+	}
+}
+
+/** DORMANT SPREAD — a FULL, populous dormant settlement founds a SATELLITE town FOUND_GAP away (peeling founders + a
+ *  couple of starter homes into a fresh/empty region), so the far world keeps SPREADING into new colonies while you're
+ *  away, not just fattening one capped blob. Seeded by (region key, chunk) → deterministic, successive satellites ring
+ *  out evenly; skips a target region that's already a town (no overlap, no re-founding the same spot). The satellite
+ *  then DEVELOPS on later chunks via advanceDormant (its founders relax toward its own carrying capacity + it builds). */
+function spreadDormantSettlements(world: World, chunk: number): void {
+	if (!world.regions) return;
+	for (const key of Object.keys(world.regions)) {
+		// snapshot the keys above — never spread FROM a satellite created this same pass (would chain-found in one go)
+		if (waking.has(key)) continue;
+		const agg = world.regions[key];
+		const people = agg.counts.person ?? 0;
+		if (regionBuildCount(agg) < COLONY_HOUSE_CAP || people < SPREAD_POP_MIN) continue; // only a FULL, populous town spreads
+		// centroid of the parent's homes
+		let cx = 0;
+		let cz = 0;
+		let nh = 0;
+		for (const s of agg.statics ?? []) if (BUILDING_KINDS.has(s.kind)) ((cx += s.pos[0]), (cz += s.pos[2]), nh++);
+		if (nh === 0) continue;
+		cx /= nh;
+		cz /= nh;
+		// satellite site: a golden-angle ring ≥ FOUND_GAP out, seeded by (key hash, chunk) → deterministic + rings out
+		let kh = 0;
+		for (let i = 0; i < key.length; i++) kh = (Math.imul(kh, 31) + key.charCodeAt(i)) | 0;
+		const ang = (Math.abs(kh % 1000) / 1000) * Math.PI * 2 + chunk * GOLDEN;
+		const sx = cx + Math.cos(ang) * FOUND_GAP * 1.3;
+		const sz = cz + Math.sin(ang) * FOUND_GAP * 1.3;
+		const skey = regionKey(...regionOf(sx, sz));
+		if (skey === key) continue; // landed in the parent's own region → no spread
+		if (world.regions[skey] && regionBuildCount(world.regions[skey]) >= SETTLEMENT_MIN) continue; // already a town there
+		// PEEL founders from the parent into the satellite (conserves population) + 2 starter homes → it's a settlement
+		agg.counts.person = people - SPREAD_FOUNDERS;
+		const sat = (world.regions[skey] ??= { counts: {}, gene: agg.gene, statics: [], lastTick: agg.lastTick });
+		sat.counts.person = (sat.counts.person ?? 0) + SPREAD_FOUNDERS;
+		if (regionBuildCount(sat) < SETTLEMENT_MIN) {
+			for (let h = 0; h < 2; h++) sat.statics.push({ id: `ds${(dormantTownSeq++).toString(36)}`, kind: 'house', pos: [sx + h * 8, 0, sz], keep: true } as WorldObject);
 		}
 	}
 }

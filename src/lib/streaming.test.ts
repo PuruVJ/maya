@@ -278,6 +278,22 @@ describe('people ↔ houses coupling', () => {
 		expect(trimDormantOvershoot(w)).toBe(0); // second pass is a no-op (already balanced)
 	});
 
+	it('B: a FULL dormant town SPREADS — founds satellite colonies in NEW regions while away (not one capped blob)', () => {
+		// "if I'm not moving, only one settlement grows + no new colonies." A full dormant town (at the colony cap, lots
+		// of people) must peel founders into NEW satellite towns in OTHER regions over a long absence — real spread.
+		const w = emptyWorld('t');
+		const statics: WorldObject[] = [];
+		for (let i = 0; i < 30; i++) statics.push({ id: `h${i}`, kind: 'house', pos: [(i % 6) * 8, 0, ((i / 6) | 0) * 8] } as WorldObject);
+		w.regions = { '0,0': { counts: { person: 84 }, gene: 1, statics, lastTick: 0 } };
+		const before = Object.keys(w.regions).length;
+		fastForwardDormantAway(w, 12 * 3600 * 1000); // 12 h away
+		const homesIn = (k: string) => w.regions![k].statics.filter((s) => s.kind === 'house' || s.kind === 'cabin').length;
+		const keys = Object.keys(w.regions!);
+		const satellites = keys.filter((k) => k !== '0,0' && homesIn(k) >= 2 && (w.regions![k].counts.person ?? 0) > 0);
+		expect(keys.length).toBeGreaterThan(before); // the world SPREAD into new regions
+		expect(satellites.length).toBeGreaterThan(0); // …and the satellites are REAL colonies (homes + people), not ghosts
+	});
+
 	it('B: fastForwardDormantAway catches up the DORMANT far world on load (frozen-while-closed fix)', () => {
 		// "came back hours later, the world was STUCK" — the dormant pulse advances by SIM ticks, frozen while the app is
 		// closed, so far settlements sat frozen on return. The load-time away catch-up must develop them by wall-clock.
