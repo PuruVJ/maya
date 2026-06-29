@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { replaceState } from '$app/navigation';
 	import { Canvas } from '@threlte/core';
+	import ProfilerOverlay from '$lib/components/ProfilerOverlay.svelte';
 	import { PCFShadowMap } from 'three';
 	import { World } from '@threlte/rapier';
 	import Scene from '$lib/components/Scene.svelte';
@@ -19,6 +20,7 @@
 	import { nature } from '$lib/nature.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
 	import { demoWorld, emptyWorld, fastForward, WORLD_NAME, LEGACY_WORLD_NAMES, type World as WorldData } from '$lib/world';
+	import { trimDormantOvershoot, fastForwardDormantAway } from '$lib/streaming';
 	import { math } from '$lib/math';
 	import { heightAt } from '$lib/terrain';
 	import { encodeWorld, decodeWorld } from '$lib/share';
@@ -40,10 +42,11 @@
 			/* private mode / storage disabled → just don't persist */
 		}
 	}
-	import { loadWorld, saveWorld } from '$lib/worldStore';
+	import { loadWorld, saveWorld, clearWorld } from '$lib/worldStore';
 	import { SKY_BG } from '$lib/kinds';
 	import { enableWorldCurvature } from '$lib/curveWorld';
-	import { settlementPlan, SIZES } from '$lib/settlementPlanner';
+	import { SIZES } from '$lib/settlementPlanner';
+	import { kindStr } from '$lib/structpack';
 	import { llm } from '$lib/llm.svelte';
 	import { agentManager } from '$lib/agents.svelte';
 	import { playerState } from '$lib/playerState.svelte';
@@ -75,6 +78,7 @@
 	const dedupeObjects = <T extends { objects: { id: string }[] }>(w: T): T => {
 		const seen = new Set<string>();
 		w.objects = w.objects.filter((o) => {
+			if ((o as { kind?: string }).kind === 'fence') return false; // perimeter fences were ripped out (cosmetic) — drop any baked into a saved/shared world
 			if (seen.has(o.id)) return false;
 			seen.add(o.id);
 			return true;
@@ -115,6 +119,9 @@
 				// long you were away — closed-form, so even a week away is instant (no tick-replay hang).
 				const away = saved.savedAt ? Date.now() - saved.savedAt : 0;
 				const ff = away > 60_000 ? fastForward(w, away, 'ff' + Math.random().toString(36).slice(2, 7) + '-', (x, z) => heightAt(x, z, w.terrain)) : { creatures: 0, houses: 0 };
+				// the DORMANT far world catches up too — its per-region pulse advances by SIM ticks (frozen while the app
+				// is closed), so without this the far settlements you'd roamed away from stay frozen on return.
+				if (away > 60_000) fastForwardDormantAway(w, away);
 				world = w;
 				if (away > 60_000) {
 					const m = Math.round(away / 60_000);
@@ -128,6 +135,13 @@
 				}
 			}
 		}
+		// ONE-TIME OVERSHOOT TRIM — a world saved before the people↔houses coupling has its overshoot banked in the
+		// dormant region aggregates (the old ~38·scale grown into EVERY roamed region → the 1100-in-3-towns blob). Cap
+		// each dormant region's people to its OWN house-built capacity so the live population drops toward balance
+		// (people ≈ what the houses support) immediately on load, not slowly as regions are re-roamed. Wasm math is up
+		// (awaited above), so pop_caps is real. People-only, trim-down-only, idempotent → re-saved worlds stay balanced.
+		const trimmed = trimDormantOvershoot(world);
+		if (trimmed > 0) nature.announce(`🏚️ ${trimmed} wanderers moved on — the world settled around its homes`);
 		// GROUND every placed (non-creature) object onto the terrain. The demo seed + legacy saves store y=0, which
 		// BURIES houses/fences wherever the ambient relief rises (it's flat <70 m from spawn, then rolls into hills past
 		// ~240 m — so a settlement seeded 350 m out sank into a hillside, "no fence, houses buried"). heightAt is pure JS
@@ -147,18 +161,20 @@
 			// DEV: `demoSettlements()` in the console drops a spaced GALLERY of planned towns (all sizes), logs each
 			// site's coordinates, and you teleport to them with goto(x,z). For previewing the settlement planner.
 			(window as unknown as { demoSettlements: () => void }).demoSettlements = () => {
-				const GAP = 240;
-				const COLS = 4;
+				// RUST owns the gallery layout (spacing/grid/sizes) — we just materialise the packed stream:
+				// [numSites, numPaths, numObjects, <sites: cx,cz,sizeCode>, <paths×4>, <objects×7>]. Ids assigned here.
 				if (!world.paths) world.paths = [];
+				const arr = math.wgDemoGallery();
+				if (!arr) return;
+				const [numSites, numPaths, numObjects] = arr;
+				let idx = 3;
 				const sites: { site: number; size: string; goto: string }[] = [];
-				for (let k = 0; k < 12; k++) {
-					const size = SIZES[k % SIZES.length];
-					const cx = 160 + (k % COLS) * GAP;
-					const cz = -GAP + Math.floor(k / COLS) * GAP;
-					const plan = settlementPlan(cx, cz, size, k * 1000 + 7, `demo${k}_`);
-					world.objects.push(...plan.objects);
-					world.paths!.push(...plan.paths);
-					sites.push({ site: k + 1, size, goto: `goto(${cx}, ${cz})` });
+				for (let i = 0; i < numSites; i++, idx += 3) sites.push({ site: i + 1, size: SIZES[arr[idx + 2]], goto: `goto(${arr[idx]}, ${arr[idx + 1]})` });
+				let n = 0;
+				for (let i = 0; i < numPaths; i++, idx += 4) world.paths!.push({ id: 'demo_p' + n++, material: 'path', from: [arr[idx], 0, arr[idx + 1]], to: [arr[idx + 2], 0, arr[idx + 3]], width: 3 });
+				for (let i = 0; i < numObjects; i++, idx += 7) {
+					const x = arr[idx + 1], z = arr[idx + 2];
+					world.objects.push({ id: 'demo_o' + n++, kind: kindStr(arr[idx]), pos: [x, heightAt(x, z, world.terrain), z], rot: arr[idx + 3], scale: [arr[idx + 4], arr[idx + 5], arr[idx + 6]], keep: true });
 				}
 				console.table(sites);
 				console.log('%c🏘️ Settlement gallery placed — teleport to a site with its goto(x, z) above.', 'font-weight:bold;font-size:13px');
@@ -238,7 +254,10 @@
 	// are dropped (don't resurrect a corpse), and the player's pose rides along in `start` so you reopen standing
 	// where you left. Operates on a detached $state.snapshot copy — the live world is untouched.
 	function liveWorldSnapshot(): WorldData {
-		const snap = $state.snapshot(world) as WorldData;
+		// deep-clone ONLY the bounded live slice; `world.regions` (grows with explored history) rides BY REFERENCE and is
+		// encoded synchronously inside saveWorld → no per-second deep clone of every dormant region on a days-old world.
+		const snap = $state.snapshot({ ...world, regions: undefined }) as WorldData; // detach EVERYTHING but regions (bounded)
+		snap.regions = world.regions; // regions ride BY REFERENCE — saveWorld's splitWorld encodes them synchronously
 		const live = agentManager.liveSnapshot(); // objId → live {x, z, dead, asleep}
 		snap.objects = snap.objects.filter((o) => {
 			const ls = live.get(o.id);
@@ -252,11 +271,18 @@
 		return snap;
 	}
 	// EDITS → debounced save to the world store (local IndexedDB cache + best-effort sync to the shared backend).
-	// JSON.stringify gives deep dep-tracking; the world only mutates on edits (animal movement lives in the agent
-	// manager, not world.objects), so this fires on builds/moves/paint, NOT frames — and never touches the URL.
+	// Deep-track ONLY world.objects (the bounded live slice — animal movement lives in the agent manager, builds/moves/
+	// paint all mutate world.objects) so this fires on edits, NOT frames. Deliberately NOT the whole `world`: that would
+	// re-serialise the unbounded `world.regions` history on every change (days-away stutter) — regions persist via the
+	// 1 Hz interval + their own on-change keys (worldStore), not this prompt-save path.
 	let editTimer: ReturnType<typeof setTimeout> | undefined;
 	$effect(() => {
-		JSON.stringify(world);
+		// dep-track edits (add/remove/move/paint) CHEAPLY — read length + each object's pos/color, NOT JSON.stringify
+		// (which allocated a fresh string of the whole list on EVERY change, incl. every creature add/remove in a hunt).
+		// The read alone establishes the reactive dep; the running sum just prevents dead-code elimination of the loop.
+		let dep = world.objects.length;
+		for (const o of world.objects) dep += o.pos[0] + o.pos[2] + (o.color ? o.color.length : 0);
+		void dep;
 		if (!liveUrl) return;
 		clearTimeout(editTimer);
 		editTimer = setTimeout(() => !resetting && saveWorld(liveWorldSnapshot()), 500);
@@ -321,27 +347,7 @@
 		if (!confirm('Reset to the demo world? This clears everything you’ve built here.')) return;
 		resetting = true; // stop the 500ms edit-save, the 1s autosave, and the pagehide/visibilitychange save
 		shareMsg = 'Resetting…';
-		await new Promise<void>((resolve) => {
-			const open = indexedDB.open('worldgen', 1);
-			open.onsuccess = () => {
-				const db = open.result;
-				if (!db.objectStoreNames.contains('worlds')) {
-					db.close();
-					return resolve();
-				}
-				const tx = db.transaction('worlds', 'readwrite');
-				tx.objectStore('worlds').delete('current');
-				tx.oncomplete = () => {
-					db.close();
-					resolve();
-				};
-				tx.onerror = () => {
-					db.close();
-					resolve();
-				};
-			};
-			open.onerror = () => resolve();
-		});
+		await clearWorld(); // wipe the WHOLE cache — meta + every region:* key (not just the legacy 'current')
 		location.reload(); // fresh load: empty cache → demo world, and a brand-new sim worker
 	}
 
@@ -516,6 +522,8 @@
 		<div class="rounded-full bg-emerald-600/90 px-3 py-1 text-xs font-medium text-white shadow-lg">{shareMsg}</div>
 	{/if}
 </div>
+
+<ProfilerOverlay />
 
 <div
 	class="pointer-events-none fixed bottom-4 left-4 text-[13px] text-white/90 [text-shadow:0_1px_4px_rgba(0,0,0,0.6)] [@media(pointer:coarse)]:hidden"

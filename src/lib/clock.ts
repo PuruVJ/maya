@@ -22,6 +22,7 @@ export type SeekListener = (tick: number, from: number) => void;
 
 export class SimClock {
 	tick = 0; // integer sim step — the canonical clock position
+	frame = 0; // monotonic RENDER-frame counter (++ once per advance) — a cheap token for memoising per-frame work
 	rate = 1; // tick-speed multiplier (2 = double-time, 10 = time-lapse); 0 ≈ paused
 	playing = true;
 	#acc = 0; // leftover sub-tick real-time (seconds), carried between frames
@@ -49,6 +50,7 @@ export class SimClock {
 	/** Feed real elapsed seconds each frame; emits whole, rate-scaled ticks to onTick listeners.
 	 *  Returns how many ticks advanced this call. */
 	advance(realDt: number): number {
+		this.frame++; // a new render frame began — bump the per-frame memo token (e.g. cached ground-Y) before sim work
 		if (this.paused || !(realDt > 0)) return 0;
 		this.#acc += realDt * this.rate;
 		let n = 0;

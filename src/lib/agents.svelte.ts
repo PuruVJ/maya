@@ -81,12 +81,17 @@ export interface ManagedAgent {
 	menu: Behavior[];
 	objId?: string; // the world-object id this agent renders (placed animals) → lets the live state be saved
 	tint?: string; // the agent's display colour (e.g. a person's hashed shirt) → far impostors match the near look
+	skin?: string; // a person's hashed skin tone → the instanced human renderer reads it (stamped by Npc)
+	pants?: string; // a person's hashed trousers colour → instanced human renderer
+	hair?: string; // a person's hashed hair colour (females only render hair) → instanced human renderer
 	companion?: boolean; // the player's pet — follows you (home leash tracks the player) and isn't scared off
 
 	// written each frame, read by the owning component:
 	lod: 0 | 1 | 2; // 0 near (full), 1 mid, 2 far (freeze articulation)
 	castShadow: boolean; // only the nearest few cast (shadow budget)
 	dist: number; // distance to the player
+	_gy?: number; // per-frame cached ground-Y (see groundYCached) — shared by the renderer + the contact-shadow pass
+	_gyf?: number; // the clock.frame the cached _gy was computed for (stale token ⇒ recompute)
 	// the Rust sim mirrors the live values back each tick (health/dead/asleep/hunting); the rest of the ecosystem
 	// state the old JS sim tracked (stamina/slash/rival/chase/mob/…) is gone — Rust owns it now.
 	rank: number; // trophic level — the only food-chain field the render side still reads (the player-stun check)

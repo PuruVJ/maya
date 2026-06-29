@@ -25,7 +25,7 @@ export interface KindDef {
 const TRUNK = '#6b4a2b';
 const BARK = '#7c5230';
 const LEAF = '#3f8f4a';
-const PINE = '#2f6f3f';
+const PINE = '#57a86a'; // lighter evergreen — was #2f6f3f, which the canopy underside-darkening + night atmosphere crushed to near-black
 const STONE = '#b3b3bd';
 const ROOF = '#5a3b30';
 const ROOFRED = '#9c4a3a';

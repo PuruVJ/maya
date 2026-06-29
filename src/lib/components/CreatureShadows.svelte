@@ -6,7 +6,7 @@
 	// fade (tiny shader, no texture). Composes WITH the real cast shadow (centred contact-AO vs offset cast).
 	import { T, useTask } from '@threlte/core';
 	import * as THREE from 'three';
-	import { heightAt } from '$lib/terrain';
+	import { groundYCached } from '$lib/terrain';
 	import { agentManager } from '$lib/agents.svelte';
 	import type { World } from '$lib/world';
 
@@ -39,7 +39,7 @@
 			if (n >= MAX || m.lod === 2) return; // far agents are impostored + tiny → their sub-pixel blob isn't
 			// worth a heightAt + matrix compose each frame (matters when a 1000-strong herd is mostly far away)
 			const a = m.agent;
-			dummy.position.set(a.x, heightAt(a.x, a.z, world.terrain) + 0.04, a.z);
+			dummy.position.set(a.x, groundYCached(m, a.x, a.z, world.terrain) + 0.04, a.z);
 			const s = m.radius * 1.9; // blob a touch wider than the body footprint
 			dummy.scale.set(s, 1, s);
 			dummy.updateMatrix();

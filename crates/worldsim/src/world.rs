@@ -123,7 +123,8 @@ const CH_MIGRATE: i32 = 30; // RNG channel for the per-(agent,settlement) jitter
 // industrious lineage peels off tiny hamlets, a homebody one tolerates a big village → towns of varied size,
 // selectable, spreading in every direction. This REPLACES the centripetal migration + the rarely-firing crowd reflex.
 const SETTLEMENT_LINK_R: f64 = 70.0; // houses within this chain (single-link) into ONE settlement → true per-town pop/centroid
-pub const FOUND_GAP: f64 = 240.0; // a pioneer is pushed outward while within this of its over-full town → new towns land ≥ this apart (worldgen::build_ops reads it too → ONE source of truth for town spacing)
+pub const FOUND_GAP: f64 = 240.0; // MINIMUM town SPACING — a founding house is rejected within this of another town (worldgen::build_ops reads it too → ONE source of truth for spacing)
+const PIONEER_REACH: f64 = 480.0; // how far the outward pioneer push PERSISTS before fading (2× the spacing). A pioneer keeps being driven away from its over-full town until THIS far out, so it reaches open ground and founds a DISTANT town — instead of the push dying at the spacing gap, where family cohesion immediately re-pools the family back into the parent (the "one ever-growing blob" bug). Split from FOUND_GAP so reach ≫ spacing ⇒ real spread; people-only path, orthogonal to the boldness niche.
 const PIONEER_CAP_BASE: f64 = 13.0; // town size (people) a NEUTRAL (industry=1) person tolerates before pioneering
 const PIONEER_CAP_MIN: f64 = 5.0; // an industrious founder (high industry) peels off a tiny hamlet …
 const PIONEER_CAP_MAX: f64 = 26.0; // … a homebody (low industry) tolerates a big village. capacity = BASE/industry, clamped.
@@ -207,6 +208,7 @@ const BOND_W: f64 = 0.35; // pair-bond tether: a gentle pull toward a bonded mat
 const BOND_REARING: f64 = 90.0; // seconds a bond holds before the "young have grown → may split" check kicks in
 const BOND_SPLIT_FRAC: f64 = 0.5; // chance a pair splits once the young mature (else they stay bonded for life)
 const CH_BONDSPLIT: i32 = 33; // RNG channel for the seeded split-or-stay roll
+const CH_PERSONCAP: i32 = 34; // RNG channel for the SOFT person-conception brake roll (couples conception to the house-built cap)
 const VITALITY_LERP: f64 = 0.004; // per-tick ease of the director's per-kind vitality toward its target (gentle drift)
 const RESCUE_N: usize = 6; // a species below this many alive → Mother Nature boosts its breeding hard (anti-extinction)
 // PER-KIND soft plateau (a TROPHIC PYRAMID): breeding RATE eases to 0 as a kind nears this × pop_scale → grows then
@@ -248,8 +250,14 @@ const BREED_FEAR_R2: f64 = 14.0 * 14.0;
 // Carrying caps — bumped ~1.7× (conservative) so the LOCAL world keeps growing over time; true "always something
 // everywhere" scale comes from streamed regions, not one giant local mob (perf: still under the 1000-agent ceiling
 // even at max city scale ×3). Mother Nature tunes vitality on top of these.
-const PREY_DENSITY_RABBIT: f64 = 52.0; // per BASELINE world area — broad base of the pyramid (× pop_scale live).
-const PREY_DENSITY_KANGAROO: f64 = 34.0;
+// DENSITY TUNED FOR A CALM, SPARSE VICINITY (world-spread vision: small ecosystems spread far, NOT a crammed near
+// field). Was 52/34 → a baseline 200 m tile carried ~110 creatures, so the nearest few tiles packed the whole live
+// budget into ~250 m and the live sim over-bred toward that cap then mass-starved (the "pile of dead rabbits"). At
+// 32/20 a tile carries ~67, so the same 240-budget spreads across ~400 m — fewer detailed critters within 100 m AND
+// a populated 100–500 m impostor band, instead of a dense blob underfoot. Cats/lions/dino are SHARES of this base,
+// so the whole pyramid shrinks proportionally → relative dynamics (the emergence niche) are preserved.
+const PREY_DENSITY_RABBIT: f64 = 32.0; // per BASELINE world area — broad base of the pyramid (× pop_scale live).
+const PREY_DENSITY_KANGAROO: f64 = 20.0;
 const PREY_DENSITY_PERSON: f64 = 38.0; // people kept generous — cities are the point.
 const CAT_PREY_SHARE: f64 = 0.30; // a cat population ≈ 30% of its rabbit base
 const LION_PREY_SHARE: f64 = 0.07; // a lion population ≈ 7% of everything it hunts
@@ -279,10 +287,13 @@ pub fn cap_for(kind: Kind, pop: &[usize; 6], scale: f64) -> usize {
 /// calls THIS for the number (Rust owns the formula), so the two can never drift apart.
 pub fn world_area_scale(builds: usize) -> f64 {
     // REWARD BUILDING (user: "cities are the point"): wild land stays at the baseline cap (~38 people), but a settlement
-    // that BUILDS grows its carrying capacity into a real city. +1 per 25 buildings, up to 4× (≈152 people @ 100 builds).
-    // The old 3× / per-40 left humans stuck in a ~38 village. Totals past LIVE_BUDGET now offload to dormant region
-    // aggregates (streaming), so a big city no longer "melts the sim" — the live set stays bounded; the city persists.
-    (1.0 + builds as f64 / 25.0).clamp(1.0, 4.0)
+    // that BUILDS grows its carrying capacity into a real city. +1 per 25 buildings — and NO upper clamp: more building
+    // = more capacity (the populous vision). The old 4× ceiling capped a real city at ~152; now a 400-build metropolis
+    // scales to 17× (~646). This runaway is BOUNDED elsewhere — the per-region dormant FF ties each region's people to
+    // ITS OWN houses (streaming.ts), the live sim has a soft breeding brake at `cap_for` (see the MATING pass), and the
+    // live set offloads past LIVE_BUDGET to dormant aggregates — so a big city no longer "melts the sim", it just
+    // PERSISTS as a city. FLOOR stays at 1 so wild land keeps its baseline; nomad regions are clamped tiny in JS.
+    (1.0 + builds as f64 / 25.0).max(1.0)
 }
 // ── AGGREGATE FAST-FORWARD (big-world.md §3) ────────────────────────────────────────────────────────────────
 // When a player returns after being away, each species relaxes toward its carrying capacity along a CLOSED-FORM
@@ -823,6 +834,18 @@ pub struct Transient {
     mob_x: f64,                 // running sum of those mobbers' positions → their centroid (for break-away)
     mob_z: f64,
     pub attackers: u32,         // mobbers actually pressed into CONTACT → they wound it; it slashes them
+    // PERF cache (bit-identical): nearest_water() for THIS agent's tick-start position, computed ONCE per tick and
+    // read by the thirst metabolism / thirst-seek steering / well-dig dryness check — which used to EACH recompute
+    // the same ~36-hash procedural pond scan for the same (x,z). None = no water in the world (nearest_water → None);
+    // Some((dx,dz,d_edge)) = the cached edge vector. (Snapshot::fill reads a POST-step position, so it is NOT cached.)
+    water: Option<(f64, f64, f64)>,
+    // PERF cache (bit-identical): distance from THIS predator to its chosen prey, computed ONCE in target() and
+    // reused by the emergent brain (positions don't move between targeting and DECIDE). TWO forms are kept so each
+    // reuse matches its original op EXACTLY (hypot ≠ √(a²+b²) at the ULP, so they can't share one number):
+    //   prey_d2   = pdx²+pdz²   → the MenacePlayer eligibility's raw-d2 compare (`dp2 < prey_d2 * 0.81`)
+    //   prey_dist = pdx.hypot(pdz) → prey_close + the Hunt block's `d` (both used hypot). INFINITY/NaN when no prey.
+    prey_d2: f64,
+    prey_dist: f64,
 }
 
 impl Transient {
@@ -840,6 +863,9 @@ impl Transient {
             mob_x: 0.0,
             mob_z: 0.0,
             attackers: 0,
+            water: None,
+            prey_d2: f64::INFINITY,
+            prey_dist: f64::INFINITY,
         }
     }
 }
@@ -1412,12 +1438,15 @@ impl World {
         Some((cx, cz, rad))
     }
 
-    /// The SETTLEMENT this point belongs to — nearest town centroid within FOUND_GAP → `(centre_x, centre_z, pop)`.
+    /// The SETTLEMENT a pioneer is being pushed away from — nearest town centroid within PIONEER_REACH → `(cx, cz, pop)`.
     /// `pop` is the town's TOTAL population, so "my town is full" is a true per-town signal (not one rim house's
-    /// occupancy, which read empty and let towns sprawl). Drives land-pressure pioneering (P1).
+    /// occupancy, which read empty and let towns sprawl). Drives land-pressure pioneering (P1). Searches PIONEER_REACH
+    /// (not the tighter spacing FOUND_GAP) so the outward push PERSISTS far enough to carry a pioneer to open ground —
+    /// otherwise it fades at the spacing gap and the family re-pools into the parent (the blob bug). A founded child
+    /// town is the pioneer's new nearest centroid (≈0 m), so its residents read THEIR town's pop, not the parent's.
     fn local_settlement(&self, x: f64, z: f64) -> Option<(f64, f64, u32)> {
         let mut best: Option<usize> = None;
-        let mut best_d2 = FOUND_GAP * FOUND_GAP;
+        let mut best_d2 = PIONEER_REACH * PIONEER_REACH;
         for (si, &(cx, cz)) in self.settle_centroid.iter().enumerate() {
             let d2 = (cx - x).powi(2) + (cz - z).powi(2);
             if d2 < best_d2 {
@@ -1593,6 +1622,19 @@ impl World {
         // prey + marks its prey's threat, claims it (MAX_HUNTERS cap), and applies the chase-give-up threshold.
         self.transient.clear();
         self.transient.resize(n, Transient::fresh(danger2));
+        // PERF: cache each live agent's nearest_water ONCE from its tick-start position. The thirst metabolism,
+        // thirst-seek steering, and well-dig dryness check (3 sites, all on the SAME pre-step (x,z)) read this
+        // instead of each re-running the ~36-hash procedural pond scan → bit-identical, same fn / same inputs.
+        let has_water = self.natural_water || !self.water_src.is_empty();
+        if has_water {
+            for i in 0..n {
+                if self.agents[i].dead {
+                    continue;
+                }
+                let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
+                self.transient[i].water = self.nearest_water(ax, az);
+            }
+        }
         for i in 0..n {
             if self.agents[i].dead {
                 continue;
@@ -1856,8 +1898,8 @@ impl World {
             if self.agents[i].companion {
                 self.agents[i].hydration = 1.0;
             } else if has_water {
-                let (ax, az) = (self.agents[i].agent.x, self.agents[i].agent.z);
-                let at_water = matches!(self.nearest_water(ax, az), Some((_, _, d)) if d <= 0.0);
+                // cached this tick (start of tick_once, same pre-step (x,z)) → no per-agent pond rescan
+                let at_water = matches!(self.transient[i].water, Some((_, _, d)) if d <= 0.0);
                 let drought = self.drought(tick); // season × director drought → faster thirst in the dry season
                 let rate = if at_water { DRINK_RATE } else { -THIRST_DRAIN * drought };
                 self.agents[i].hydration = (self.agents[i].hydration + rate * DT).clamp(0.0, 1.0);
@@ -2011,14 +2053,33 @@ impl World {
                 pop[kc] += 1;
             }
         }
+        // SOFT PERSON CAP (couples people → houses): the house-built carrying capacity for people THIS tick. Food /
+        // predation / crowd stay the PRIMARY regulators (below); this is only a gentle CEILING so a peaceful, well-fed
+        // town can't run to 1100 unhoused. The chance to conceive ramps from FULL at the cap to ZERO by ~1.6× cap, so
+        // people grow toward what the houses support, then plateau. It's SOFT (a probability) + the zero point sits well
+        // ABOVE every seeded cluster size in the scenario tests, so the population-FLOOR tests still hold.
+        let person_cap = cap_for(Kind::Person, &pop, self.pop_scale).max(1) as f64;
+        let person_count = pop[Kind::Person as usize] as f64;
         // B. MATING — a fertile opposite-sex pair conceives: the female starts gestating; both pay the breed cost.
         for i in 0..n {
             if !self.breed_ready(i) {
                 continue;
             }
             let kc = self.agents[i].kind as usize;
-            // NO headcount cap — a fertile, well-fed, calm pair always conceives. Population is bounded by FOOD
-            // (overgrazing→starvation lowers the energy that breed_ready needs), predation, and old age, not a ceiling.
+            // SOFT CEILING for PEOPLE only — scale the conception chance DOWN as the global person count overshoots the
+            // house-built cap (full at the cap, 0 by ~1.6× cap). A seeded roll decides per-couple, so it's deterministic.
+            // Other kinds (and people at/under cap) are untouched — food/predation/crowd remain the real limits.
+            if matches!(self.agents[i].kind, Kind::Person) {
+                let over = person_count / person_cap;
+                let brake = (1.0 - ((over - 1.0) / 0.6)).clamp(0.0, 1.0);
+                if brake < 1.0
+                    && crate::simrng::rand(&[self.agents[i].seed_id, self.clock.tick as i32, CH_PERSONCAP]) >= brake
+                {
+                    continue; // over capacity → this couple sits this conception out (no birth, no cull)
+                }
+            }
+            // Other kinds: no headcount cap — a fertile, well-fed, calm pair always conceives. Their population is
+            // bounded by FOOD (overgrazing→starvation lowers the energy breed_ready needs), predation, and old age.
             if let Some(j) = self.find_mate(i) {
                 let mom = if is_female(self.agents[i].seed_id) { i } else { j }; // the female of the pair carries
                 // INHERIT: the litter's vigor = average of the parents' genes ± mutation (deterministic RNG), clamped
@@ -2069,7 +2130,8 @@ impl World {
             // of a house this cycle. JS places the well + feeds it back as a drink source, so next time nearest_water
             // finds it (dry=false) and the household builds homes around the water it made. Emergent jobs + towns.
             let industrious = m.weights.industry > WELL_INDUSTRY;
-            let dry = self.nearest_water(m.agent.x, m.agent.z).map_or(true, |(_, _, d)| d > WELL_NEED_R);
+            // cached this tick (a settler hasn't moved since the start-of-tick scan) → same fn/inputs, bit-identical
+            let dry = self.transient[i].water.map_or(true, |(_, _, d)| d > WELL_NEED_R);
             if industrious && dry {
                 self.wells.push(bx);
                 self.wells.push(bz);
@@ -2471,7 +2533,8 @@ impl World {
         // SHARED flock pass so both brains get it for free; it's just a steering pull, so fleeing/hunting (which
         // drive the speed boost) still take spatial priority when they fire. No water in the world → no pull.
         if m.hydration < THIRSTY_AT {
-            if let Some((dx, dz, d_edge)) = self.nearest_water(ax, az) {
+            // cached this tick (flock reads the same pre-step (ax,az) the start-of-tick scan used) → bit-identical
+            if let Some((dx, dz, d_edge)) = self.transient[i].water {
                 if d_edge > 0.0 {
                     let d = dx.hypot(dz).max(0.1);
                     let urgency = (1.0 - m.hydration / THIRSTY_AT).clamp(0.0, 1.0); // 0 at the threshold → 1 bone-dry
@@ -2492,10 +2555,11 @@ impl World {
         // far more than straight AT it (radial) — so it rounds the ring to the GATE and runs out instead of jamming
         // into the inner face (user: "they should run out in fear … bias toward the curve, not the longitudinal side").
         // The radial part carries it out once it reaches the gap; the tangent side fans by seed so both ways are tried.
-        // WHO keeps out of a settlement: only the WILD kinds (kangaroo, lion, dino). EXEMPT: people (they live here),
-        // CATS (village cats — user "cats can roam in the settlements, we like em"), and RABBITS (livestock — people
-        // farm/hunt them, so they belong near/among a colony; user "I don't see rabbits near the settlements anymore").
-        if matches!(m.kind, Kind::Kangaroo | Kind::Lion | Kind::Dinosaur) {
+        // WHO keeps out: the WILD kinds (kangaroo, lion, dino) flee FULLY. RABBITS get a GENTLE nudge (kind_w below) —
+        // a few may still linger near a colony (people farm/hunt them) but a 100-strong flock won't pile in and lounge
+        // (user: "one or two lone rabbits are ok, here it's like 100 in one settlement just lounging"). EXEMPT entirely:
+        // people (they live here) + CATS (village cats — user "cats can roam in the settlements, we like em").
+        if matches!(m.kind, Kind::Kangaroo | Kind::Lion | Kind::Dinosaur | Kind::Rabbit) {
             // flee the settlement CENTRE (centroid of the local town's buildings), out past the town's extent + a
             // buffer — so a creature is pushed clean OUT of the town, not circling one building inside it. Radial +
             // a dominant tangential (rounds the perimeter to the gate). Fences are NOT animal collision (Scene drops
@@ -2509,7 +2573,8 @@ impl World {
                     let (ux, uz) = (dx / d, dz / d); // radial, outward from the centre
                     let side = if m.seed_id & 1 == 0 { 1.0 } else { -1.0 }; // fan both ways → the gate's found faster
                     let (tx, tz) = (-uz * side, ux * side); // tangential, round the perimeter
-                    let mag = a_max * SETTLEMENT_AVOID_W * falloff;
+                    let kind_w = if matches!(m.kind, Kind::Rabbit) { 0.5 } else { 1.0 }; // rabbits: a gentle thinning, not a full flee
+                    let mag = a_max * SETTLEMENT_AVOID_W * kind_w * falloff;
                     fx += mag * (ux * SETTLEMENT_RADIAL_W + tx * SETTLEMENT_TANGENT_W);
                     fz += mag * (uz * SETTLEMENT_RADIAL_W + tz * SETTLEMENT_TANGENT_W);
                 }
@@ -2531,6 +2596,14 @@ impl World {
                 // EMERGENT/VARIED capacity: an industrious lineage founds tiny hamlets, a homebody one tolerates a big village.
                 let capacity = (PIONEER_CAP_BASE / m.weights.industry.max(0.3)).clamp(PIONEER_CAP_MIN, PIONEER_CAP_MAX);
                 g = smoothstep(capacity, capacity + PIONEER_RAMP, pop as f64); // 0 under cap → 1 well over → pioneer out
+                // COMMITMENT — the journey, once begun, commits. The land-pressure gain above DECAYS as the town empties
+                // behind a departing pioneer, so it used to stall in a close HALO (a ring of stragglers ~150 m out, all
+                // re-merging into one blob) instead of travelling ON to found a DISTANT town. So: once a pioneer has
+                // CLEARED the town's built extent (dist > gather radius) keep the FULL outward drive until it reaches
+                // open ground (PIONEER_REACH, where local_settlement returns None → push ends → it founds). A person
+                // still INSIDE any town reads dist≈0 → no commit, so only true land pressure ever starts the journey.
+                let dist_town = ((ax - cx).powi(2) + (az - cz).powi(2)).sqrt();
+                g = g.max(smoothstep(SETTLEMENT_GATHER_R, SETTLEMENT_GATHER_R * 1.6, dist_town));
                 cxo = cx; // push away from the TOWN centre (stable) rather than a noisy local crowd centroid
                 czo = cz;
             }
@@ -2541,6 +2614,12 @@ impl World {
         } else {
             let age_disperses = m.age < m.lifespan * DISPERSE_AGE || n_near >= BLOB_CROWD;
             let go = n_near >= DISPERSE_CROWD && age_disperses;
+            // DON'T tune this to spread harder. The dispersal is LOCKED by the emergent boldness polymorphism, two ways:
+            //  • a FLAT lower gain-floor forces CAUTIOUS rabbits out of their refuges → they lose their strategy → BOLD
+            //    sweeps (mean_safety→high, cautious=0).
+            //  • a BOLD-MODULATED boost (only bold spread more) hands bold a survival edge — spreading lets them ESCAPE
+            //    the "culled when common" predation that balances the niche → bold sweeps the OTHER way (mean_safety 0.84).
+            // Both verified against scenario_emergent_boldness_*. World-spread comes from other levers, not this one.
             let g = if go { smoothstep(DISPERSE_CROWD as f64, DISPERSE_CROWD as f64 + 5.0, n_near as f64) } else { 0.0 };
             (go, g, coh_x / n_near.max(1) as f64, coh_z / n_near.max(1) as f64, DISPERSE_W)
         };
@@ -2710,6 +2789,16 @@ impl World {
             }
         }
 
+        // PERF: cache the distance to the FINAL chosen prey (positions don't move between this targeting pass and the
+        // emergent DECIDE pass) so the brain's prey_close / Hunt / MenacePlayer reuse it instead of recomputing. The
+        // offset (prey − self) matches the emergent sites' `prx - ax`; both forms use the SAME op there → bit-identical.
+        if let Some(p) = self.transient[i].prey {
+            let pdx = self.agents[p].agent.x - ax;
+            let pdz = self.agents[p].agent.z - az;
+            self.transient[i].prey_d2 = pdx * pdx + pdz * pdz;
+            self.transient[i].prey_dist = pdx.hypot(pdz);
+        }
+
         // LOCK IN the target this tick survived selection/claim/give-up → next tick PREY_COMMIT_BONUS makes the hunter
         // stick with it (anti flip-flop). Gave up / nothing chosen → clear, so a cooled-off hunter starts fresh.
         self.agents[i].chase_target = match self.transient[i].prey {
@@ -2786,9 +2875,10 @@ mod tests {
         assert_eq!(world_area_scale(0), 1.0); // undeveloped → baseline carrying capacity (wild land unchanged)
         assert_eq!(world_area_scale(25), 2.0); // ~+1 per 25 buildings (reward building → cities)
         assert_eq!(world_area_scale(75), 4.0); // a real city → 4× capacity
-        assert_eq!(world_area_scale(400), 4.0); // capped at 4× (excess offloads to dormant regions, not a sim melt)
+        assert_eq!(world_area_scale(400), 17.0); // NO upper clamp — more building = more capacity (bounded by per-region FF + the live brake, not a ceiling)
         let mid = world_area_scale(12);
         assert!(mid > 1.0 && mid < 2.0, "monotonic between the anchors, got {mid}");
+        assert!(world_area_scale(0) >= 1.0, "FLOOR holds — wild land never drops below the baseline carrying capacity");
     }
 
     #[test]
@@ -3885,6 +3975,64 @@ mod tests {
         }
     }
 
+    fn count_within(w: &World, kind: Kind, cx: f64, cz: f64, r: f64) -> usize {
+        let r2 = r * r;
+        w.agents.iter().filter(|m| m.kind == kind && !m.dead && (m.agent.x - cx).powi(2) + (m.agent.z - cz).powi(2) < r2).count()
+    }
+
+    #[test]
+    fn scenario_demo_settlement_survives_its_lions() {
+        // FAITHFUL to the shipped demo (user: "started with 30+ people, they all died — plucked off?"): a ~27-person
+        // settlement WITH HOMES (refuges → the clean-zone pushes wild lions off the centroid + people flee home when
+        // threatened), a rabbit + kangaroo base for the lions to actually eat, and 2 lions on the fringe. Over a long
+        // run the town must SURVIVE — the lions thin/scare + eat the WILD prey, not pluck the settlement to zero. No
+        // test guarded settlement SURVIVAL before (lions_thin only checks that kills happen), so this is the gap.
+        let mut w = mw();
+        w.set_player(1e4, 1e4); // player far → no interference
+        let mut homes: Vec<f64> = Vec::new();
+        for k in 0..6 {
+            let a = k as f64 / 6.0 * std::f64::consts::TAU;
+            homes.push(a.cos() * 8.0);
+            homes.push(a.sin() * 8.0);
+        }
+        w.set_refuges(&homes); // 6 homes ringing the origin → one settlement, clean-zone active
+        cluster(&mut w, Kind::Person, 27, 0.0, 0.0, 12.0, 1000);
+        let mut pi = 0; // SPREAD ages (0.1..0.8 of life) so the founders aren't one cohort that dies together
+        for m in w.agents.iter_mut() {
+            if m.kind == Kind::Person {
+                m.age = (0.1 + 0.7 * (pi as f64 / 27.0)) * m.lifespan;
+                pi += 1;
+            }
+        }
+        cluster(&mut w, Kind::Rabbit, 42, 0.0, 0.0, 70.0, 2000); // the WILD prey base the lions should prefer
+        cluster(&mut w, Kind::Kangaroo, 10, 0.0, 0.0, 80.0, 3000);
+        spawn_kind(&mut w, Kind::Lion, 90.0, 0.0, 5001); // 2 lions on the fringe (the demo count)
+        spawn_kind(&mut w, Kind::Lion, -90.0, 30.0, 5002);
+        let people0 = alive(&w)[Kind::Person as usize];
+        let (mut processed, mut baby_seed) = (0usize, 60_000i32);
+        for t in 1..=12000 {
+            w.tick_once(t); // ~400 s — long enough for predation/aging to wipe a fragile town
+            materialise_births(&mut w, &mut processed, &mut baby_seed);
+        }
+        let people1 = alive(&w)[Kind::Person as usize];
+        eprintln!("[demo-survives] people {people0}→{people1}, rabbits {}, lions {}", alive(&w)[Kind::Rabbit as usize], alive(&w)[Kind::Lion as usize]);
+        assert!(people1 >= people0 / 2, "the demo settlement must SURVIVE its lions (people {people0}→{people1})");
+    }
+
+    #[test]
+    fn scenario_rabbits_thin_out_of_a_settlement() {
+        // A town (refuges) with 80 rabbits crammed in → the GENTLE settlement-avoidance (kind_w 0.5) thins them OUT so
+        // the town isn't a 100-rabbit lounge (user). A few may linger; the bulk leaves. (Kangaroos flee fully; cats/people exempt.)
+        let mut w = mw();
+        w.set_refuges(&[-8.0, 0.0, 8.0, 0.0, 0.0, 8.0, 0.0, -8.0, 6.0, 6.0, -6.0, -6.0]); // a ring of homes at origin
+        cluster(&mut w, Kind::Rabbit, 80, 0.0, 0.0, 10.0, 5000);
+        let inside0 = count_within(&w, Kind::Rabbit, 0.0, 0.0, 28.0);
+        run(&mut w, 1500, Kind::Rabbit); // ≈50 s
+        let inside1 = count_within(&w, Kind::Rabbit, 0.0, 0.0, 28.0);
+        eprintln!("[rabbit-thin] in-town rabbits {} → {}", inside0, inside1);
+        assert!(inside1 * 3 < inside0 * 2, "the gentle flee should thin a crammed rabbit flock out of the town ({} → {})", inside0, inside1);
+    }
+
     /// Run `ticks` fixed steps. Tallies this-tick events (step() clears them each call), samples populations, and
     /// tracks the `track` kind's travelled PATH + start→end NET so callers can compute thrash = path / net.
     fn run(w: &mut World, ticks: usize, track: Kind) -> (Trace, f64, f64) {
@@ -3977,6 +4125,27 @@ mod tests {
         let spread1 = spread(&w, Kind::Person);
         eprintln!("[blob-disperse] person spread {:.0} m → {:.0} m", spread0, spread1);
         assert!(spread1 > spread0 * 1.5, "a dense human blob should disperse, stayed clumped ({:.0}→{:.0} m)", spread0, spread1);
+    }
+
+    // SCENARIO: a dense RABBIT blob SPREADS OUT over time + the densest local crowd drops sharply. This guards the
+    // dispersal drive AND documents its ceiling: a residual ~family-sized core (~10 in 4 m) is the floor we accept,
+    // because pushing harder collapses the emergent boldness polymorphism (see the gain-floor NOTE in `flock`).
+    #[test]
+    fn scenario_rabbits_blob_disperses() {
+        // max rabbits within 4 m of ANY rabbit — the LOCAL crowd, what drives the near-count. Bounding-box spread can
+        // grow on a few escapees while a dense CORE persists, so measure the core directly.
+        let max_local = |w: &World| -> usize {
+            let r: Vec<(f64, f64)> = w.agents.iter().filter(|m| m.kind == Kind::Rabbit && !m.dead).map(|m| (m.agent.x, m.agent.z)).collect();
+            r.iter().map(|&(x, z)| r.iter().filter(|&&(ox, oz)| (ox - x).hypot(oz - z) < 4.0).count()).max().unwrap_or(0)
+        };
+        let mut w = mw();
+        cluster(&mut w, Kind::Rabbit, 60, 0.0, 0.0, 5.0, 2000);
+        let (spread0, dense0) = (spread(&w, Kind::Rabbit), max_local(&w));
+        run(&mut w, 1500, Kind::Rabbit); // ≈50 s
+        let (spread1, dense1) = (spread(&w, Kind::Rabbit), max_local(&w));
+        eprintln!("[rabbit-blob-disperse] spread {:.0}→{:.0} m | densest local crowd {dense0}→{dense1}", spread0, spread1);
+        assert!(spread1 > spread0 * 1.8, "the blob should spread out ({:.0}→{:.0} m)", spread0, spread1);
+        assert!(dense1 < dense0 / 2, "the dense core must at least HALVE ({dense0}→{dense1})"); // 37→~10
     }
 
     // SCENARIO: a sizable human settlement must SUSTAIN over time, not boom-bust to near-extinction (the user's
@@ -4200,15 +4369,15 @@ mod tests {
             .collect();
         let dist = |w: &World, i: usize| w.agents[i].agent.x.hypot(w.agents[i].agent.z);
         let far0 = ids.iter().map(|&i| dist(&w, i)).fold(0.0, f64::max);
-        for t in 1..=4500 {
-            w.tick_once(t); // ~150 s — long enough for pioneers to clear the town and travel out
+        for t in 1..=12000 {
+            w.tick_once(t); // ~400 s — long enough for a committed pioneer to actually reach the far founding gap
         }
         let live: Vec<usize> = ids.iter().copied().filter(|&i| !w.agents[i].dead).collect();
         let far1 = live.iter().map(|&i| dist(&w, i)).fold(0.0, f64::max);
         let town_pop = live.iter().filter(|&&i| dist(&w, i) < 30.0).count(); // who's still packed in the town
         let out = live.iter().filter(|&&i| dist(&w, i) > 120.0).count(); // who pioneered well clear of it
         eprintln!("[pioneer] furthest {far0:.0}→{far1:.0} m; town(<30m) {town_pop}, pioneered(>120m) {out} of {} live", live.len());
-        assert!(far1 > far0 + 150.0, "surplus people should pioneer far OUTWARD ({far0:.0}→{far1:.0} m)");
+        assert!(far1 > 350.0, "committed pioneers should travel to the FAR founding gap, not stall in a close halo ({far0:.0}→{far1:.0} m)");
         assert!(out >= 3, "several surplus people should clear the town to found new ground (got {out})");
         assert!(town_pop < live.len(), "the town should shed its surplus, not keep everyone packed in");
     }

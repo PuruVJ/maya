@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { emptyWorld, type World, type WorldObject } from './world';
-import { regionOf, regionKey, activeKeys, collapseRegion, wakeRegion, streamRegions, enforceLiveBudget, REGION_SIZE } from './streaming';
+import { regionOf, regionKey, activeKeys, collapseRegion, wakeRegion, streamRegions, drainWakes, enforceLiveBudget, fastForwardDormant, fastForwardDormantAway, trimDormantOvershoot, REGION_SIZE } from './streaming';
+import { heightAt } from './terrain';
+import { math } from './math';
 
 // Build a world with `n` creatures of `kind` clustered around a region's centre.
 function withCreatures(kind: string, n: number, cx: number, cz: number, w: World = emptyWorld('t')): World {
@@ -41,15 +43,16 @@ describe('sleep / wake', () => {
 		expect(w.regions?.['5,0']?.lastTick).toBe(100);
 	});
 
-	it('a static structure round-trips verbatim through sleep→wake (same id + position)', () => {
+	it('a static structure round-trips through sleep→wake (same id + x/z), RE-GROUNDED to the terrain on wake', () => {
 		const w = emptyWorld('t');
-		w.objects.push({ id: 'h7', kind: 'tower', pos: [8 * REGION_SIZE + 5, 3, 9], keep: true } as WorldObject);
+		w.objects.push({ id: 'h7', kind: 'tower', pos: [8 * REGION_SIZE + 5, 3, 9], keep: true } as WorldObject); // Y=3 is a stale/wrong height here
 		streamRegions(w, 10, 10, 0); // player at origin → region 8,0 sleeps (the tower offloads)
 		expect(w.objects.length).toBe(0);
 		streamRegions(w, 8 * REGION_SIZE + 10, 10, 0); // walk there → wakes
 		const tower = w.objects.find((o) => o.kind === 'tower');
 		expect(tower?.id).toBe('h7'); // exact id preserved (durable)
-		expect(tower?.pos).toEqual([8 * REGION_SIZE + 5, 3, 9]); // exact position preserved
+		expect([tower?.pos[0], tower?.pos[2]]).toEqual([8 * REGION_SIZE + 5, 9]); // exact x/z preserved
+		expect(tower?.pos[1]).toBeCloseTo(heightAt(8 * REGION_SIZE + 5, 9, w.terrain)); // Y re-grounded on wake (no float, even from a stale saved Y)
 	});
 
 	it('wakeRegion re-materialises the population (count conserved without fast-forward)', () => {
@@ -163,21 +166,190 @@ describe('sleep / wake', () => {
 		expect(creatures(w, 'rabbit').length).toBe(24);
 	});
 
-	it('a settlement FENCE survives the sleep→wake round-trip verbatim (it is a durable static, not regenerated)', () => {
-		// The fence is fitted only on a structure add/remove, then STORED — never rebuilt when the player approaches.
-		// That only holds if the fence panels travel with their region into dormancy and come back unchanged. Guards
-		// against the fence vanishing (or needing a presence-driven rebuild) after you walk away from a town and return.
+	it('an INCREMENTAL (batched) wake conserves the population even when the player crosses back OUT mid-wake', () => {
+		// THE WAKE-STORM FIX GUARD. The whole population must NOT pop in on one frame, AND no creature may be lost if the
+		// player leaves a half-woken region. Conservation invariant throughout: (live creatures here) + (pending in agg) = 36.
+		const w = emptyWorld('t');
+		w.regions = { '5,0': { counts: { rabbit: 30, lion: 6 }, gene: 1.2, statics: [], lastTick: 0 } };
+		const total = 36;
+		const liveHere = () => creatures(w).filter((o) => regionKey(...regionOf(o.pos[0], o.pos[2])) === '5,0').length;
+		const pending = () => {
+			const c = w.regions?.['5,0']?.counts ?? {};
+			let n = 0;
+			for (const k in c) n += c[k];
+			return n;
+		};
+		// drain in batches of ≤5 a FEW times — each call materialises at most 5, the running live total never exceeds 36,
+		// and live + pending stays exactly 36 the whole way (nothing is created or destroyed, only moved pending → live).
+		let prevLive = 0;
+		for (let step = 0; step < 3; step++) {
+			const made = wakeRegion(w, '5,0', 0, 'rg', 5);
+			expect(made).toBeLessThanOrEqual(5); // batched, never the whole population at once
+			expect(liveHere()).toBeLessThanOrEqual(total);
+			expect(liveHere()).toBe(prevLive + made); // monotonic — only adds, never drops
+			expect(liveHere() + pending()).toBe(total); // CONSERVATION invariant holds at every step
+			prevLive = liveHere();
+		}
+		expect(liveHere()).toBeGreaterThan(0);
+		expect(liveHere()).toBeLessThan(total); // genuinely mid-wake — not yet fully materialised
+		// PLAYER CROSSES BACK OUT mid-wake → collapse the region. The live (materialised) creatures must merge back into
+		// the aggregate's PENDING, so the grand total is conserved with ZERO loss.
+		collapseRegion(w, '5,0', 0);
+		expect(liveHere()).toBe(0); // all live creatures left the world (collapsed into the aggregate)
+		expect(pending()).toBe(total); // …and the aggregate now holds EVERYONE again — nothing lost across the cross-out
+		// walk back in + drain fully → the original 36 all materialise, with unique ids (no dupes).
+		while (w.regions?.['5,0']) wakeRegion(w, '5,0', 0, 'rg', 5);
+		expect(liveHere()).toBe(total); // full population restored
+		expect(w.regions?.['5,0']).toBeUndefined(); // aggregate cleared once fully awake
+		expect(new Set(creatures(w).map((o) => o.id)).size).toBe(creatures(w).length); // ids unique → no duplicate materialise
+	});
+
+	it('drainWakes materialises a few creatures/frame from active regions (the per-frame WAKE-STORM drainer)', () => {
+		// streamRegions with wakeBatch 0 does SETUP only (no creatures); drainWakes then dribbles them in over frames.
+		const w = withCreatures('rabbit', 40, 8, 0); // far region 8,0
+		streamRegions(w, 10, 10, 0); // player at origin → region 8,0 sleeps (full wake on the default-Infinity path)
+		expect(creatures(w).length).toBe(0);
+		expect(w.regions?.['8,0']?.counts.rabbit).toBe(40);
+		// SETUP-only crossing into 8,0: fast-forward/statics happen, but ZERO creatures materialise this frame.
+		streamRegions(w, 8 * REGION_SIZE + 10, 10, 0, 'rg', 0);
+		expect(creatures(w).length).toBe(0); // no WAKE-STORM — nothing popped in on the crossing frame
+		expect(w.regions?.['8,0']).toBeTruthy(); // still dormant (now mid-wake), counts are the pending pool
+		// drain a few frames at batch 5 → ~5/frame, smoothly, until the region is fully awake.
+		let total = 0;
+		for (let frame = 0; frame < 8; frame++) total += drainWakes(w, 8 * REGION_SIZE + 10, 10, 0, 'rg', 5);
+		expect(total).toBe(40); // all 40 materialised across the frames
+		expect(creatures(w, 'rabbit').length).toBe(40);
+		expect(w.regions?.['8,0']).toBeUndefined(); // fully awake → aggregate cleared
+	});
+
+	it('perimeter FENCES are never restored on wake (they were ripped out — cosmetic; colony-fear excludes animals)', () => {
+		// Automatic fencing was removed: a wall around a growing/streaming cluster churned endlessly for zero gameplay
+		// (animals never collided with it). A fence baked into an OLD aggregate must NOT come back when its region wakes —
+		// the home does, the fence stays gone. Guards the wakeRegion fence-skip + the +page load strip.
 		const w = emptyWorld('t');
 		w.objects.push({ id: 'h0', kind: 'house', pos: [8 * REGION_SIZE + 20, 0, 10] } as WorldObject); // a home in region 8,0
 		const fence = { id: 'fc-1', kind: 'fence', pos: [8 * REGION_SIZE + 28, 0, 10], rot: 90, scale: [4, 1, 1] } as WorldObject;
 		w.objects.push(fence);
-		streamRegions(w, 10, 10, 0); // player at origin → region 8,0 sleeps; home + fence → aggregate statics
+		streamRegions(w, 10, 10, 0); // player at origin → region 8,0 sleeps; home + (legacy) fence → aggregate statics
 		expect(w.objects.find((o) => o.kind === 'fence')).toBeUndefined(); // not live anymore
-		expect(w.regions?.['8,0']?.statics.some((s) => s.id === 'fc-1')).toBe(true); // preserved verbatim
 		streamRegions(w, 8 * REGION_SIZE + 10, 10, 0); // walk back → region wakes
-		const back = w.objects.find((o) => o.id === 'fc-1');
-		expect(back).toBeTruthy(); // the SAME fence panel is back…
-		expect(back!.pos).toEqual([8 * REGION_SIZE + 28, 0, 10]); // …at the exact same spot (no regeneration, no drift)
-		expect(back!.rot).toBe(90);
+		expect(w.objects.find((o) => o.id === 'fc-1')).toBeUndefined(); // fence STAYS gone (skipped on wake)
+		expect(w.objects.find((o) => o.id === 'h0')).toBeTruthy(); // …but the home is restored as normal
+	});
+});
+
+// PEOPLE ↔ HOUSES coupling: a region's people are tied to ITS OWN houses, so a grown/returned world is BALANCED
+// (people ≈ what houses support) + SPREAD, not 1100 people crammed into a few towns with ~20 houses.
+describe('people ↔ houses coupling', () => {
+	beforeAll(async () => {
+		await math.init(); // pop_caps / ff_targets / world_area_scale come from the wasm math
+	});
+
+	// Build a dormant region aggregate in cell (cx,cz) with a given person count + house count.
+	const dormant = (cx: number, cz: number, person: number, houses: number): World => {
+		const w = emptyWorld('t');
+		const statics: WorldObject[] = [];
+		for (let i = 0; i < houses; i++) statics.push({ id: `h${cx}_${cz}_${i}`, kind: 'house', pos: [cx * REGION_SIZE + i, 0, cz * REGION_SIZE] } as WorldObject);
+		w.regions = { [regionKey(cx, cz)]: { counts: { person, rabbit: 10 }, gene: 1, statics, lastTick: 0 } };
+		return w;
+	};
+
+	it('B: trimDormantOvershoot drops an UNHOUSED region to a tiny nomad count', () => {
+		const w = dormant(5, 5, 200, 0); // 200 people, ZERO houses → wild land, not a settlement
+		const cut = trimDormantOvershoot(w);
+		expect(cut).toBeGreaterThan(150);
+		expect(w.regions!['5,5'].counts.person).toBeLessThanOrEqual(3); // clamped to nomads
+		expect(w.regions!['5,5'].counts.rabbit).toBe(10); // wildlife untouched — only people are trimmed
+	});
+
+	it('B: trimDormantOvershoot caps a SETTLED region to its house-built person cap (not the 1100 overshoot)', () => {
+		const w = dormant(5, 5, 600, 10); // 600 people but only 10 houses → must drop toward the 10-house cap
+		const cut = trimDormantOvershoot(w);
+		const left = w.regions!['5,5'].counts.person;
+		expect(cut).toBeGreaterThan(0);
+		expect(left).toBeLessThan(600); // overshoot trimmed
+		expect(left).toBeGreaterThan(3); // …but it IS a settlement, so it keeps a real (housed) population, not nomads
+	});
+
+	it('B: only trims DOWN — a region already within its house cap is left alone (idempotent)', () => {
+		const w = dormant(5, 5, 5, 10); // a small, well-housed population (under cap)
+		expect(trimDormantOvershoot(w)).toBe(0);
+		expect(w.regions!['5,5'].counts.person).toBe(5);
+		expect(trimDormantOvershoot(w)).toBe(0); // second pass is a no-op (already balanced)
+	});
+
+	it('B: fastForwardDormantAway catches up the DORMANT far world on load (frozen-while-closed fix)', () => {
+		// "came back hours later, the world was STUCK" — the dormant pulse advances by SIM ticks, frozen while the app is
+		// closed, so far settlements sat frozen on return. The load-time away catch-up must develop them by wall-clock.
+		const w = emptyWorld('t');
+		const statics: WorldObject[] = [];
+		for (let i = 0; i < 3; i++) statics.push({ id: `h${i}`, kind: 'house', pos: [i * 8, 0, 0] } as WorldObject);
+		w.regions = { '0,0': { counts: { person: 8, rabbit: 5 }, gene: 1, statics, lastTick: 0 } };
+		const homes = () => w.regions!['0,0'].statics.filter((s) => s.kind === 'house' || s.kind === 'cabin').length;
+		const h0 = homes();
+		const p0 = w.regions['0,0'].counts.person;
+		fastForwardDormantAway(w, 8 * 3600 * 1000); // 8 hours away
+		expect(w.regions['0,0'].counts.person).toBeGreaterThan(p0); // far population caught up toward capacity
+		expect(homes()).toBeGreaterThan(h0 + 4); // …and the far town DEVELOPED (the spiral, not just +6 once)
+	});
+
+	it('REPRO: offloaded settlement people must NOT be NOMAD-trimmed when their houses are still live', () => {
+		// THE "30+ people all died" BUG. enforceLiveBudget offloads the FARTHEST people to a dormant aggregate, but the
+		// settlement's HOUSES (a SEPARATE budget) stay live → that aggregate has people + ZERO statics → the dormant FF
+		// saw builds=0 ("wild land") and NOMAD-clamped the people to 3, deleting the settlement's offloaded population a
+		// few at a time as the player moved ("plucked off"). The FF must not DESTROY existing people, only refuse to GROW
+		// them on truly houseless land.
+		const w = emptyWorld('t');
+		for (let i = 0; i < 30; i++) w.objects.push({ id: `p${i}`, kind: 'person', pos: [10 + (i % 5), 0, 10], gene: 1 } as WorldObject);
+		for (let i = 0; i < 6; i++) w.objects.push({ id: `h${i}`, kind: 'house', pos: [10 + i, 0, 12] } as WorldObject);
+		enforceLiveBudget(w, 0, 0, 0, 0, 50); // creatureBudget 0 → people offload; structBudget 50 → houses stay live
+		expect(w.regions!['0,0'].counts.person).toBe(30);
+		fastForwardDormant(w, 600); // the world pulse must CONSERVE them, not clamp to 3
+		const left = (w.regions?.['0,0']?.counts.person ?? 0) + w.objects.filter((o) => o.kind === 'person').length;
+		expect(left).toBeGreaterThanOrEqual(30); // the settlement's people survive (conserved), not plucked to a nomad count
+	});
+
+	it('B: a dormant SETTLEMENT develops — builds new homes as its population grows (far-town growth)', () => {
+		// a 3-home hamlet with a population that outstrips its houses → fast-forward should BUILD more homes (not just
+		// relax population), so a far town becomes a city over time, not only the live one you're standing in.
+		const w = emptyWorld('t');
+		const statics: WorldObject[] = [];
+		for (let i = 0; i < 3; i++) statics.push({ id: `h${i}`, kind: 'house', pos: [i * 8, 0, 0] } as WorldObject);
+		w.regions = { '0,0': { counts: { person: 40, rabbit: 5 }, gene: 1, statics, lastTick: 0 } };
+		const homes = (r: World) => r.regions!['0,0'].statics.filter((s) => s.kind === 'house' || s.kind === 'cabin').length;
+		const before = homes(w);
+		fastForwardDormant(w, 600); // ~20 s later
+		expect(homes(w)).toBeGreaterThan(before); // the far town built new homes on its own
+		// a WILD region (1 house, below the settlement threshold) does NOT develop — only real settlements build out
+		const wild = emptyWorld('t');
+		wild.regions = { '0,0': { counts: { person: 40 }, gene: 1, statics: [{ id: 'h0', kind: 'house', pos: [0, 0, 0] } as WorldObject], lastTick: 0 } };
+		fastForwardDormant(wild, 600);
+		expect(wild.regions!['0,0'].statics.filter((s) => s.kind === 'house').length).toBe(1); // unchanged
+	});
+
+	it('B: snaps an OVERSHOT wildlife base down to the current density caps (calm-vicinity reload)', () => {
+		// A world saved at the OLD dense base — a wild tile packed far past the new carrying capacity. Reload must snap
+		// it to capacity so the near vicinity loads calm, not at the stale ~110-per-tile pack.
+		const w = emptyWorld('t');
+		w.regions = { '0,0': { counts: { rabbit: 300, kangaroo: 200, cat: 150, person: 0 }, gene: 1, statics: [], lastTick: 0 } };
+		trimDormantOvershoot(w);
+		const c = w.regions['0,0'].counts;
+		expect(c.rabbit).toBeLessThan(300); // prey clamped to its density cap
+		expect(c.kangaroo).toBeLessThan(200);
+		expect(c.cat).toBeLessThanOrEqual(Math.round(c.rabbit * 0.3) + 1); // predator shares off the CLAMPED prey, not the old 300
+		expect(c.rabbit).toBeGreaterThan(0); // …but never wiped — it relaxes to capacity, doesn't go extinct
+	});
+
+	it('A: fastForwardDormant does NOT grow/re-seed people on UNHOUSED land (no wild-region person boom)', () => {
+		const w = dormant(5, 5, 1, 0); // one lone wanderer, no houses
+		fastForwardDormant(w, 30 * 60 * math.tickHz()); // 30 sim-minutes of dormant pulse
+		expect(w.regions!['5,5'].counts.person).toBeLessThanOrEqual(3); // stayed nomadic — no re-seed to ~38
+		expect(w.regions!['5,5'].counts.rabbit).toBeGreaterThan(10); // …but rabbits DID grow (wildlife belongs in the wild)
+	});
+
+	it('A: fastForwardDormant DOES grow people in a HOUSED region (toward its house cap)', () => {
+		const w = dormant(5, 5, 4, 20); // a real settlement, room to grow
+		fastForwardDormant(w, 6 * 3600 * math.tickHz()); // 6 sim-hours away
+		expect(w.regions!['5,5'].counts.person).toBeGreaterThan(4); // the housed region's people grew
 	});
 });

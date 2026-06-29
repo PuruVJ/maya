@@ -6,6 +6,7 @@
 	import { llm } from '$lib/llm.svelte';
 	import { playerState } from '$lib/playerState.svelte';
 	import { applyOps } from '$lib/engine';
+	import { eventLog } from '$lib/eventLog.svelte';
 	import { cityOps, isCityCommand, forestOps, isForestCommand, lakeOps, isLakeCommand } from '$lib/city';
 	import { history } from '$lib/history.svelte';
 	import { editor } from '$lib/editor.svelte';
@@ -83,6 +84,26 @@
 	// The model emits whole compound/CRUD chains in one shot (verified: Qwen2.5-1.5B 7/7 on the
 	// compound battery at temp 0.3), so one call per instruction — later ops reference earlier ones
 	// within the same batch (the engine applies them in order).
+	// LOG the player's OWN builds to the settlement chronicle (EventLog) — so "adding a structure automatically counts"
+	// alongside the sim's settler builds. Summarised per command (one line per kind, with a count), and limited to the
+	// human/settlement beats (homes, towers, wells, newcomers) — wildlife + props stay out, matching the feed's filter.
+	const BUILD_LINE: Record<string, { icon: string; one: string; many: (n: number) => string }> = {
+		house: { icon: '🏠', one: 'a house was built', many: (n) => `${n} houses were built` },
+		cabin: { icon: '🛖', one: 'a cabin was built', many: (n) => `${n} cabins were built` },
+		manor: { icon: '🏰', one: 'a manor was built', many: (n) => `${n} manors were built` },
+		tower: { icon: '🗼', one: 'a watchtower rose', many: (n) => `${n} watchtowers rose` },
+		well: { icon: '⛲', one: 'a well was dug', many: (n) => `${n} wells were dug` },
+		person: { icon: '🧍', one: 'a newcomer settled here', many: (n) => `${n} people settled here` }
+	};
+	function logBuilds(ops: { op: string; kind?: string; count?: number }[]): void {
+		const tally: Record<string, number> = {};
+		for (const o of ops) if (o.op === 'add' && o.kind) tally[o.kind] = (tally[o.kind] ?? 0) + (o.count ?? 1);
+		for (const kind in tally) {
+			const d = BUILD_LINE[kind];
+			if (d) eventLog.note(d.icon, tally[kind] > 1 ? d.many(tally[kind]) : d.one);
+		}
+	}
+
 	async function run(instruction: string, temperature = 0.3) {
 		const p = player();
 		const ops = await llm.generate(instruction, world, p, temperature);
@@ -108,6 +129,7 @@
 		}
 		const out = { conflicts: [] as { label: string; blockers: string[] }[] };
 		applyOps(world, actionable, p, out);
+		logBuilds(actionable); // record the player's homes/wells/newcomers in the chronicle
 		const ids = [...new Set(out.conflicts.flatMap((c) => c.blockers))];
 		pending = ids.length ? { ids, label: out.conflicts[0].label } : null;
 		return true;
@@ -152,6 +174,7 @@
 		if (isCityCommand(cmd)) {
 			history.push(world);
 			applyOps(world, cityOps(world, player()), player());
+			eventLog.note('🏙️', 'a city took shape');
 			lastInstruction = '';
 			canReroll = false;
 			note = 'Built a city — say “make city” again to grow it bigger.';
@@ -160,6 +183,7 @@
 		if (isForestCommand(cmd)) {
 			history.push(world);
 			applyOps(world, forestOps(world, player()), player());
+			eventLog.note('🌲', 'a forest was planted');
 			lastInstruction = '';
 			canReroll = false;
 			note = 'Planted a forest — say “make forest” again to grow it.';
@@ -168,6 +192,7 @@
 		if (isLakeCommand(cmd)) {
 			history.push(world);
 			applyOps(world, lakeOps(world, player()), player());
+			eventLog.note('💧', 'a lake was dug');
 			lastInstruction = '';
 			canReroll = false;
 			note = 'Dug a lake — say “make lake” again to widen it.';
@@ -187,6 +212,7 @@
 	function place(kind: string) {
 		history.push(world);
 		applyOps(world, [{ op: 'add', kind, at: 'front', dist: 4 }], player());
+		logBuilds([{ op: 'add', kind }]);
 		canReroll = false;
 		note = null;
 	}

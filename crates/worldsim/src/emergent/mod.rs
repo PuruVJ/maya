@@ -117,7 +117,8 @@ pub fn decide(world: &mut World, px: f64, pz: f64, pspeed: f64, danger2: f64, hu
         if !world.player_immune && rank >= 4 && crowd < 3 && a_hunts && world.agents[i].hungry && can_sprint && !mobbed && world.agents[i].spooked <= 0.0 && threat_pos.is_none() {
             let dp2 = (px - ax).powi(2) + (pz - az).powi(2);
             let reach = 15.0 * (1.0 + 0.6 * world.night);
-            let prey_d2 = prey_info.map_or(f64::INFINITY, |(_, prx, prz, _)| (prx - ax).powi(2) + (prz - az).powi(2));
+            // cached in target() (same prey, same pre-step (ax,az)); INFINITY when no prey → identical to the map_or
+            let prey_d2 = world.transient[i].prey_d2;
             if dp2 < reach * reach && dp2 < prey_d2 * 0.81 {
                 menace_ok = true;
                 menace_frac = 1.0 - dp2.sqrt() / reach;
@@ -144,8 +145,13 @@ pub fn decide(world: &mut World, px: f64, pz: f64, pspeed: f64, danger2: f64, hu
         // ── score the primitives ─────────────────────────────────────────────────────────────────────────
         let is_carnivore = a_hunts;
         let needs = Needs::assess(world.agents[i].energy, world.agents[i].stamina, flee_frac, crowd, is_carnivore, world.agents[i].hungry);
-        // how close the chosen prey is (0 far … 1 adjacent) → the Hunt commit bonus, mirroring the manual lunge
-        let prey_close = prey_info.map_or(0.0, |(_, prx, prz, _)| (1.0 - (prx - ax).hypot(prz - az) / super::SEEK).clamp(0.0, 1.0));
+        // how close the chosen prey is (0 far … 1 adjacent) → the Hunt commit bonus, mirroring the manual lunge.
+        // The prey distance is cached (hypot, computed in target()) — same op, same inputs → bit-identical.
+        let prey_close = if prey_info.is_some() {
+            (1.0 - world.transient[i].prey_dist / super::SEEK).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let opts = Options {
             threat: has_flee && (threat_pos.is_some() || mobbed),
             threat_frac: flee_frac,
@@ -214,7 +220,7 @@ pub fn decide(world: &mut World, px: f64, pz: f64, pspeed: f64, danger2: f64, hu
                 if let Some((p, prx, prz, pr)) = prey_info {
                     let dx = prx - ax;
                     let dz = prz - az;
-                    let d = dx.hypot(dz).max(0.1);
+                    let d = world.transient[i].prey_dist.max(0.1); // cached hypot from target() → bit-identical
                     let close = d * d < hunt2;
                     world.forces[i].0 += (dx / d) * a_max * super::CHASE_W;
                     world.forces[i].1 += (dz / d) * a_max * super::CHASE_W;

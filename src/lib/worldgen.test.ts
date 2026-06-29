@@ -8,6 +8,8 @@ import { math } from './math';
 import type { WorldObject, Path, World, Player } from './world';
 import type { Op } from './engine';
 import { inWater } from './water';
+import { forestOps as binForestOps, lakeOps as binLakeOps, cityOps as binCityOps } from './city';
+import { settlementPlan as binTownPlan } from './settlementPlanner';
 
 // ── REFERENCE algorithm (verbatim from the pre-port settlementPlanner.ts) — the spec the Rust port must match ──
 type Size = 'hamlet' | 'village' | 'town' | 'city';
@@ -112,24 +114,17 @@ describe('world-gen parity (JS reference ↔ Rust port)', () => {
 		{ size: 'city', cx: 640, cz: 240, seed: 99991 }
 	];
 
+	// INTEGRATION: the production BINARY settlementPlanner (wgTownPlan → unpack [radius,P,O,...] → rebuild ids/shapes)
+	// must reconstruct the SAME town as the reference — ids, kinds, positions, rot, scale, paths, radius.
 	for (const { size, cx, cz, seed } of cases) {
-		it(`settlement_plan matches the reference for a ${size}`, () => {
+		it(`binary settlementPlan matches the reference for a ${size}`, () => {
 			const ref = refPlan(cx, cz, size, seed, `t_`);
-			const got = math.settlementPlan(cx, cz, size, seed, `t_`);
-			expect(got, 'wasm settlementPlan').not.toBeNull();
-			if (!got) return;
+			const got = binTownPlan(cx, cz, size, seed, `t_`);
 			expect(got.objects.length, 'object count').toBe(ref.objects.length);
 			expect(got.paths.length, 'path count').toBe(ref.paths.length);
 			expect(Math.abs(got.radius - ref.radius), 'radius').toBeLessThan(POS_EPS);
-			ref.objects.forEach((o, i) => expectObjEqual(got.objects[i], o, `${size} obj#${i}`));
-			ref.paths.forEach((pp, i) => {
-				const g = got.paths[i];
-				expect(g.id, `${size} path#${i} id`).toBe(pp.id);
-				for (let k = 0; k < 3; k++) {
-					expect(Math.abs(g.from[k] - pp.from[k]), `${size} path#${i} from[${k}]`).toBeLessThan(POS_EPS);
-					expect(Math.abs(g.to[k] - pp.to[k]), `${size} path#${i} to[${k}]`).toBeLessThan(POS_EPS);
-				}
-			});
+			ref.objects.forEach((o, i) => expectObjEqual(got.objects[i], o, `${size} bin obj#${i}`));
+			ref.paths.forEach((pp, i) => expect(got.paths[i].id, `${size} bin path#${i} id`).toBe(pp.id));
 		});
 	}
 });
@@ -219,34 +214,32 @@ describe('forest/lake generator parity (JS reference ↔ Rust port)', () => {
 		}
 	];
 
-	for (const { name, world, player } of worlds) {
-		it(`forest_ops matches the reference — ${name}`, () => {
+	// INTEGRATION: the production binary city.ts wrappers (seed store → wgForest/wgLake → decodeGenOps) must produce
+	// the SAME engine Op[] as the JS REFERENCE algorithm — proves the whole no-JSON wiring end-to-end (real wasm, in node).
+	it('binary city.forestOps matches the reference forest path', () => {
+		for (const { name, world, player } of worlds) {
 			const ref = refForest(world, player);
-			const got = math.forestOps(JSON.stringify(world), player.pos[0], player.pos[2], player.yaw);
-			expect(got, 'wasm forestOps').not.toBeNull();
-			if (!got) return;
-			expect(got.length, `${name} op count`).toBe(ref.length);
-			ref.forEach((r, i) => opAddEq(got[i], r, `${name} #${i}`));
-		});
-	}
+			const got = binForestOps(world, player);
+			expect(got.length, `${name} count`).toBe(ref.length);
+			ref.forEach((r, i) => opAddEq(got[i], r, `${name} bin #${i}`));
+		}
+	});
 
-	it('lake_ops matches the reference — fresh + grow', () => {
-		const fresh = mkWorld();
-		const p: Player = { pos: [5, 0, 5], yaw: 1.2 };
-		expect(math.lakeOps(JSON.stringify(fresh), p.pos[0], p.pos[2], p.yaw)).toEqual(refLake(fresh, p));
-
+	it('binary city.lakeOps matches the reference lake path (grow + fresh)', () => {
 		const withLake = mkWorld([], [{ id: 'z3', material: 'water', pos: [5, 0, -10], size: 8 }] as World['zones']);
 		const p2: Player = { pos: [0, 0, 0], yaw: 0 };
-		const got = math.lakeOps(JSON.stringify(withLake), p2.pos[0], p2.pos[2], p2.yaw);
 		const ref = refLake(withLake, p2);
-		expect(got, 'grow-lake ops').not.toBeNull();
-		if (!got) return;
+		const got = binLakeOps(withLake, p2);
 		expect(got.length).toBe(ref.length);
-		expect(got[0]).toEqual(ref[0]); // remove the same id
-		// addZone: compare fields with epsilon on the size/pos
+		expect(got[0]).toEqual(ref[0]); // REMOVE: the slot→id mapping recovers the same zone id 'z3'
 		const a = got[1] as Extract<Op, { op: 'addZone' }>, b = ref[1] as Extract<Op, { op: 'addZone' }>;
 		expect(a.material).toBe(b.material);
 		expect(a.size).toBeCloseTo(b.size!, 9);
+		for (let k = 0; k < 3; k++) expect(a.pos![k]).toBeCloseTo(b.pos![k], 9);
+
+		const fresh = mkWorld();
+		const pf: Player = { pos: [5, 0, 5], yaw: 1.2 };
+		expect(binLakeOps(fresh, pf).length).toBe(refLake(fresh, pf).length);
 	});
 });
 
@@ -371,16 +364,15 @@ describe('city generator parity (JS reference ↔ Rust port)', () => {
 		}
 	];
 
-	for (const { name, world, player } of cases) {
-		it(`city_ops matches the reference — ${name}`, () => {
-			// the grow case also needs a centre-anchored path to exercise spoke removal
+	// INTEGRATION: the production binary city.ts wrapper (seed store → wgCity → decodeGenOps, water + removables as
+	// typed arrays) must produce the SAME engine Op[] as the JS REFERENCE algorithm — buildings, lamps, plaza, spokes, removes.
+	it('binary city.cityOps matches the reference city path', () => {
+		for (const { name, world, player } of cases) {
 			if (name.startsWith('grow')) world.paths = [{ id: 'p9', material: 'path', from: [0, 0, -16], to: [40, 0, -16], width: 4 }] as World['paths'];
 			const ref = refCity(world, player);
-			const got = math.cityOps(JSON.stringify(world), player.pos[0], player.pos[2], player.yaw);
-			expect(got, 'wasm cityOps').not.toBeNull();
-			if (!got) return;
-			expect(got.length, `${name} op count`).toBe(ref.length);
-			ref.forEach((r, i) => opEq(got[i], r, `${name} #${i}`));
-		});
-	}
+			const got = binCityOps(world, player);
+			expect(got.length, `${name} bin count`).toBe(ref.length);
+			ref.forEach((r, i) => opEq(got[i], r, `${name} bin #${i}`));
+		}
+	});
 });

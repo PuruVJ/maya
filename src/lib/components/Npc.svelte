@@ -77,7 +77,14 @@
 	// → a distant crowd stays varied instead of popping to uniform blue at the LOD boundary. Tracks paint.
 	$effect(() => {
 		managed.tint = SHIRT;
+		managed.skin = SKIN; // the instanced human renderer reads these per-part colours for a NORMAL walker
+		managed.pants = PANTS;
+		managed.hair = HAIR;
 	});
+	// A NORMAL walking person is drawn by InstancedCreatures (the big crowd win); this articulated Npc only takes
+	// over for the NUANCED states instancing can't carry (companion / corpse / asleep / pregnant belly / guardian
+	// machete / drinking crouch). Same predicate the instanced renderer filters on, so exactly one draws the person.
+	const NORMAL_INSTANCED = (m: ManagedAgent) => !m.companion && !m.dead && !m.asleep && !m.pregnant && !m.guardian && !m.drinking;
 
 	let group = $state<THREE.Group>();
 	let core = $state<THREE.Group>();
@@ -169,6 +176,17 @@
 		if (pregnant !== managed.pregnant) pregnant = managed.pregnant; // surfaced to the belly mesh (write only on flip)
 		if (guardian !== managed.guardian) guardian = managed.guardian; // surfaced to the machete mesh
 		if (drinking !== managed.drinking) drinking = managed.drinking; // surfaced to the drink crouch
+
+		// INSTANCED HAND-OFF: a NORMAL walker is drawn by InstancedCreatures, so hide this articulated body + skip the
+		// gait. Placed AFTER the nuanced-flag mirrors above (so the test sees this frame's truth) and after the dead
+		// branch returned, so the instant she turns pregnant / he grabs a machete / they crouch to drink, the next frame
+		// this predicate flips false and the articulated body takes over seamlessly. Registration + flag mirroring still
+		// ran, so the sim + far impostor stay correct for an instanced-normal person too.
+		if (NORMAL_INSTANCED(managed)) {
+			group.visible = false;
+			return;
+		}
+
 		// belly grows over gestation (render-side ramp; resets the moment she's no longer carrying — i.e. delivered)
 		if (pregnant) bellyGrow = Math.min(1, bellyGrow + dt / PREG_GROW_SECS);
 		else if (bellyGrow !== 0) bellyGrow = 0;

@@ -1,8 +1,6 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import Prop from './Prop.svelte';
-	import Fences from './Fences.svelte';
 	import Graves from './Graves.svelte';
 	import Rocks from './Rocks.svelte';
 	import Flowers from './Flowers.svelte';
@@ -41,6 +39,8 @@
 	import BuildingGlow from './BuildingGlow.svelte';
 	import MoveGhost from './MoveGhost.svelte';
 	import Critter from './Critter.svelte';
+	import InstancedCreatures from './InstancedCreatures.svelte';
+	import Profiler from './Profiler.svelte';
 	import SkyDome from './SkyDome.svelte';
 	import { SKY_FOG, kindDef } from '$lib/kinds';
 	import { forEachTreeNear, treeRadius, onPath } from '$lib/scatter';
@@ -50,10 +50,11 @@
 	import { vitals } from '$lib/vitals.svelte';
 	import { agentManager, CORPSE_DECAY_SECS } from '$lib/agents.svelte';
 	import { worldAreaScale } from '$lib/world';
-	import { streamRegions, regionOf, fastForwardDormant, enforceLiveBudget } from '$lib/streaming';
+	import { streamRegions, regionOf, fastForwardDormant, enforceLiveBudget, drainWakes } from '$lib/streaming';
 	import { quality } from '$lib/quality.svelte';
 	import { playerState } from '$lib/playerState.svelte';
 	import { heightAt } from '$lib/terrain';
+	import { packStructures, packWaterZones, kindStr, OP_STRIDE, OP_ADD } from '$lib/structpack';
 	import { waterSurfaceY, waterEdgeFactor } from '$lib/water';
 	import { nature } from '$lib/nature.svelte';
 	import { wind } from '$lib/wind';
@@ -213,20 +214,23 @@
 		sim.setWater([...ponds, ...wells]);
 	}
 
-	$effect(() => {
+	// STATIC obstacle / refuge / water rebuild. The OLD code ran this in a `$effect` keyed on `world.objects`, so it
+	// re-ran (a filter+map+box-math over EVERY object + a worker re-post — profiled ~40% of the main thread at 300
+	// objects) on ANY world change: a birth, a death→grave, a wandered creature, a fence panel. A hunt (constant
+	// creature churn) or a T-rex drop thus fired it every frame → the freeze + jank the user hit. Now it runs from a
+	// THROTTLED poll (useTask) gated on a cheap STRUCTURE FINGERPRINT — so creature/fence churn never triggers it, only
+	// a real structure add/remove/move does, at most a few times a second.
+	function rebuildStaticObstacles(): void {
 		const props: Obstacle[] = world.objects
-			// FENCES are NOT animal collision — the settlement-avoidance (Rust) is what keeps wildlife OUT, and a
-			// collidable wall only TRAPPED any creature caught inside when it went up (it'd jam against the inner face
-			// and mill there). Animals now get pushed cleanly out through the wall line; the PLAYER still collides with
-			// fences via its own push-out (Player.svelte), so the wall is still solid to you.
+			// FENCES are NOT animal collision — the settlement-avoidance (Rust) keeps wildlife OUT; a collidable wall
+			// only TRAPPED a creature caught inside. Animals are pushed cleanly out; the PLAYER still collides (Player.svelte).
 			.filter((o) => !CREATURES.has(o.kind) && o.kind !== 'fence')
 			.map((o) => {
 				const def = kindDef(o.kind);
 				const sx = o.scale?.[0] ?? 1;
 				const sz = o.scale?.[2] ?? 1;
 				const wall = def.parts[0];
-				// box-footprint kinds (houses/cabins) → ORIENTED BOX so animals hug walls / use streets like the
-				// player; round kinds stay circles. r = bounding radius so the obstacle grid still finds the box.
+				// box-footprint kinds (houses/cabins) → ORIENTED BOX so animals hug walls / use streets; round kinds stay circles.
 				if (wall && wall.geo === 'box') {
 					const hx = (wall.args[0] / 2) * sx;
 					const hz = (wall.args[2] / 2) * sz;
@@ -235,26 +239,30 @@
 				}
 				return { x: o.pos[0], z: o.pos[2], r: def.r * Math.max(sx, sz) };
 			});
-		// ponds are obstacles too — animals route AROUND water (the player may still wade in). The organic blob
-		// BULGES out to ~1.03× size at some angles, so the avoidance radius must be a bit bigger than `size` or
-		// animals wander onto the bulges (looked like "cats walking on the lake").
-		const ponds: Obstacle[] = (world.zones ?? [])
-			.filter((z) => z.material === 'water')
-			.map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
+		// ponds are obstacles too — animals route AROUND water. The organic blob bulges to ~1.03×, so pad the radius.
+		const ponds: Obstacle[] = (world.zones ?? []).filter((z) => z.material === 'water').map((z) => ({ x: z.pos[0], z: z.pos[2], r: z.size * 1.05 }));
 		baseObstacles = [...props, ...ponds];
-		// UNTRACK the player position: this effect rebuilds the STATIC obstacle list (filter+map over every world
-		// object), and it must run ONLY when the WORLD changes (a build/birth/stream) — NOT every frame the player
-		// moves. Reading playerState.pos directly made it a per-frame dep → rebuilding the whole obstacle list +
-		// onPath-culling every frame (profiled: ~40% of the main thread at 300 objects, scaling with object count →
-		// the "it got slow as my world grew" regression). Ongoing movement re-feeds via the THROTTLED useTask below.
-		untrack(() => feedObstacles(playerState.pos[0], playerState.pos[2]));
-		// WATER SOURCES (thirst): the same ponds are where animals drink — every creature must reach a bank to slake
-		// hydration or it dies of thirst. Changes only when a pond is added/removed.
-		feedWaterSources(); // ponds + settler-dug WELLS -> the sim drink sources (re-runs on each new well)
-		// REFUGES (flee-to-safety): the houses are where a threatened woman/child runs for cover (and where the
-		// guard men cluster). Feed their centres to the Rust sim; it changes only when a building is raised/removed.
-		sim.setRefuges(world.objects.filter((o) => BUILDING_KINDS.has(o.kind)).map((o) => ({ x: o.pos[0], z: o.pos[2] })));
-	});
+		feedObstacles(playerState.pos[0], playerState.pos[2]); // re-feed with the fresh static set (+ trees/ponds near player)
+		feedWaterSources(); // ponds + settler-dug WELLS → the sim's thirst drink-sources
+		sim.setRefuges(world.objects.filter((o) => BUILDING_KINDS.has(o.kind)).map((o) => ({ x: o.pos[0], z: o.pos[2] }))); // houses → flee-to / guard cluster
+	}
+	// Cheap fingerprint of the STRUCTURE set (non-creature, non-fence) + water zones — count + position + scale folded
+	// in, so it changes on any structure add / remove / move but NOT on creature wandering, births, deaths, or fence
+	// panel churn. Polled on a throttle below; a change → one rebuild. O(objects) but no box-math / worker post.
+	function structFingerprint(): number {
+		let n = 0;
+		let acc = 0;
+		for (const o of world.objects) {
+			if (CREATURES.has(o.kind) || o.kind === 'fence') continue;
+			n++;
+			acc += o.pos[0] * 3.1 + o.pos[2] * 7.7 + (o.scale?.[0] ?? 1) * 13;
+		}
+		for (const z of world.zones ?? []) if (z.material === 'water') acc += z.pos[0] + z.pos[2] * 1.3 + z.size;
+		return n * 1_000_003 + Math.round(acc * 16);
+	}
+	let lastStructFp = Number.NaN; // forces the first poll to build
+	let obstaclePollT = 1; // seconds since the last fingerprint poll (start high → build on frame 1)
+	const OBSTACLE_POLL = 0.25; // s between polls → a new structure becomes an obstacle within ¼ s (imperceptible)
 
 	// Reveal objects a few per frame so a big batch ("add 120 cats") mounts gradually instead of all at once
 	// (the hang). World-state is applied instantly (share/undo unaffected) — only the visual mount is
@@ -328,23 +336,25 @@
 	const BUILD_KEEP_R2 = 380 * 380; // with house/fence Props that mount/unmount as you move = the jitter the user hit)
 
 
-	// ── INCREMENTAL SETTLEMENT PLANNER (EF11) — a house cluster accretes town structure as it grows. The PROTECTIVE
-	// PERIMETER FENCE appears at 2 homes and RE-FITS every time a home is added, so a town is ALWAYS walled and the
-	// wall GROWS with it (user). Roads, a well/pond and watchtowers layer on at larger sizes (follow-up tiers). A LONE
-	// house (n<2) gets nothing — it stays exposed: the in-world incentive to migrate into a town or grow into one.
-	// Towns are ≥500 m apart (NEW_COLONY_GAP), so a 75 m gather + footprint-radius cleanup never touch a neighbour.
-	const fencePrefix = 'fc' + Math.random().toString(36).slice(2, 8) + '-';
-	let fenceN = 0;
-	let fenceInitDone = false; // ONE-TIME reconcile after load/reset: a demo or legacy settlement ships with homes but no
-	// wall (demoWorld.json has 2 homes, 0 fence), and event-driven fitting never fires for it. Fit once when homes first
-	// appear; settlement_ops is idempotent, so a world that already has its stored wall emits nothing (no regeneration).
+	// ── INCREMENTAL SETTLEMENT PLANNER (EF11) — a house cluster accretes town structure as it grows. NO PERIMETER FENCE:
+	// it was purely cosmetic (animals never collided with it — the colony FEAR / settlement-avoidance is what keeps
+	// wildlife out), and re-fitting a wall around a growing, streaming cluster churned endlessly (layers / half-built /
+	// fenceless-on-wake). Ripped out (user). Wells/roads still accrete; a LONE house (n<2) stays exposed.
+	// BINARY worldgen (A0, docs/world-data-architecture.md): every structure the binary ops add gets a unique id from
+	// ONE prefix; `idBySlot` maps a returned REMOVE slot (the store's SoA index from the last seed) back to its object id.
+	const structPrefix = 's' + Math.random().toString(36).slice(2, 8) + '-';
+	let structN = 0;
+	const idBySlot: string[] = [];
 	const RECHECK_MOVE2 = 6 * 6;
 	const CREATURE_KINDS = new Set(['person', 'cat', 'lion', 'rabbit', 'kangaroo', 'dinosaur']);
+	// immigration FLOORS order (must match worldgen::immigration_ops_bin) — a returned floorIdx indexes this.
+	const IMMIGRATION_KINDS = ['rabbit', 'kangaroo', 'person', 'cat', 'lion'];
 	let visible = $state<WorldObject[]>([]);
 	const shownIds = new Set<string>();
 	let lastRevealX = NaN;
 	let lastRevealZ = NaN;
 	let lastObjLen = -1;
+	let lastBudgetLen = -1; // object count at the last live-budget sweep — lets us skip the sweep while the set is stable
 	let lastRegion = ''; // player's region cell last frame → only stream when it changes (crossed a tile)
 	let lastPulseTick = 0; // last sim-tick we fast-forwarded the dormant world (the ~10 s "world pulse")
 	// LIGHTNING — the rainy 'fog' sky flickers with distant sheet lightning: a bright transient added to the
@@ -355,13 +365,43 @@
 	let reflashN = 0; // return strokes left in the current strike (real lightning FLICKERS, it doesn't single-flash)
 	let reflashCd = 0; // seconds to the next return stroke
 	useTask((dt) => {
-		// PERF (P3, docs/spread-redesign.md): build/well/grave/vegetation ops read only PLACED objects (buildings,
-		// wells, graves, trees) + zones — NEVER creatures or the terrain heightfield. Serialize that filtered payload
-		// ONCE per frame (memoised below) instead of JSON.stringify(world) — which copied every creature + the whole
-		// terrain array — at each call site. That whole-world stringify was the per-event main-thread HITCH the spread
-		// eased but didn't remove. (settlement_ops already filters; this extends the same pattern to the other ops.)
-		let _structJson: string | null = null;
-		const structWorld = () => (_structJson ??= JSON.stringify({ objects: world.objects.filter((o) => !CREATURES.has(o.kind)), zones: world.zones ?? [] }));
+		// BINARY worldgen (A0, docs/world-data-architecture.md): the worldgen ops read structures from a persistent
+		// binary StructureStore (in the wasm), NOT JSON.stringify(world). Seed it from world.objects' bounded structure
+		// set ONCE per frame (the first op that runs this frame), recording idBySlot so a returned REMOVE slot maps back
+		// to its object; pack the water zones once too. No JSON either direction; cost is O(local change), days-proof.
+		let _seeded = false;
+		const ensureSeeded = () => {
+			if (_seeded || !math.hasStore) return;
+			_seeded = true;
+			math.seedStructures(packStructures(world.objects, idBySlot));
+		};
+		let _zonesBin: Float64Array | null = null;
+		const zonesBin = () => (_zonesBin ??= packWaterZones(world.zones, (id) => math.waterSeed(id) ?? 0));
+		// apply a binary op stream [op(0=add,1=remove-slot), kind|slot, x, z, rot, sx, sy, sz, color]×n → world.objects.
+		const applyStructOps = (ops: Float64Array | null): number => {
+			if (!ops) return 0;
+			let adds = 0;
+			for (let i = 0; i + OP_STRIDE <= ops.length; i += OP_STRIDE) {
+				if (ops[i] === OP_ADD) {
+					const kind = kindStr(ops[i + 1]);
+					const x = ops[i + 2];
+					const z = ops[i + 3];
+					const o: WorldObject = { id: structPrefix + structN++, kind, pos: [x, heightAt(x, z, world.terrain), z], rot: ops[i + 4], scale: [ops[i + 5], ops[i + 6], ops[i + 7]] };
+					if (kind === 'well') o.keep = true; // settler wells survive habitation decay
+					if (ops[i + 8]) o.color = '#' + Math.round(ops[i + 8]).toString(16).padStart(6, '0');
+					world.objects.push(o);
+					adds++;
+				} else {
+					// OP_REMOVE: lane 1 = the store slot → the object id JS seeded at that index
+					const id = idBySlot[ops[i + 1]];
+					if (id !== undefined) {
+						const idx = world.objects.findIndex((o) => o.id === id);
+						if (idx >= 0) world.objects.splice(idx, 1);
+					}
+				}
+			}
+			return adds;
+		};
 
 		// REPRODUCTION: Rust bred new animals → turn each into a world-object (a baby of that kind), which mounts
 		// its renderer + spawns into the sim (as a maturing juvenile). The per-kind cap keeps this bounded.
@@ -374,45 +414,29 @@
 			}
 		}
 
-		// fence walls are (re)fitted ONLY when a STRUCTURE is added or removed (a build / well / decay) — NOT on a timer
-		// and NOT when the player approaches a settlement (user: "I hate that the fence is generated based on my
-		// presence; it should be around structure addition/removal"). This flag is set at each real structure mutation
-		// below; the wall fit at the end of the frame runs only if it's set. Region wake/sleep does NOT set it — a
-		// built fence is a durable static that travels with its region into/out of dormancy, so it's already correct.
-		let fenceDirty = false;
-
-		// EMERGENT CITIES — house placement is RUST now (worldgen::build_ops): colony rules (<=10/town, a new town >=500 m
-		// away), grave-avoidance, and a WATER MARGIN so a home never dips into the lake. JS applies the add ops + renders.
+		// EMERGENT CITIES — house placement is RUST (worldgen build_ops, now BINARY against the StructureStore): colony
+		// rules + FOUND_GAP + water margin. JS packs the settler positions, applies the returned add-ops.
 		const builds = sim.drainBuilds();
 		if (builds.length) {
-			const ops = math.buildOps(structWorld(), JSON.stringify(builds));
-			if (ops) {
-				for (const op of ops) {
-					if (op.op === "add" && op.pos) {
-						world.objects.push({ id: housePrefix + houseN++, kind: op.kind, pos: [op.pos[0], heightAt(op.pos[0], op.pos[2], world.terrain), op.pos[2]], scale: op.scale });
-						fenceDirty = true; // a new home → re-fit this town's wall
-					}
-				}
+			ensureSeeded();
+			const reqs = new Float64Array(builds.length * 2);
+			for (let i = 0; i < builds.length; i++) {
+				reqs[i * 2] = builds[i].x;
+				reqs[i * 2 + 1] = builds[i].z;
 			}
+			applyStructOps(math.wgBuild(reqs, zonesBin()));
 		}
-		// EMERGENT WELLS — placement is RUST now (worldgen::well_ops): grid-snapped, never in a lake, deduped. JS applies
-		// the add ops + re-runs feedWaterSources so the new wells join the thirst sim.
+		// EMERGENT WELLS — placement is RUST (worldgen well_ops, binary): grid-snapped, never in a lake, deduped. JS
+		// applies the add-ops + re-runs feedWaterSources so the new wells join the thirst sim.
 		const wells = sim.drainWells();
 		if (wells.length) {
-			const ops = math.wellOps(structWorld(), JSON.stringify(wells));
-			let placed = 0;
-			if (ops) {
-				for (const op of ops) {
-					if (op.op === "add" && op.pos) {
-						world.objects.push({ id: wellPrefix + wellN++, kind: "well", pos: [op.pos[0], heightAt(op.pos[0], op.pos[2], world.terrain), op.pos[2]], keep: true });
-						placed++;
-					}
-				}
+			ensureSeeded();
+			const reqs = new Float64Array(wells.length * 2);
+			for (let i = 0; i < wells.length; i++) {
+				reqs[i * 2] = wells[i].x;
+				reqs[i * 2 + 1] = wells[i].z;
 			}
-			if (placed) {
-				feedWaterSources();
-				fenceDirty = true; // a new well sits inside the walled set → the ring may extend to enclose it
-			}
+			if (applyStructOps(math.wgWell(reqs, zonesBin())) > 0) feedWaterSources();
 		}
 		// CORPSE REAPER: a body that's fully decayed (sunk into the earth, see Critter/Npc) is removed from the
 		// world — unmounting its renderer + despawning it from the Rust sim, and dropping it from the save. Keeps
@@ -427,12 +451,13 @@
 			}
 		});
 		if (deadPeople.length) {
-			// the ENGINE picks the grave site (dry plot outside the settlement, or null for a wild death) — Rust owns it,
-			// so it knows water → no more graves in lakes. Serialize the world ONCE for the batch (deaths are rare).
-			const wj = structWorld();
+			// the ENGINE picks the grave site (dry plot outside the settlement, or empty for a wild death) — Rust owns it,
+			// so it knows water → no graves in lakes. Reads the binary store (seeded once), no JSON.
+			ensureSeeded();
+			const zb = zonesBin();
 			for (const [dpx, dpz] of deadPeople) {
-				const r = math.graveSite(wj, dpx, dpz);
-				if (r) gravePts.push([r.x, r.z]);
+				const g = math.wgGrave(dpx, dpz, zb);
+				if (g && g.length >= 2) gravePts.push([g[0], g[1]]);
 			}
 		}
 		if (corpseReap.size > 0) {
@@ -494,22 +519,22 @@
 			const globalAvg = allN > 0 ? allGene / allN : 1; // fallback vigor for a species that's gone fully extinct
 			// the ENGINE decides the rescue (worldgen::immigration_ops): which deficient kinds, how many, rescued vigour,
 			// clustered near the player. We hand it the live counts gathered above; it returns add-creature ops (with gene).
-			const counts: Record<string, { n: number; geneSum: number }> = {};
-			for (const k in live) counts[k] = { n: live[k], geneSum: geneSum[k] ?? 0 };
-			const migOps = math.immigrationOps(JSON.stringify(counts), playerState.pos[0], playerState.pos[2], globalAvg, sim.tick());
-			if (migOps) {
-				for (const op of migOps) {
-					if (op.op === "add" && op.pos) world.objects.push({ id: migrantPrefix + migrantN++, kind: op.kind, pos: op.pos, gene: op.gene });
+			// counts → a flat [n, geneSum]×5 in FLOORS order (rabbit, kangaroo, person, cat, lion). BINARY: no JSON crossing.
+			const cbin = new Float64Array(10);
+			for (let i = 0; i < IMMIGRATION_KINDS.length; i++) {
+				cbin[i * 2] = live[IMMIGRATION_KINDS[i]] ?? 0;
+				cbin[i * 2 + 1] = geneSum[IMMIGRATION_KINDS[i]] ?? 0;
+			}
+			const migStream = math.wgImmigration(cbin, playerState.pos[0], playerState.pos[2], globalAvg, sim.tick());
+			if (migStream) {
+				for (let i = 0; i + 4 <= migStream.length; i += 4) {
+					world.objects.push({ id: migrantPrefix + migrantN++, kind: IMMIGRATION_KINDS[migStream[i]], pos: [migStream[i + 1], 0, migStream[i + 2]], gene: migStream[i + 3] });
 				}
 			}
 				// COLONY VEGETATION — placement is RUST now (worldgen::vegetation_ops): a broadleaf occasionally roots near a
 				// home so a town greens over time (bounded, never on a plot/tree/lake). Seeded by the tick for the gradual roll.
-				const vegOps = math.vegetationOps(structWorld(), sim.tick());
-				if (vegOps) {
-					for (const op of vegOps) {
-						if (op.op === "add" && op.pos) world.objects.push({ id: treePrefix + treeN++, kind: "tree", pos: [op.pos[0], heightAt(op.pos[0], op.pos[2], world.terrain), op.pos[2]], scale: op.scale });
-					}
-				}			// HABITATION DECAY: an emergent home that nobody lives in for too long is reclaimed — a town persists
+				ensureSeeded();
+				applyStructOps(math.wgVeg(sim.tick(), zonesBin()));			// HABITATION DECAY: an emergent home that nobody lives in for too long is reclaimed — a town persists
 			// only where people actually settle. PLAYER/LLM builds carry `keep` and are NEVER touched; a person
 			// within OCCUPY_R of a home resets its idle clock.
 			const humansAt: [number, number][] = [];
@@ -530,7 +555,6 @@
 					if (BUILDING_KINDS.has(o.kind) && !o.keep && (houseIdle.get(o.id) ?? 0) > DECAY_IDLE) {
 						world.objects.splice(i, 1);
 						houseIdle.delete(o.id);
-						fenceDirty = true; // a home was reclaimed → re-fit (shrink) this town's wall
 					}
 				}
 			}
@@ -622,12 +646,15 @@
 		const rkey = rcx + ',' + rcz;
 		if (rkey !== lastRegion) {
 			lastRegion = rkey;
-			streamRegions(world, px, pz, sim.tick());
-			// NB: deliberately NO fence re-fit on region wake. Re-fitting on every crossing re-ran settlement_ops
-			// (whole-world JSON → Rust) right as you approached a town — the freeze + "fences drawn on demand" the
-			// user hit. Fences are built ONCE (on a structure add/remove or the one-time load reconcile) and STORED;
-			// a settlement's wall travels with its region as a static and comes back verbatim, no recompute.
+			// SETUP-ONLY wake (wakeBatch 0): on a crossing, sleep the far regions + fast-forward/restore-statics the near
+			// ones, but materialise NO creatures this frame. The per-frame `drainWakes` below dribbles them in (~12/frame)
+			// so entering a region no longer WAKE-STORMs its whole population into one frame (visible jitter + pop-in).
+			streamRegions(world, px, pz, sim.tick(), 'rg', 0);
 		}
+		// PER-FRAME WAKE DRAINER — materialise a few pending creatures from each active region's aggregate every frame, so
+		// a region's population streams in smoothly over ~N frames instead of all at once on the crossing. No-op (0) once
+		// the active regions are fully awake. Runs alongside the world-pulse / live-budget block below (same px/pz/tick).
+		drainWakes(world, px, pz, sim.tick());
 		// WORLD PULSE: every ~10 s (300 sim ticks @30 Hz), fast-forward EVERY dormant region to now so the far world
 		// keeps living (grows toward carrying capacity + evolves) instead of freezing until visited. Cheap closed-form.
 		const simTick = sim.tick();
@@ -635,54 +662,20 @@
 			lastPulseTick = simTick;
 			fastForwardDormant(world, simTick);
 		}
-		// SETTLEMENT WALLS — placement COMPUTE lives in RUST (worldgen::settlement_ops; same engine that knows
-		// water/rocks → no fences-through-water). The fit runs ONLY when `fenceDirty` was set this frame by a real
-		// STRUCTURE add/remove (a settler raised a home, dug a well, or an empty home decayed) — NOT on a timer and NOT
-		// when you walk up to a town. The wall is thus a consequence of BUILDING, then STORED in world.objects: it
-		// travels with its region into dormancy as a static and comes back verbatim, so returning never regenerates it
-		// (user: "I hate the fence generated based on my presence — it should be around structure addition/removal").
-		// settlement_ops is idempotent (position-diff), so the one call reconciles every live town: adds the new town's
-		// panels, removes a decayed town's stale ones, leaves unchanged towns alone.
-		// ONE-TIME on load/reset: the moment homes are present, reconcile once so a demo/legacy town that shipped with no
-		// wall gets one. Idempotent → a town that already has its stored wall is untouched (NOT presence regeneration).
-		if (!fenceInitDone) {
-			for (const o of world.objects) {
-				if (o.kind === 'house' || o.kind === 'cabin' || o.kind === 'manor') {
-					fenceDirty = true; // request the one-time fit (init marked done below, ONLY once settlement_ops succeeds)
-					break;
-				}
-			}
-		}
-		if (fenceDirty) {
-			// settlement_ops only reads STRUCTURES (homes/towers/wells/rocks/fences) + water zones — so hand it ONLY
-			// those, not the whole world (hundreds of creatures + trees + flowers). Shrinks the JSON it stringifies +
-			// the Rust parses by ~10× → the per-call cost (which used to spike when you neared a town) stays small.
-			const fenceWorld = JSON.stringify({
-				objects: world.objects.filter((o) => o.kind === 'house' || o.kind === 'cabin' || o.kind === 'manor' || o.kind === 'tower' || o.kind === 'well' || o.kind === 'rock' || o.kind === 'fence'),
-				zones: world.zones ?? []
-			});
-			const ops = math.settlementOps(fenceWorld);
-			if (ops) {
-				fenceInitDone = true; // a settlement_ops call landed (wasm was ready) → the one-time load reconcile is done.
-				// (Before this, the init latched on frame 1 while wasm was still loading → ops was null → the demo never got walled.)
-				for (const op of ops) {
-					if (op.op === 'remove') {
-						const i = world.objects.findIndex((o) => o.id === op.id);
-						if (i >= 0) world.objects.splice(i, 1);
-					} else if (op.op === 'add' && op.pos) {
-						// SIT the panel on the ground (settlement_ops emits y=0; the terrain rolls past ~240 m → a panel at
-						// y=0 would bury). heightAt mirrors the renderer's ground, same as houses.
-						world.objects.push({ id: fencePrefix + fenceN++, kind: op.kind, pos: [op.pos[0], heightAt(op.pos[0], op.pos[2], world.terrain), op.pos[2]], rot: op.rot, scale: op.scale });
-					}
-				}
-			}
-		}
+		// (settlement perimeter walls were RIPPED OUT — they were cosmetic; the colony-FEAR, not a wall, keeps wildlife
+		// out. No more re-fitting a ring around a growing/streaming cluster. The Rust settlement_ops fitter is now dead.)
 		// HARD LIVE BUDGET — a MAX CAP, not a target (user): if the near area is densely packed past the per-class
 		// budgets, offload the FARTHEST excess into dormant aggregates — they leave the live set entirely (despawn from
 		// the Rust sim AND stop drawing, not just hide), and rejoin as you approach. CREATURES and STRUCTURES have
 		// SEPARATE budgets, so a structure-dense town never evicts distant wildlife to fit its own homes/fences/graves
 		// (that's what collapsed everything into the settlement). enforceLiveBudget early-outs when both are under cap.
-		enforceLiveBudget(world, px, pz, sim.tick());
+		// only re-run the sweep when the live set actually CHANGED (births / reveals / wake). Its O(objects) count
+		// pass runs every frame, but the result can't change while the object set is stable — and any addition bumps
+		// the length, so the sweep always runs before the set can grow past the cap (it can never silently overflow).
+		if (world.objects.length !== lastBudgetLen) {
+			enforceLiveBudget(world, px, pz, sim.tick());
+			lastBudgetLen = world.objects.length; // post-sweep length (it may have offloaded the farthest excess)
+		}
 		const objLen = world.objects.length;
 		if (objLen !== lastObjLen || Number.isNaN(lastRevealX) || (px - lastRevealX) ** 2 + (pz - lastRevealZ) ** 2 > RECHECK_MOVE2) {
 			lastRevealX = px;
@@ -719,6 +712,18 @@
 		}
 		// re-feed the near-forest trunks to the Rust collision as the player moves (coarse threshold — the 140m
 		// feed radius has margin, so animals always have the trees around them even before the next re-feed)
+		// STATIC obstacles / refuges / water: poll a cheap structure fingerprint on a throttle (NOT a reactive $effect
+		// on world.objects — that re-ran the whole rebuild on every birth/death/wander → the hunt + T-rex-drop jank).
+		// Only a real structure add/remove/move rebuilds; creature + fence churn is invisible to it.
+		obstaclePollT += dt;
+		if (obstaclePollT >= OBSTACLE_POLL) {
+			obstaclePollT = 0;
+			const fp = structFingerprint();
+			if (fp !== lastStructFp) {
+				lastStructFp = fp;
+				rebuildStaticObstacles();
+			}
+		}
 		if (Number.isNaN(lastTreeFeedX) || (px - lastTreeFeedX) ** 2 + (pz - lastTreeFeedZ) ** 2 > TREE_REFEED2) {
 			feedObstacles(px, pz);
 		}
@@ -778,7 +783,9 @@
 {/if}
 <Grass {world} />
 <AgentSystem />
+<Profiler />
 <AgentImpostors {world} />
+<InstancedCreatures {world} />
 <CreatureShadows {world} />
 <PlacedShadows {world} />
 <LampGlow {world} />
@@ -808,7 +815,6 @@
 {/each}
 
 <!-- all town walls in two instanced draw calls (no per-panel Prop/RigidBody) -->
-<Fences {world} />
 <!-- all cemetery headstones in four instanced draw calls -->
 <Graves {world} />
 <!-- all scattered boulders in two instanced draw calls (per-rock colour via instanceColor) -->

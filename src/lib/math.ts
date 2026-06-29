@@ -8,11 +8,96 @@
 // `math.pondsNear(...)`, `math.ffTargets(...)`, etc. Methods return the result, or a permissive sentinel (usually
 // null) if the wasm somehow isn't loaded yet (never a duplicated JS formula). Names say WHAT, not the technology.
 
-import type { WorldObject, Path } from './world';
-import type { Op } from './engine';
+
+/** The stateful StructureStore bridge (binary worldgen ops) — crates/worldsim/src/lib.rs `WorldGen`. Ops return a
+ *  flat Float64Array op stream [op(0=add,1=remove-slot), kind, x, z, rot, sx, sy, sz, color]×n; no JSON either way. */
+interface WorldGenWasm {
+	seed: (soa: Float64Array) => void;
+	well: (reqs: Float64Array, zones: Float64Array) => Float64Array;
+	build: (reqs: Float64Array, zones: Float64Array) => Float64Array;
+	grow_dormant: (houses: Float64Array, want: number, zones: Float64Array, seed: number) => Float64Array;
+	grave: (dx: number, dz: number, zones: Float64Array) => Float64Array;
+	veg: (seed: number, zones: Float64Array) => Float64Array;
+	settlement: (zones: Float64Array, changed: Float64Array) => Float64Array;
+	lake: (zones: Float64Array, px: number, pz: number, yaw: number) => Float64Array;
+	forest: (zones: Float64Array, px: number, pz: number, yaw: number) => Float64Array;
+	city: (zones: Float64Array, removables: Float64Array, px: number, pz: number, yaw: number) => Float64Array;
+	immigration: (counts: Float64Array, px: number, pz: number, globalAvg: number, seed: number) => Float64Array;
+	town_plan: (cx: number, cz: number, size: string, seed: number) => Float64Array;
+	demo_gallery: () => Float64Array;
+	serialize: () => Uint8Array;
+	deserialize: (buf: Uint8Array) => void;
+	len: () => number;
+	free: () => void;
+}
+
+/** The `apply_ops_bin` result object (wasm-bindgen getters) — the new world as the SAME parallel arrays we pack in,
+ *  plus conflicts. Each getter clones; we read each once into a plain object then `free()` (see `applyOpsBin`). */
+interface ApplyResultWasm {
+	readonly obj_ids: string[];
+	readonly obj_kinds: string[];
+	readonly obj_colors: string[];
+	readonly obj_num: Float64Array;
+	readonly zone_ids: string[];
+	readonly zone_materials: string[];
+	readonly zone_shapes: string[];
+	readonly zone_num: Float64Array;
+	readonly path_ids: string[];
+	readonly path_materials: string[];
+	readonly path_num: Float64Array;
+	readonly terrain_num: Float64Array;
+	readonly ground: string;
+	readonly sky: string;
+	readonly conflict_labels: string[];
+	readonly conflict_blockers: string[];
+	free: () => void;
+}
+
+/** What `applyOpsBin` packs IN and reads OUT (engine.ts owns the World↔arrays (un)packing). The `*Strs`/`*Num` split
+ *  mirrors the Rust decode/encode: parallel string vecs + a flat f64 SoA, no JSON. */
+export interface PackedApply {
+	objIds: string[];
+	objKinds: string[];
+	objColors: string[];
+	objNum: Float64Array;
+	zoneIds: string[];
+	zoneMaterials: string[];
+	zoneShapes: string[];
+	zoneNum: Float64Array;
+	pathIds: string[];
+	pathMaterials: string[];
+	pathNum: Float64Array;
+	terrainNum: Float64Array;
+	ground: string;
+	sky: string;
+	opNum: Float64Array;
+	opStrs: string[];
+	px: number;
+	pz: number;
+	yaw: number;
+}
+export interface RawApplyResult {
+	objIds: string[];
+	objKinds: string[];
+	objColors: string[];
+	objNum: Float64Array;
+	zoneIds: string[];
+	zoneMaterials: string[];
+	zoneShapes: string[];
+	zoneNum: Float64Array;
+	pathIds: string[];
+	pathMaterials: string[];
+	pathNum: Float64Array;
+	terrainNum: Float64Array;
+	ground: string;
+	sky: string;
+	conflictLabels: string[];
+	conflictBlockers: string[];
+}
 
 interface MathGlue {
 	default: (input?: unknown) => Promise<unknown>;
+	WorldGen: new () => WorldGenWasm;
 	pop_caps: (rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number) => Uint32Array;
 	ff_targets: (rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, scale: number, dt: number) => Uint32Array;
 	ff_gene: (gene: number, rabbit: number, cat: number, kangaroo: number, person: number, lion: number, dino: number, dt: number) => number;
@@ -35,21 +120,33 @@ interface MathGlue {
 	eco_render: () => Float64Array;
 	gene_bounds: () => Float64Array;
 	tick_hz: () => number;
-	apply_ops: (world_json: string, ops_json: string, px: number, pz: number, yaw: number) => string;
-	settlement_plan: (cx: number, cz: number, size: string, seed: number, id_prefix: string) => string;
-	forest_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
-	lake_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
-	city_ops: (world_json: string, px: number, pz: number, yaw: number) => string;
-	settlement_ops: (world_json: string) => string;
-	grave_site: (world_json: string, dx: number, dz: number) => string;
-	build_ops: (world_json: string, builds_json: string) => string;
-	well_ops: (world_json: string, wells_json: string) => string;
-	vegetation_ops: (world_json: string, seed: number) => string;
-	immigration_ops: (counts_json: string, px: number, pz: number, global_avg: number, seed: number) => string;
+	apply_ops_bin: (
+		obj_ids: string[],
+		obj_kinds: string[],
+		obj_colors: string[],
+		obj_num: Float64Array,
+		zone_ids: string[],
+		zone_materials: string[],
+		zone_shapes: string[],
+		zone_num: Float64Array,
+		path_ids: string[],
+		path_materials: string[],
+		path_num: Float64Array,
+		terrain_num: Float64Array,
+		ground: string,
+		sky: string,
+		op_num: Float64Array,
+		op_strs: string[],
+		px: number,
+		pz: number,
+		yaw: number,
+	) => ApplyResultWasm;
+	settlement_ops_bin: (soa: Float64Array, zones: Float64Array) => Float64Array;
 }
 
 class WorldMath {
 	#glue: MathGlue | null = null;
+	#worldgen: WorldGenWasm | null = null; // the stateful binary structure store (instantiated on load)
 	#loading: Promise<void> | null = null;
 
 	// cached sim constants — read ONCE from the source of truth (Rust) on first use, then memoised. The literals
@@ -75,6 +172,7 @@ class WorldMath {
 					const m = (await import(/* @vite-ignore */ `${location.origin}/worldsim/worldsim.js`)) as unknown as MathGlue;
 					await m.default();
 					this.#glue = m;
+					this.#worldgen = new m.WorldGen(); // the persistent binary structure store (docs/world-data-architecture.md)
 				} else {
 					// NODE (vitest — the engine runs in Rust now, so even node tests use the wasm): load the bytes from
 					// disk; the web-target `default(init)` accepts a BufferSource.
@@ -84,6 +182,7 @@ class WorldMath {
 					const m = (await import(/* @vite-ignore */ jsUrl.href)) as unknown as MathGlue;
 					await m.default({ module_or_path: fs.readFileSync(wasmUrl) } as unknown as undefined);
 					this.#glue = m;
+					this.#worldgen = new m.WorldGen();
 				}
 			})().catch((e) => {
 				console.error('[rustMath] failed to load wasm math', e);
@@ -206,63 +305,127 @@ class WorldMath {
 		return this.#tickHzCache || 30;
 	}
 
-	/** THE ENGINE — apply `ops` to a world (both JSON strings) for a player at (px,pz,yaw). New world + conflicts. */
-	applyOps(worldJson: string, opsJson: string, px: number, pz: number, yaw: number): { world: unknown; conflicts: unknown[] } | null {
-		return this.#call((g) => JSON.parse(g.apply_ops(worldJson, opsJson, px, pz, yaw)) as { world: unknown; conflicts: unknown[] });
+	/** THE BINARY ENGINE (no JSON) — the op→world layer. `p` is the world+ops packed as parallel string vecs +
+	 *  flat f64 SoA (engine.ts owns pack/unpack). Reads the wasm getters once into a plain object, then frees it. */
+	applyOpsBin(p: PackedApply): RawApplyResult | null {
+		return this.#call((g) => {
+			const r = g.apply_ops_bin(
+				p.objIds,
+				p.objKinds,
+				p.objColors,
+				p.objNum,
+				p.zoneIds,
+				p.zoneMaterials,
+				p.zoneShapes,
+				p.zoneNum,
+				p.pathIds,
+				p.pathMaterials,
+				p.pathNum,
+				p.terrainNum,
+				p.ground,
+				p.sky,
+				p.opNum,
+				p.opStrs,
+				p.px,
+				p.pz,
+				p.yaw,
+			);
+			const out: RawApplyResult = {
+				objIds: r.obj_ids,
+				objKinds: r.obj_kinds,
+				objColors: r.obj_colors,
+				objNum: r.obj_num,
+				zoneIds: r.zone_ids,
+				zoneMaterials: r.zone_materials,
+				zoneShapes: r.zone_shapes,
+				zoneNum: r.zone_num,
+				pathIds: r.path_ids,
+				pathMaterials: r.path_materials,
+				pathNum: r.path_num,
+				terrainNum: r.terrain_num,
+				ground: r.ground,
+				sky: r.sky,
+				conflictLabels: r.conflict_labels,
+				conflictBlockers: r.conflict_blockers,
+			};
+			r.free();
+			return out;
+		});
 	}
 
-	/** PROCEDURAL SETTLEMENT PLAN — Rust owns the world-gen. A planned town at (cx,cz) of `size`, deterministic in
-	 *  `seed`. Returns the world-objects + road paths + footprint radius (or null pre-wasm-load). */
-	settlementPlan(cx: number, cz: number, size: string, seed: number, idPrefix: string): { objects: WorldObject[]; paths: Path[]; radius: number } | null {
-		return this.#call((g) => JSON.parse(g.settlement_plan(cx, cz, size, seed, idPrefix)) as { objects: WorldObject[]; paths: Path[]; radius: number });
+	/** STATELESS settlement wall refit (binary, jzon-free) — for the fast-forward/away-growth path, which can't use the
+	 *  persistent `wgSettlement` store (the live renderer owns its incremental state). `soa` = packStructures(world),
+	 *  `zones` = packWaterZones(world). Returns the GEN op stream (decode like applyStructOps; REMOVE slot = `soa` index). */
+	settlementOpsBin(soa: Float64Array, zones: Float64Array): Float64Array | null {
+		return this.#call((g) => g.settlement_ops_bin(soa, zones));
 	}
 
-	/** FOREST generator — engine Ops that plant/grow a wood ahead of the player. Reads the world DOM (JSON). */
-	forestOps(worldJson: string, px: number, pz: number, yaw: number): Op[] | null {
-		return this.#call((g) => JSON.parse(g.forest_ops(worldJson, px, pz, yaw)) as Op[]);
+	// ── BINARY worldgen (the StructureStore path, docs/world-data-architecture.md) — no JSON. Seed the store from the
+	//    bounded live structures whenever they change, then call the ops with small typed-array inputs; each returns a
+	//    flat Float64Array op stream [op(0=add,1=remove-slot), kind, x, z, rot, sx, sy, sz, color]×n. ────────────────
+	/** True once the binary structure store is instantiated (load complete). */
+	get hasStore(): boolean {
+		return this.#worldgen !== null;
 	}
-
-	/** LAKE generator — engine Ops that dig/grow a pond ahead of the player. Reads the world DOM (JSON). */
-	lakeOps(worldJson: string, px: number, pz: number, yaw: number): Op[] | null {
-		return this.#call((g) => JSON.parse(g.lake_ops(worldJson, px, pz, yaw)) as Op[]);
+	/** Replace the store from a packed SoA `[kind,x,z,rot,sx,sy,sz,color,keep]×n` (world.objects' structures, in order). */
+	seedStructures(soa: Float64Array): void {
+		this.#worldgen?.seed(soa);
 	}
-
-	/** CITY generator — engine Ops that build/grow a concentric district-zoned city. Reads the world DOM (JSON). */
-	cityOps(worldJson: string, px: number, pz: number, yaw: number): Op[] | null {
-		return this.#call((g) => JSON.parse(g.city_ops(worldJson, px, pz, yaw)) as Op[]);
+	wgWell(reqs: Float64Array, zones: Float64Array): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.well(reqs, zones) : null;
 	}
-
-	/** INCREMENTAL SETTLEMENT WALLS — engine Ops that keep every town ringed by a haphazard, hole-free perimeter
-	 *  (grows with the town, around water, demolishing rocks). Idempotent. Reads the world DOM (JSON). */
-	settlementOps(worldJson: string): Op[] | null {
-		return this.#call((g) => JSON.parse(g.settlement_ops(worldJson)) as Op[]);
+	wgBuild(reqs: Float64Array, zones: Float64Array): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.build(reqs, zones) : null;
 	}
-
-	/** GRAVE SITE — engine-computed dry cemetery plot for a death at (dx,dz), or null for a wild death. */
-	graveSite(worldJson: string, dx: number, dz: number): { x: number; z: number } | null {
-		return this.#call((g) => JSON.parse(g.grave_site(worldJson, dx, dz)) as { x: number; z: number } | null);
+	/** DORMANT settlement growth — grow a FAR cluster's homes. `houses` = `[x,z]×n`; returns up to `want` build ops
+	 *  `[OP_ADD, kind, x, z, rot, sx, sy, sz, color]×k` (a throwaway store; the live structures are untouched). */
+	wgGrowDormant(houses: Float64Array, want: number, zones: Float64Array, seed: number): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.grow_dormant(houses, want, zones, seed) : null;
 	}
-
-	/** HOUSE PLACEMENT — engine Ops (add house/cabin) for this frame's build requests, obeying colony rules + a water
-	 *  margin. `buildsJson` = JSON `[{x,z},…]` from sim.drainBuilds(). */
-	buildOps(worldJson: string, buildsJson: string): Op[] | null {
-		return this.#call((g) => JSON.parse(g.build_ops(worldJson, buildsJson)) as Op[]);
+	wgGrave(dx: number, dz: number, zones: Float64Array): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.grave(dx, dz, zones) : null;
 	}
-
-	/** WELL PLACEMENT — engine Ops (add well) for this frame's dig requests. `wellsJson` = `[{x,z},…]`. */
-	wellOps(worldJson: string, wellsJson: string): Op[] | null {
-		return this.#call((g) => JSON.parse(g.well_ops(worldJson, wellsJson)) as Op[]);
+	wgVeg(seed: number, zones: Float64Array): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.veg(seed, zones) : null;
 	}
-
-	/** COLONY VEGETATION — engine Op (≤1 add tree) so a town greens over time; `seed` varies per call (sim tick). */
-	vegetationOps(worldJson: string, seed: number): Op[] | null {
-		return this.#call((g) => JSON.parse(g.vegetation_ops(worldJson, seed)) as Op[]);
+	/** `changed` = `[x,z]×n` positions of structures changed this frame → only those towns' walls re-fit; empty = all. */
+	wgSettlement(zones: Float64Array, changed: Float64Array): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.settlement(zones, changed) : null;
 	}
-
-	/** IMMIGRATION — engine add-creature ops (with rescued `gene`) for deficient species. `countsJson` = the live
-	 *  per-kind `{n,geneSum}` JS gathered from agentManager. */
-	immigrationOps(countsJson: string, px: number, pz: number, globalAvg: number, seed: number): Op[] | null {
-		return this.#call((g) => JSON.parse(g.immigration_ops(countsJson, px, pz, globalAvg, seed)) as Op[]);
+	/** LAKE generator (binary) — `zones` = water zones `[px,pz,size,seed]×n`. Returns the GEN op stream (decodeGenOps). */
+	wgLake(zones: Float64Array, px: number, pz: number, yaw: number): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.lake(zones, px, pz, yaw) : null;
+	}
+	/** FOREST generator (binary) — reads trees from the seeded store + water `zones`. Returns the GEN op stream. */
+	wgForest(zones: Float64Array, px: number, pz: number, yaw: number): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.forest(zones, px, pz, yaw) : null;
+	}
+	/** CITY generator (binary) — reads buildings from the seeded store, water `zones`, removable spokes/plaza
+	 *  (`removables` = `[tag,x,z]×n`). Returns the GEN op stream (a REMOVE's slot → path/plaza id via decodeGenOps). */
+	wgCity(zones: Float64Array, removables: Float64Array, px: number, pz: number, yaw: number): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.city(zones, removables, px, pz, yaw) : null;
+	}
+	/** IMMIGRATION (binary) — `counts` = `[n,geneSum]×5` (FLOORS order). Returns a flat `[floorIdx,x,z,gene]×n` stream. */
+	wgImmigration(counts: Float64Array, px: number, pz: number, globalAvg: number, seed: number): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.immigration(counts, px, pz, globalAvg, seed) : null;
+	}
+	/** SETTLEMENT PLAN (binary) — packed `[radius, numPaths, numObjects, <paths×4>, <objects×7>]` (settlementPlanner decodes). */
+	wgTownPlan(cx: number, cz: number, size: string, seed: number): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.town_plan(cx, cz, size, seed) : null;
+	}
+	/** DEMO GALLERY (binary) — Rust owns the gallery layout; returns `[numSites, numPaths, numObjects, <sites×3>, <paths×4>, <objects×7>]`. */
+	wgDemoGallery(): Float64Array | null {
+		return this.#worldgen ? this.#worldgen.demo_gallery() : null;
+	}
+	/** Binary snapshot of the live structures (→ IndexedDB, no JSON) / restore. */
+	wgSerialize(): Uint8Array | null {
+		return this.#worldgen ? this.#worldgen.serialize() : null;
+	}
+	wgDeserialize(buf: Uint8Array): void {
+		this.#worldgen?.deserialize(buf);
+	}
+	wgLen(): number {
+		return this.#worldgen ? this.#worldgen.len() : 0;
 	}
 
 	/** Closed-form VIGOR drift for a dormant region over `dtSec` away (Rust). Falls back to the unchanged gene. */

@@ -4,25 +4,26 @@
 //! is preserved exactly — the same PRNG (mulberry32) and the same GLSL-style hash — and parity with the former JS
 //! is pinned by tests (src/lib/worldgen.test.ts) so a port can't silently change a generated city/town.
 
-use crate::engine::{in_water, wzones_of};
-use jzon::{array, object, JsonValue};
+use crate::engine::{in_natural_pond, in_water_seeded};
+use crate::structstore::{is_building as sk_is_building, is_home as sk_is_home, is_walled as sk_is_walled, kind_code as sk_code, Structure, StructureStore, SK_CABIN, SK_FENCE, SK_GRAVE, SK_HOUSE, SK_LAMP, SK_PINE, SK_ROCK, SK_TOWER, SK_TREE, SK_WELL};
+
+/// Parse a flat `[px, pz, size, seed]×n` water-zone buffer (the binary worldgen ABI form) → the tuples
+/// `in_water_seeded` wants. Zones cross as a small typed array instead of JSON, computed once per frame JS-side.
+fn zones_seeded(flat: &[f64]) -> Vec<(f64, f64, f64, f64)> {
+    flat.chunks_exact(4).map(|c| (c[0], c[1], c[2], c[3])).collect()
+}
+
+// Op-stream lane 0 codes for the binary worldgen ABI (Float64Array, stride 9): [op, kind, x, z, rot, sx, sy, sz, color].
+const OP_ADD: f64 = 0.0;
+#[allow(dead_code)]
+const OP_REMOVE: f64 = 1.0; // lane1 = slot (used by ops that demolish, e.g. settlement_ops fence diff) — added with those ports
 
 // ── shared helpers ────────────────────────────────────────────────────────────────────────────────────────────
-fn f(v: &JsonValue) -> f64 {
-    v.as_f64().unwrap_or(0.0)
-}
-/// (x, z) of an object/zone's `pos` (the world is XZ-planar; pos[1] is height).
-fn pos_xz(o: &JsonValue) -> (f64, f64) {
-    (f(&o["pos"][0]), f(&o["pos"][2]))
-}
 /// The GLSL-style hash used by the city/forest generators — `fract(sin(i*12.9898+4.13)*43758.5453)`, byte-for-byte
 /// the JS `hash1`. f64 sin matches across the boundary to ~1e-12; the worldgen parity tests pin the result.
 fn hash1(i: f64) -> f64 {
     let v = (i * 12.9898 + 4.13).sin() * 43758.5453;
     v - v.floor()
-}
-fn zones_vec(world: &JsonValue) -> Vec<JsonValue> {
-    world["zones"].members().cloned().collect()
 }
 
 // ── mulberry32 — a tiny deterministic PRNG, BYTE-IDENTICAL to the JS `prng()` in settlementPlanner.ts ──────────
@@ -61,114 +62,6 @@ const GAP: f64 = 18.0; // metres between parallel streets (one block)
 const SETBACK: f64 = 6.0; // how far houses sit back from the road they face
 const HOUSE_SPACING: f64 = 7.5; // spacing of houses along a street
 
-/// Plan one settlement → `{ objects, paths, radius }` (jzon). Faithful port of settlementPlanner.ts `settlementPlan`:
-/// a street grid, houses lining + facing the roads, a central well/plaza, watchtower(s), and a perimeter fence on
-/// the bigger tiers. Deterministic in (centre, size, seed) so a town is stable and every seed differs.
-pub fn settlement_plan(cx: f64, cz: f64, size: &str, seed: u32, id_prefix: &str) -> JsonValue {
-    let mut rng = Mulberry32::new(seed);
-    let p = tier(size);
-    let mut objects: Vec<JsonValue> = Vec::new();
-    let mut paths: Vec<JsonValue> = Vec::new();
-    let mut n = 0i64;
-    // ids: `{prefix}o{n}` / `{prefix}p{n}`, n shared + incrementing in placement order (matches the JS)
-    macro_rules! oid {
-        () => {{
-            let id = format!("{id_prefix}o{n}");
-            n += 1;
-            id
-        }};
-    }
-    macro_rules! pid {
-        () => {{
-            let id = format!("{id_prefix}p{n}");
-            n += 1;
-            id
-        }};
-    }
-    let half = (p.blocks as f64 * GAP) / 2.0;
-    let mut lines: Vec<f64> = Vec::new();
-    for i in 0..=p.blocks {
-        lines.push(-half + i as f64 * GAP);
-    }
-
-    // ── STREET GRID — a Path along every grid line, both axes
-    for &off in &lines {
-        paths.push(object! { "id" => pid!(), "material" => "path", "from" => array![cx - half, 0.0, cz + off], "to" => array![cx + half, 0.0, cz + off], "width" => 3 });
-        paths.push(object! { "id" => pid!(), "material" => "path", "from" => array![cx + off, 0.0, cz - half], "to" => array![cx + off, 0.0, cz + half], "width" => 3 });
-    }
-
-    // ── HOUSES line the E–W streets, set back on both sides, facing the road
-    let kinds: &[&str] = match size {
-        "hamlet" => &["cabin", "cabin", "house"],
-        "city" => &["house", "house", "cabin", "manor"],
-        _ => &["house", "cabin", "house"],
-    };
-    let mut placed = 0;
-    let cols = ((p.blocks as f64 * GAP) / HOUSE_SPACING).floor().max(1.0) as i32;
-    'outer: for &off in &lines {
-        for c in 0..=cols {
-            for &side_z in &[-SETBACK, SETBACK] {
-                if placed >= p.houses {
-                    break 'outer;
-                }
-                if rng.next() < 0.18 {
-                    continue; // a few empty plots
-                }
-                let hx = cx - half + 4.0 + c as f64 * HOUSE_SPACING + (rng.next() - 0.5) * 1.4;
-                let hz = cz + off + side_z + (rng.next() - 0.5) * 1.2;
-                let kind = kinds[(rng.next() * kinds.len() as f64) as usize];
-                let s = 0.9 + rng.next() * 0.5;
-                objects.push(object! {
-                    "id" => oid!(), "kind" => kind, "pos" => array![hx, 0.0, hz],
-                    "rot" => if side_z < 0.0 { 0 } else { 180 }, "scale" => array![s, s, s], "keep" => true,
-                });
-                placed += 1;
-            }
-        }
-    }
-
-    // ── CENTRAL PLAZA: a well at the crossroads + a lamp beside it
-    objects.push(object! { "id" => oid!(), "kind" => "well", "pos" => array![cx, 0.0, cz], "keep" => true });
-    objects.push(object! { "id" => oid!(), "kind" => "lamp", "pos" => array![cx + 2.5, 0.0, cz + 2.5], "keep" => true });
-
-    // ── WATCHTOWER(S) at corners
-    for t in 0..p.towers {
-        let corner = if t == 0 { [-half, -half] } else { [half, half] };
-        objects.push(object! { "id" => oid!(), "kind" => "tower", "pos" => array![cx + corner[0], 0.0, cz + corner[1]], "scale" => array![1.0, 1.3, 1.0], "keep" => true });
-    }
-
-    // ── LAMPS at the street intersections (skip the centre — the well's there)
-    for &ox in &lines {
-        for &oz in &lines {
-            if ox == 0.0 && oz == 0.0 {
-                continue;
-            }
-            if rng.next() < 0.5 {
-                objects.push(object! { "id" => oid!(), "kind" => "lamp", "pos" => array![cx + ox, 0.0, cz + oz], "keep" => true });
-            }
-        }
-    }
-
-    // ── PERIMETER FENCE (town/city) — a ring just outside the grid with a GATE gap on the +X road
-    if p.fenced {
-        let r = half + 6.0;
-        let seg_len = 1.4;
-        let per = 2.0 * std::f64::consts::PI * r;
-        let segs = (per / seg_len).floor().max(8.0) as i32;
-        for i in 0..segs {
-            let ang = (i as f64 / segs as f64) * std::f64::consts::PI * 2.0;
-            if ang.abs() < 0.18 || (ang - std::f64::consts::PI * 2.0).abs() < 0.18 {
-                continue; // gate gap
-            }
-            let fx = cx + ang.cos() * r;
-            let fz = cz + ang.sin() * r;
-            objects.push(object! { "id" => oid!(), "kind" => "fence", "pos" => array![fx, 0.0, fz], "rot" => ang.to_degrees() + 90.0, "keep" => true });
-        }
-    }
-
-    object! { "objects" => objects, "paths" => paths, "radius" => half + if p.fenced { 8.0 } else { 4.0 } }
-}
-
 fn is_home(k: &str) -> bool {
     k == "house" || k == "cabin" || k == "manor"
 }
@@ -189,42 +82,29 @@ fn uf_find(parent: &mut [usize], i: usize) -> usize {
     r
 }
 
-/// INCREMENTAL settlement walls (user: "the fence GROWS with the town"). Clusters the world's homes into settlements
-/// and emits ops to keep each ringed by a HAPHAZARD perimeter that hugs the home spread — the convex-hull SUPPORT
-/// function + per-vertex jitter, NOT a circle — seamlessly tiled (ceil → panels exactly span each edge → no holes),
-/// routed AROUND water, demolishing rocks on its line. Player-built `keep` fences are exempt. A POSITION-DIFF against
-/// the existing auto-fence makes it IDEMPOTENT: an unchanged town emits nothing; only growth / a freshly-loaded town
-/// moves panels. Returns an ops JSON array (`add` fence · `remove` stale fence / demolished rock).
-pub fn settlement_ops(world: &JsonValue) -> JsonValue {
-    let mut ops = JsonValue::new_array();
-    let zones = wzones_of(&zones_vec(world));
-    let mut walled: Vec<(f64, f64, bool)> = Vec::new(); // (x, z, is_home)
-    let mut rocks: Vec<(String, f64, f64)> = Vec::new();
-    let mut existing: Vec<(String, f64, f64)> = Vec::new(); // non-`keep` fence: id, x, z
-    for o in world["objects"].members() {
-        let k = o["kind"].as_str().unwrap_or("");
-        let keep = o["keep"].as_bool().unwrap_or(false);
-        let (x, z) = pos_xz(o);
-        if !x.is_finite() || !z.is_finite() || x.abs() > 1.0e6 || z.abs() > 1.0e6 {
-            continue; // GUARD: a stray NaN/∞/absurd coord would blow the support-ring radius → an astronomical panel
-            // count → OOM/freeze (the user's "crash near civilisations"). Skip it rather than wall the void.
-        }
-        if is_walled(k) {
-            walled.push((x, z, is_home(k)));
-        } else if k == "rock" && !keep {
-            rocks.push((o["id"].as_str().unwrap_or("").to_string(), x, z));
-        } else if k == "fence" && !keep {
-            existing.push((o["id"].as_str().unwrap_or("").to_string(), x, z));
-        }
-    }
-    let homes: Vec<(f64, f64)> = walled.iter().filter(|w| w.2).map(|w| (w.0, w.1)).collect();
-    let n = homes.len();
-    if n == 0 {
-        return ops;
-    }
-    // union-find: homes within GATHER chain into one settlement
-    let mut parent: Vec<usize> = (0..n).collect();
+/// Shared perimeter-wall GEOMETRY — used by BOTH `settlement_ops` (JSON) and `settlement_ops_store` (binary), so the
+/// ring fit is identical and the JSON path's tests keep guarding it. Clusters `homes` (GATHER=60), supports a per-town
+/// jittered ring (anchored to the cluster's stable min-home, not the drifting centroid — docs/spread-redesign.md P2),
+/// tiles each edge into abutting panels. Returns the desired panels `[(x, z, rot_deg, scale_x)]` + the indices into
+/// `rocks` a panel demolished. `water(x,z)` is the zone-shape test (`in_water` JSON or `in_water_seeded` binary).
+// `near` = positions of structures that CHANGED this call ([(x,z)…]). A cluster is re-fitted only if a change is near
+// it — every OTHER town's wall is left exactly as the store holds it (no re-fit off a partial/streamed home set → the
+// "fence moves randomly while I fly over" bug + its jank). `near` EMPTY = fit every cluster (the one-time load reconcile
+// + the JSON parity path). Returns the usual (desired panels, demolished rocks) PLUS the fitted clusters' (cx,cz,keep_r)
+// so the caller knows which existing fences belong to a fitted town (and may be diffed) vs an untouched one (kept).
+fn fit_walls(homes: &[(f64, f64)], walled: &[(f64, f64, bool)], rocks: &[(f64, f64)], water: &dyn Fn(f64, f64) -> bool, near: &[(f64, f64)]) -> (Vec<(f64, f64, f64, f64)>, Vec<usize>, Vec<bool>) {
     const GATHER: f64 = 60.0;
+    const SEG: f64 = 6.5;
+    const K: usize = 22;
+    const MARGIN: f64 = 8.0;
+    let mut desired: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let mut demolish: Vec<usize> = Vec::new();
+    let n = homes.len();
+    let mut fitted: Vec<bool> = vec![false; n]; // homes[i]'s cluster was (re)fitted this call → its OLD panels may be replaced
+    if n == 0 {
+        return (desired, demolish, fitted);
+    }
+    let mut parent: Vec<usize> = (0..n).collect();
     for i in 0..n {
         for j in (i + 1)..n {
             if (homes[i].0 - homes[j].0).hypot(homes[i].1 - homes[j].1) < GATHER {
@@ -243,12 +123,6 @@ pub fn settlement_ops(world: &JsonValue) -> JsonValue {
             seen.push(r);
         }
     }
-    let mut desired: Vec<(f64, f64, f64, f64)> = Vec::new(); // x, z, rot_deg, scale_x
-    let mut demolish: Vec<String> = Vec::new();
-    const SEG: f64 = 6.5;
-    const K: usize = 22;
-    const MARGIN: f64 = 8.0;
-    // cluster centroids (from home members), precomputed so towers/wells attach to their NEAREST town only
     let centroids: Vec<(f64, f64)> = seen
         .iter()
         .map(|&root| {
@@ -259,16 +133,19 @@ pub fn settlement_ops(world: &JsonValue) -> JsonValue {
         .collect();
     for (ci, &root) in seen.iter().enumerate() {
         let (cx, cz) = centroids[ci];
-        // STABLE per-town jitter anchor = this cluster's MIN-coordinate home (lexicographic) — a fixed point that does
-        // NOT drift as the town grows. The per-vertex wobble below is keyed on THIS, not the centroid: adding a house
-        // no longer changes the hash input for all 22 vertices, so the ring stops tearing down + rebuilding on every
-        // build (the "fence jumps / churns" bug + a jitter source — docs/spread-redesign.md P2). Town-specific so rings
-        // still vary; stable as long as the anchor home stands (a rare decay of it nudges the wobble once, not per-build).
+        // LOCAL fit: skip a cluster with no change near it → its stored wall is left exactly as-is (never re-fit off a
+        // partial/streamed home set). `near` empty → fit every cluster (load reconcile + parity path).
+        if !near.is_empty() && !near.iter().any(|&(px, pz)| (cx - px).hypot(cz - pz) < GATHER + 30.0) {
+            continue;
+        }
+        for i in 0..n {
+            if roots[i] == root {
+                fitted[i] = true; // this cluster IS being (re)fitted → its homes own the panels eligible for replacement
+            }
+        }
         let anchor = (0..n).filter(|&i| roots[i] == root).map(|i| homes[i]).fold((f64::INFINITY, f64::INFINITY), |a, h| if h < a { h } else { a });
-        // pts = THIS town's homes + towers/wells whose NEAREST centroid is this one. (Gathering everything within 90 m
-        // of the centroid let a neighbouring town's homes leak in → two walls enclosing each other = the overlap.)
         let mut pts: Vec<(f64, f64)> = (0..n).filter(|&i| roots[i] == root).map(|i| (homes[i].0 - cx, homes[i].1 - cz)).collect();
-        for &(wx, wz, is_h) in &walled {
+        for &(wx, wz, is_h) in walled {
             if is_h {
                 continue;
             }
@@ -285,8 +162,6 @@ pub fn settlement_ops(world: &JsonValue) -> JsonValue {
                 pts.push((wx - cx, wz - cz));
             }
         }
-        // support-function ring (hugs the spread) + per-vertex jitter (haphazard). If a vertex lands in WATER, pull it
-        // INWARD until dry → the polygon INDENTS around the lake (the wall stays closed; it doesn't gap at the shore).
         let mut ring: Vec<(f64, f64)> = Vec::with_capacity(K);
         for k in 0..K {
             let th = (k as f64 / K as f64) * TAU;
@@ -295,13 +170,12 @@ pub fn settlement_ops(world: &JsonValue) -> JsonValue {
             for &(px2, pz2) in &pts {
                 sup = sup.max(px2 * dx + pz2 * dz);
             }
-            let jit = (hash1(anchor.0 * 53.0 + th * 97.0 + anchor.1 * 31.0) - 0.5) * 7.0; // keyed on the STABLE anchor, not the drifting centroid
-            let mut r = (sup + MARGIN + jit).clamp(7.0, 400.0); // CAP the radius: a town's wall never needs >400 m — and a
-            // capped radius caps the edge length below, so `np` (panels/edge) can never go astronomical (OOM/freeze guard).
-            if in_water(&zones, cx + dx * r, cz + dz * r) {
+            let jit = (hash1(anchor.0 * 53.0 + th * 97.0 + anchor.1 * 31.0) - 0.5) * 7.0;
+            let mut r = (sup + MARGIN + jit).clamp(7.0, 400.0);
+            if water(cx + dx * r, cz + dz * r) {
                 for s in 1..=16 {
                     let nr = (r - s as f64 * 2.0).max(4.0);
-                    if !in_water(&zones, cx + dx * nr, cz + dz * nr) {
+                    if !water(cx + dx * nr, cz + dz * nr) {
                         r = nr;
                         break;
                     }
@@ -309,28 +183,23 @@ pub fn settlement_ops(world: &JsonValue) -> JsonValue {
             }
             ring.push((cx + dx * r, cz + dz * r));
         }
-        // tile each EDGE seamlessly into a COMPLETE, CLOSED ring — ceil(elen/SEG) panels EXACTLY span each edge (no
-        // holes), each panel as wide as its slot so neighbours abut. NO gate gap (user: "fence must be fully complete";
-        // animals no longer collide with fences — the settlement-avoidance keeps them out — so an opening isn't needed).
-        // The ONLY breaks are where the ring genuinely crosses water (rare; the ring already indents inward to dodge it).
         for k in 0..K {
             let (ax, az) = ring[k];
             let (bx, bz) = ring[(k + 1) % K];
             let elen = (bx - ax).hypot(bz - az);
-            let np = ((elen / SEG).ceil() as usize).clamp(1, 256); // hard cap (defence in depth): even a degenerate edge
-            // yields at most 256 panels, never a usize-overflow loop that would push billions of panels (OOM/freeze).
+            let np = ((elen / SEG).ceil() as usize).clamp(1, 256);
             let edge_ang = (bz - az).atan2(bx - ax);
             let sx = (elen / np as f64) / 1.4;
             for jp in 0..np {
                 let t = (jp as f64 + 0.5) / np as f64;
                 let fx = ax + (bx - ax) * t;
                 let fz = az + (bz - az) * t;
-                if in_water(&zones, fx, fz) {
+                if water(fx, fz) {
                     continue;
                 }
-                for rk in &rocks {
-                    if (rk.1 - fx).hypot(rk.2 - fz) < 3.0 && !demolish.contains(&rk.0) {
-                        demolish.push(rk.0.clone());
+                for (ri, &(rx, rz)) in rocks.iter().enumerate() {
+                    if (rx - fx).hypot(rz - fz) < 3.0 && !demolish.contains(&ri) {
+                        demolish.push(ri);
                     }
                 }
                 let rot = -edge_ang.to_degrees() + (hash1(fx + fz) - 0.5) * 10.0;
@@ -338,9 +207,62 @@ pub fn settlement_ops(world: &JsonValue) -> JsonValue {
             }
         }
     }
-    // POSITION-DIFF → idempotent: keep existing auto-fence matching a desired panel; remove the rest; add uncovered
-    // desired panels; remove demolished rocks.
+    (desired, demolish, fitted)
+}
+
+/// BINARY settlement_ops against the StructureStore (no JSON). Reads homes/towers/wells/rocks/fences from the store,
+/// (re)fits the walls via `fit_walls`, and diffs against the store's EXISTING fence panels — emitting OP_REMOVE by SLOT
+/// for stale panels + demolished rocks and OP_ADD for new panels, self-mutating the store. The position-diff state (the
+/// existing panels) now LIVES in the store, so the per-build payload is O(local change), not the whole world-wide fence
+/// set (today's heaviest stringify). Wall geometry is byte-parity with `settlement_ops` (same `fit_walls`).
+pub fn settlement_ops_store(store: &mut StructureStore, zones: &[f64], changed: &[f64]) -> Vec<f64> {
+    let zs = zones_seeded(zones);
+    let near: Vec<(f64, f64)> = changed.chunks_exact(2).map(|c| (c[0], c[1])).collect(); // structures changed this call → fit only their towns
+    let mut walled: Vec<(f64, f64, bool)> = Vec::new();
+    let mut rock_slot: Vec<(u32, f64, f64)> = Vec::new();
+    let mut existing: Vec<(u32, f64, f64)> = Vec::new(); // non-keep fence: slot, x, z
+    for s in store.live_slots() {
+        if let Some(st) = store.get(s) {
+            if !st.x.is_finite() || !st.z.is_finite() || st.x.abs() > 1.0e6 || st.z.abs() > 1.0e6 {
+                continue;
+            }
+            if sk_is_walled(st.kind) {
+                walled.push((st.x, st.z, sk_is_home(st.kind)));
+            } else if st.kind == SK_ROCK && !st.keep {
+                rock_slot.push((s, st.x, st.z));
+            } else if st.kind == SK_FENCE && !st.keep {
+                existing.push((s, st.x, st.z));
+            }
+        }
+    }
+    let homes: Vec<(f64, f64)> = walled.iter().filter(|w| w.2).map(|w| (w.0, w.1)).collect();
+    if homes.is_empty() {
+        return Vec::new();
+    }
+    let rock_pos: Vec<(f64, f64)> = rock_slot.iter().map(|r| (r.1, r.2)).collect();
+    let (desired, demolish_idx, fitted) = fit_walls(&homes, &walled, &rock_pos, &|x, z| in_water_seeded(&zs, x, z) || in_natural_pond(x, z), &near);
+    // OWNERSHIP by NEAREST HOME (not a radius from the centroid): a fence panel belongs to the town of its closest home.
+    // If that town was (re)fitted this call, the panel is a CANDIDATE for replacement (removed below unless a new desired
+    // panel covers it) — so a SHRUNK/SHIFTED ring's old far panels are reclaimed, not stranded as a phantom 2nd layer
+    // (the "multi-layer fence / fence spur extending out" bug). A radius-from-centroid keep zone missed them because the
+    // centroid moves when the town grows/decays asymmetrically. A panel whose nearest home is in an UNTOUCHED town, or a
+    // true orphan far (>110 m) from every home, is kept verbatim — preserving the "far town's wall stays put" fix.
+    const OWN_MAX: f64 = 110.0;
     let mut keep_e = vec![false; existing.len()];
+    for (ei, e) in existing.iter().enumerate() {
+        let mut nd = f64::INFINITY;
+        let mut owner_fitted = false;
+        for (hi, &(hx, hz)) in homes.iter().enumerate() {
+            let d = (e.1 - hx).hypot(e.2 - hz);
+            if d < nd {
+                nd = d;
+                owner_fitted = fitted[hi];
+            }
+        }
+        if !owner_fitted || nd > OWN_MAX {
+            keep_e[ei] = true;
+        }
+    }
     let mut covered = vec![false; desired.len()];
     for (di, d) in desired.iter().enumerate() {
         for (ei, e) in existing.iter().enumerate() {
@@ -350,57 +272,57 @@ pub fn settlement_ops(world: &JsonValue) -> JsonValue {
             }
         }
     }
+    let mut out: Vec<f64> = Vec::new();
     for (ei, e) in existing.iter().enumerate() {
         if !keep_e[ei] {
-            let _ = ops.push(object! { "op" => "remove", "id" => e.0.clone() });
+            store.remove(e.0);
+            out.extend_from_slice(&[OP_REMOVE, e.0 as f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         }
     }
-    for id in &demolish {
-        let _ = ops.push(object! { "op" => "remove", "id" => id.clone() });
+    for &ri in &demolish_idx {
+        let slot = rock_slot[ri].0;
+        store.remove(slot);
+        out.extend_from_slice(&[OP_REMOVE, slot as f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     }
     for (di, d) in desired.iter().enumerate() {
         if !covered[di] {
-            let _ = ops.push(object! { "op" => "add", "kind" => "fence", "pos" => array![d.0, 0.0, d.1], "rot" => d.2, "scale" => array![d.3, 1.0, 1.0] });
+            store.add(Structure { kind: SK_FENCE, x: d.0, z: d.1, rot: d.2, sx: d.3, sy: 1.0, sz: 1.0, color: 0, keep: false, region: 0 });
+            out.extend_from_slice(&[OP_ADD, SK_FENCE as f64, d.0, d.1, d.2, d.3, 1.0, 1.0, 0.0]);
         }
     }
-    ops
+    out
 }
 
-/// GRAVE SITE — where to bury someone who died at (dx,dz). Rust owns it (same engine that knows water → NO graves in
-/// lakes). Returns `{x,z}` for a cemetery plot just OUTSIDE the deceased's settlement, on DRY ground; or `null` if they
-/// died in the WILD (no building within ~70 m). Ported from Scene.svelte `graveyardSpot`.
-pub fn grave_site(world: &JsonValue, dx: f64, dz: f64) -> JsonValue {
-    fn is_bldg(k: &str) -> bool {
-        matches!(k, "house" | "cabin" | "manor" | "tower")
-    }
+/// BINARY grave_site against the StructureStore (no JSON, O(local)). `zones` = `[px,pz,size,seed]×m`. Returns the
+/// grave plot as `[x, z]` (empty = no grave: died in the wild / town ringed by water). Byte-parity with `grave_site`.
+pub fn grave_site_store(store: &StructureStore, dx: f64, dz: f64, zones: &[f64]) -> Vec<f64> {
     const MEMBER_R2: f64 = 70.0 * 70.0;
-    // nearest building → did the deceased belong to a settlement?
+    // nearest building within 70 m → did the deceased belong to a settlement?
     let mut bx = 0.0;
     let mut bz = 0.0;
     let mut best = MEMBER_R2;
-    for o in world["objects"].members() {
-        if !is_bldg(o["kind"].as_str().unwrap_or("")) {
-            continue;
-        }
-        let (x, z) = pos_xz(o);
-        let d2 = (x - dx).powi(2) + (z - dz).powi(2);
-        if d2 < best {
-            best = d2;
-            bx = x;
-            bz = z;
+    for s in store.query_radius(dx, dz, 70.0) {
+        if let Some(st) = store.get(s) {
+            if sk_is_building(st.kind) {
+                let d2 = (st.x - dx).powi(2) + (st.z - dz).powi(2);
+                if d2 < best {
+                    best = d2;
+                    bx = st.x;
+                    bz = st.z;
+                }
+            }
         }
     }
     if best >= MEMBER_R2 {
-        return JsonValue::Null; // died in the wild → no grave
+        return Vec::new(); // died in the wild → no grave
     }
-    // settlement cluster around the nearest building → centroid + extent (so the plot sits OUTSIDE the homes + wall)
-    let cluster: Vec<(f64, f64)> = world["objects"]
-        .members()
-        .filter(|o| is_bldg(o["kind"].as_str().unwrap_or("")) && {
-            let (x, z) = pos_xz(o);
-            (x - bx).hypot(z - bz) < 90.0
-        })
-        .map(pos_xz)
+    // settlement cluster around the nearest building (within 90 m) → centroid + extent (plot sits OUTSIDE the wall)
+    let cluster: Vec<(f64, f64)> = store
+        .query_radius(bx, bz, 90.0)
+        .into_iter()
+        .filter_map(|s| store.get(s))
+        .filter(|st| sk_is_building(st.kind) && (st.x - bx).hypot(st.z - bz) < 90.0)
+        .map(|st| (st.x, st.z))
         .collect();
     let m = cluster.len() as f64;
     let cx = cluster.iter().map(|p| p.0).sum::<f64>() / m;
@@ -409,178 +331,469 @@ pub fn grave_site(world: &JsonValue, dx: f64, dz: f64) -> JsonValue {
     for &(x, z) in &cluster {
         rad = rad.max((x - cx).hypot(z - cz));
     }
-    // a stable plot direction (coarse-centroid hash) tried first, then ROTATE around the town for DRY ground
     let base = (((cx / 80.0).round() * 12.9898 + (cz / 80.0).round() * 78.233).sin()).abs() * TAU;
-    let zones = wzones_of(&zones_vec(world));
-    let r = rad + 18.0; // just outside the wall (~rad+8)
+    let zs = zones_seeded(zones);
+    let r = rad + 18.0;
     for t in 0..8 {
         let a = base + (t as f64) * (TAU / 8.0);
         let gx = cx + a.cos() * r + (hash1(cx + t as f64) - 0.5) * 7.0;
         let gz = cz + a.sin() * r + (hash1(cz + t as f64 + 5.0) - 0.5) * 7.0;
-        if !in_water(&zones, gx, gz) {
-            return object! { "x" => gx, "z" => gz };
+        if !in_water_seeded(&zs, gx, gz) {
+            return vec![gx, gz];
         }
     }
-    JsonValue::Null // every direction wet (town ringed by water) → no grave this death
+    Vec::new() // every direction wet → no grave this death
 }
 
-/// HOUSE PLACEMENT — Rust owns it (the engine knows water → homes clear the lake by a MARGIN, not dipping in). Takes
-/// the world DOM + this frame's build REQUESTS (settler positions from the sim) and applies the colony rules: ≤10 homes
-/// per town, a NEW town ≥350 m from any building, no plot/grave clash, dry ground (footprint margin). Returns add-house
-/// ops for the valid plots. Ported from the Scene.svelte `drainBuilds` handler.
-pub fn build_ops(world: &JsonValue, builds: &JsonValue) -> JsonValue {
-    let mut ops = JsonValue::new_array();
+/// BINARY build_ops against the StructureStore (no JSON, O(local)). `builds` = `[x,z]×n` settler positions; `zones`
+/// = `[px,pz,size,seed]×m`. Returns the add-op stream `[OP_ADD, kind, x, z, rot, sx, sy, sz, color]×k` AND self-adds
+/// each placed home (so the batch respects itself). Byte-parity with `build_ops` — pinned by `build_ops_store_matches_json`.
+/// The colony/FOUND_GAP scans read the store's local neighbourhood + a bounded global house count, never the world.
+pub fn build_ops_store(store: &mut StructureStore, builds: &[f64], zones: &[f64]) -> Vec<f64> {
     const COLONY_R2: f64 = 75.0 * 75.0;
     const COLONY_MAX: usize = 10;
-    // A NEW town (a build with no close neighbours) must be ≥ this from any building so it reads as a SEPARATE
-    // settlement. Derived from the sim's FOUND_GAP (the distance the land-pressure pioneer drive shoves surplus folk
-    // out to, see docs/spread-redesign.md) and set SLIGHTLY under it (×0.83) so a pioneer reliably clears the bar and
-    // founds where it lands → ONE source of truth, no drift. (Was a fixed 350 m DEAD ZONE no emergent disperser could
-    // ever reach, so towns only infilled + sprawled into each other — the merge bug. Now pioneers found distinct towns.)
     let new_gap2 = (crate::world::FOUND_GAP * 0.83).powi(2);
-    const HOUSE_CAP: usize = 200; // world-wide house ceiling (raised: the world is many SMALL spread towns now, not 3 big ones)
-    let zones = wzones_of(&zones_vec(world));
-    let mut bld: Vec<(f64, f64)> = Vec::new();
-    let mut graves: Vec<(f64, f64)> = Vec::new();
-    for o in world["objects"].members() {
-        let k = o["kind"].as_str().unwrap_or("");
-        if matches!(k, "house" | "cabin" | "tower" | "manor") {
-            bld.push(pos_xz(o));
-        } else if k == "grave" {
-            graves.push(pos_xz(o));
-        }
-    }
-    let mut placed: Vec<(f64, f64)> = Vec::new(); // homes added this batch (so requests respect each other)
-    for b in builds.members() {
-        if bld.len() + placed.len() >= HOUSE_CAP {
+    const HOUSE_CAP: usize = 200;
+    const SENSE: f64 = 200.0; // > sqrt(new_gap2) so the local query covers every building that affects the gap check
+    const FOOTPRINT_R2: f64 = 90.0 * 90.0; // gather the local cluster (centroid + spread) so infill clamps INSIDE it
+    const GROW: f64 = 8.0; // max a town's footprint may creep per infill build → the wall edges out a ring at a time,
+    // never jumps to wrap a house dropped 10–70 m outside it (user: "houses just outside, the fence balloons")
+    let zs = zones_seeded(zones);
+    let mut out: Vec<f64> = Vec::new();
+    let mut house_total = store.live_slots().into_iter().filter(|&s| store.get(s).map_or(false, |st| sk_is_building(st.kind))).count();
+    for b in builds.chunks_exact(2) {
+        if house_total >= HOUSE_CAP {
             break;
         }
-        let gx = (f(&b["x"]) / 8.0).round() * 8.0; // snap to an 8 m grid → aligned blocks
-        let gz = (f(&b["z"]) / 8.0).round() * 8.0;
+        let mut gx = (b[0] / 8.0).round() * 8.0;
+        let mut gz = (b[1] / 8.0).round() * 8.0;
         let mut near_in_colony = 0usize;
         let mut nearest2 = f64::INFINITY;
-        let mut taken = false;
-        for &(ox, oz) in bld.iter().chain(placed.iter()) {
-            let d2 = (ox - gx).powi(2) + (oz - gz).powi(2);
-            if d2 < 36.0 {
-                taken = true;
-                break;
-            }
-            if d2 < COLONY_R2 {
-                near_in_colony += 1;
-            }
-            if d2 < nearest2 {
-                nearest2 = d2;
+        let mut local: Vec<(f64, f64)> = Vec::new(); // buildings within FOOTPRINT_R → this town's centroid + spread
+        for s in store.query_radius(gx, gz, SENSE) {
+            if let Some(st) = store.get(s) {
+                if !sk_is_building(st.kind) {
+                    continue;
+                }
+                let d2 = (st.x - gx).powi(2) + (st.z - gz).powi(2);
+                if d2 < COLONY_R2 {
+                    near_in_colony += 1;
+                }
+                if d2 < nearest2 {
+                    nearest2 = d2;
+                }
+                if d2 < FOOTPRINT_R2 {
+                    local.push((st.x, st.z));
+                }
             }
         }
-        if taken || near_in_colony >= COLONY_MAX {
-            continue;
+        // EFFECTIVE per-colony cap — RAISED from the old hard 10 so a DENSE town keeps building (the populous vision)
+        // instead of freezing at 10 homes while its people pile up. A thriving settlement raises ~1 home per ~6
+        // settlers; with no people count reachable here we scale off a higher BUILDING ceiling (COLONY_MAX*3 ≈ 30). It's
+        // still a REAL stop (not removed) so a colony past it spills its surplus into NEW towns (the spread) rather than
+        // becoming one ever-growing blob — just a city-sized stop, not a hamlet-sized one. Bounded by HOUSE_CAP.
+        let colony_cap = (COLONY_MAX * 3).min(HOUSE_CAP);
+        if near_in_colony >= colony_cap {
+            continue; // this colony is full → no more infill here (its surplus founds NEW towns elsewhere)
         }
         if near_in_colony == 0 && nearest2 < new_gap2 {
-            continue; // a brand-new town must be founded clear of any other building (≥ FOUND_GAP-ish) → distinct, no merge
+            continue; // a brand-new town must be founded clear of any building (≥ the found gap)
         }
-        if graves.iter().any(|&(gvx, gvz)| (gvx - gx).powi(2) + (gvz - gz).powi(2) < 64.0) {
-            continue; // never build ON the graveyard
+        // INFILL near an existing town → pull the build INSIDE its footprint (fills gaps; the ring edges out ≤ GROW per
+        // build, never leaps to wrap a house dropped just outside it). A FOUND build keeps its requested open spot.
+        if near_in_colony >= 1 && !local.is_empty() {
+            let m = local.len() as f64;
+            let (cx, cz) = (local.iter().map(|p| p.0).sum::<f64>() / m, local.iter().map(|p| p.1).sum::<f64>() / m);
+            let max_r = local.iter().map(|&(x, z)| (x - cx).hypot(z - cz)).fold(0.0f64, f64::max);
+            let d = (gx - cx).hypot(gz - cz);
+            let limit = max_r + GROW;
+            if d > limit && d > 1.0e-6 {
+                gx = ((cx + (gx - cx) / d * limit) / 8.0).round() * 8.0;
+                gz = ((cz + (gz - cz) / d * limit) / 8.0).round() * 8.0;
+            }
         }
-        // WATER MARGIN: the house FOOTPRINT must clear the lake — centre AND four points ~4 m out — so a home never
-        // dips into the shore (user: "houses building on lake's edge, a little bit in").
-        if in_water(&zones, gx, gz) || in_water(&zones, gx + 4.0, gz) || in_water(&zones, gx - 4.0, gz) || in_water(&zones, gx, gz + 4.0) || in_water(&zones, gx, gz - 4.0) {
+        // occupancy is checked at the FINAL (clamped) cell — an occupied interior spot is skipped (the sim retries),
+        // never bumped to an awkward outside slot.
+        if store.query_radius(gx, gz, 6.0).into_iter().any(|s| store.get(s).map_or(false, |st| sk_is_building(st.kind) && (st.x - gx).powi(2) + (st.z - gz).powi(2) < 36.0)) {
             continue;
         }
-        // VARIED home (deterministic roll from the plot): cosy cabin / modest house / the occasional big "manor" (house)
+        let grave_clash = store.query_radius(gx, gz, 8.0).into_iter().any(|s| store.get(s).map_or(false, |st| st.kind == SK_GRAVE && (st.x - gx).powi(2) + (st.z - gz).powi(2) < 64.0));
+        if grave_clash {
+            continue;
+        }
+        // reject building ON or STRADDLING water — test the CENTRE + an 8-point ring at the house footprint, against
+        // BOTH zone water AND procedural NATURAL ponds. The old check tested only zone water (+ a 4-point cross), so a
+        // home straddled a natural pond's bank while the fence — which already tests both (see fit_walls) — correctly
+        // stayed clear → "a house built half inside the pond". The same `wet` test now keeps homes (and the growing
+        // town) off the water, so a settlement stops at the bank instead of engulfing the pond.
+        let wet = |x: f64, z: f64| in_water_seeded(&zs, x, z) || in_natural_pond(x, z);
+        let fr = 6.0; // footprint radius + a clear bank margin (homes sit on the ~8 m grid)
+        if wet(gx, gz) || (0..8).any(|k| { let a = k as f64 / 8.0 * std::f64::consts::TAU; wet(gx + a.cos() * fr, gz + a.sin() * fr) }) {
+            continue;
+        }
         let roll = hash1(gx * 1.7 + gz * 0.31);
-        let (kind, s) = if roll < 0.3 {
-            ("cabin", 0.85 + hash1(gx + 11.0) * 0.25)
+        let (kc, s) = if roll < 0.3 {
+            (SK_CABIN, 0.85 + hash1(gx + 11.0) * 0.25)
         } else if roll < 0.8 {
-            ("house", 0.9 + hash1(gz + 17.0) * 0.35)
+            (SK_HOUSE, 0.9 + hash1(gz + 17.0) * 0.35)
         } else {
-            ("house", 1.35 + hash1(gx + gz + 23.0) * 0.4)
+            (SK_HOUSE, 1.35 + hash1(gx + gz + 23.0) * 0.4)
         };
-        placed.push((gx, gz));
-        let _ = ops.push(object! { "op" => "add", "kind" => kind, "pos" => array![gx, 0.0, gz], "scale" => array![s, s, s] });
+        store.add(Structure { kind: kc, x: gx, z: gz, rot: 0.0, sx: s, sy: s, sz: s, color: 0, keep: false, region: 0 });
+        house_total += 1;
+        out.extend_from_slice(&[OP_ADD, kc as f64, gx, gz, 0.0, s, s, s, 0.0]);
     }
-    ops
+    out
 }
 
-/// WELL PLACEMENT — Rust owns it. A settler with no water in reach dug one; place it (grid-snapped, never in a lake,
-/// deduped so a cluster of diggers makes ONE well not a stack). Returns add-well ops. Ported from Scene `drainWells`.
-pub fn well_ops(world: &JsonValue, wells: &JsonValue) -> JsonValue {
-    let mut ops = JsonValue::new_array();
-    let zones = wzones_of(&zones_vec(world));
-    let mut existing: Vec<(f64, f64)> = world["objects"].members().filter(|o| o["kind"] == "well").map(pos_xz).collect();
-    for w in wells.members() {
-        let gx = (f(&w["x"]) / 4.0).round() * 4.0;
-        let gz = (f(&w["z"]) / 4.0).round() * 4.0;
-        if in_water(&zones, gx, gz) {
+/// DORMANT SETTLEMENT GROWTH (self-sustaining world). A far settlement the player isn't standing in should still
+/// DEVELOP over time — gain new homes, not just relax its population toward a FIXED seeded house count (which made
+/// only the live town grow while every other one plateaued). Given the cluster's existing house positions `houses`
+/// (`[x,z]×n`), this generates up to `want` build requests around the cluster centroid and runs them through the
+/// SAME live placement as a real settler (`build_ops_store`: water-safe, non-overlapping, footprint-clamped, colony-
+/// capped at ~30) via a THROWAWAY store seeded with the existing homes. So a dormant town builds out by the identical
+/// rules as a live one, just driven by the closed-form fast-forward instead of ticking settlers. `zones` = water
+/// zones `[px,pz,size,seed]×m`. Returns the new homes as the standard build op stream `[OP_ADD, kind, x, z, rot,
+/// sx, sy, sz, color]×k` (k ≤ want; JS already decodes this format). Deterministic in (cluster, seed). Returns empty
+/// once the colony is at its cap — growth STOPS at city size on its own (no runaway).
+pub fn grow_dormant_houses(houses: &[f64], want: usize, zones: &[f64], seed: f64) -> Vec<f64> {
+    if houses.len() < 2 || want == 0 {
+        return Vec::new();
+    }
+    let n = (houses.len() / 2) as f64;
+    let (mut cx, mut cz) = (0.0, 0.0);
+    for c in houses.chunks_exact(2) {
+        cx += c[0];
+        cz += c[1];
+    }
+    cx /= n;
+    cz /= n;
+    let mut max_r = 0.0f64;
+    for c in houses.chunks_exact(2) {
+        max_r = max_r.max((c[0] - cx).hypot(c[1] - cz));
+    }
+    // seed a throwaway store with the existing homes so build_ops_store sees a COLONY (→ infill) not bare ground (→
+    // it would reject each request under the found-new-town gap). build_ops_store self-adds what it places, so the
+    // batch also dedups against itself; the returned ops are ONLY the newly placed homes (the seeds aren't re-emitted).
+    let mut store = StructureStore::new();
+    for c in houses.chunks_exact(2) {
+        store.add(Structure { kind: SK_HOUSE, x: c[0], z: c[1], rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: true, region: 0 });
+    }
+    // build requests: a golden-angle spiral around the footprint (jittered by `seed` so successive pulses don't
+    // restack one spot); build_ops_store clamps each INSIDE footprint+GROW, so the town thickens then edges outward.
+    let ga = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+    let mut reqs: Vec<f64> = Vec::with_capacity(want * 2);
+    for i in 0..want {
+        let a = i as f64 * ga + seed * std::f64::consts::TAU;
+        let r = (max_r * 0.6 + (i as f64 + 1.0).sqrt() * 6.0).min(60.0);
+        reqs.push(cx + a.cos() * r);
+        reqs.push(cz + a.sin() * r);
+    }
+    build_ops_store(&mut store, &reqs, zones)
+}
+
+/// BINARY well_ops against the StructureStore (no JSON, O(local)). `reqs` = `[x,z]×n` settler well requests; `zones`
+/// = `[px,pz,size,seed]×m`. Returns the add-op stream `[OP_ADD, kind, x, z, rot, sx, sy, sz, color]×k` AND self-adds
+/// each placed well to the store (so the batch dedups against itself and future calls see it). Byte-parity with
+/// `well_ops` above — pinned by `well_ops_store_matches_json`. Dedup queries the store's 35 m neighbourhood, not the
+/// whole world, so cost is independent of total well count over a days-long world.
+pub fn well_ops_store(store: &mut StructureStore, reqs: &[f64], zones: &[f64]) -> Vec<f64> {
+    let z = zones_seeded(zones);
+    let mut out: Vec<f64> = Vec::new();
+    for w in reqs.chunks_exact(2) {
+        let gx = (w[0] / 4.0).round() * 4.0;
+        let gz = (w[1] / 4.0).round() * 4.0;
+        if in_water_seeded(&z, gx, gz) {
             continue; // a well in a lake is pointless
         }
-        if existing.iter().any(|&(ex, ez)| (ex - gx).powi(2) + (ez - gz).powi(2) < 35.0 * 35.0) {
-            continue; // a well already serves this spot (dedup, including others placed this batch)
+        // dedup: an existing well within 35 m already serves this spot (incl. ones placed earlier this batch)
+        let dup = store.query_radius(gx, gz, 35.0).into_iter().any(|s| {
+            store.get(s).map_or(false, |st| st.kind == SK_WELL && (st.x - gx).powi(2) + (st.z - gz).powi(2) < 35.0 * 35.0)
+        });
+        if dup {
+            continue;
         }
-        existing.push((gx, gz));
-        let _ = ops.push(object! { "op" => "add", "kind" => "well", "pos" => array![gx, 0.0, gz], "keep" => true });
+        store.add(Structure { kind: SK_WELL, x: gx, z: gz, rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: true, region: 0 });
+        out.extend_from_slice(&[OP_ADD, SK_WELL as f64, gx, gz, 0.0, 1.0, 1.0, 1.0, 0.0]);
     }
-    ops
+    out
 }
 
-/// COLONY VEGETATION — Rust owns it. Occasionally a broadleaf tree takes root near a home so a town greens over time
-/// (bounded ~1.3/building; never on a plot, another tree, or a lake). `seed` varies per call (the sim tick) for the
-/// gradual roll. Returns at most ONE add-tree op. Ported from Scene's colony-vegetation block.
-pub fn vegetation_ops(world: &JsonValue, seed: f64) -> JsonValue {
-    let mut ops = JsonValue::new_array();
-    let zones = wzones_of(&zones_vec(world));
+/// BINARY vegetation_ops against the StructureStore (no JSON). At most ONE add-tree op `[OP_ADD, SK_TREE, x, z, 0,
+/// s, s, s, 0]` (empty = none). `zones` = `[px,pz,size,seed]×m`. NOTE: unlike the other ports this is NOT byte-
+/// identical to the JSON path — the JSON path selected the home to plant beside by indexing `world.objects` in its
+/// incidental insertion order; the store has no such order, so we sort homes by (x,z) for a STABLE, deterministic
+/// selection. Cosmetic only (which home gets a tree); the town still greens deterministically.
+pub fn vegetation_ops_store(store: &mut StructureStore, seed: f64, zones: &[f64]) -> Vec<f64> {
+    let zs = zones_seeded(zones);
     let mut blds: Vec<(f64, f64)> = Vec::new();
     let mut blockers: Vec<(f64, f64)> = Vec::new(); // buildings + trees/pines (don't plant on top)
     let mut trees: Vec<(f64, f64)> = Vec::new();
-    for o in world["objects"].members() {
-        let k = o["kind"].as_str().unwrap_or("");
-        let p = pos_xz(o);
-        if matches!(k, "house" | "cabin" | "tower") {
-            blds.push(p);
-            blockers.push(p);
-        } else if k == "tree" || k == "pine" {
-            blockers.push(p);
-            if k == "tree" {
-                trees.push(p);
+    for s in store.live_slots() {
+        if let Some(st) = store.get(s) {
+            match st.kind {
+                SK_HOUSE | SK_CABIN | SK_TOWER => {
+                    blds.push((st.x, st.z));
+                    blockers.push((st.x, st.z));
+                }
+                SK_TREE => {
+                    blockers.push((st.x, st.z));
+                    trees.push((st.x, st.z));
+                }
+                SK_PINE => blockers.push((st.x, st.z)),
+                _ => {}
             }
         }
     }
+    blds.sort_by(|a, b| a.partial_cmp(b).unwrap()); // STABLE selection order (the store has no insertion order)
     let house_count = blds.len();
-    // colony trees ≈ trees within 18 m of a building (proxy for the JS treePrefix count → bounds the canopy)
     let colony_trees = trees.iter().filter(|&&(tx, tz)| blds.iter().any(|&(bx, bz)| (bx - tx).hypot(bz - tz) < 18.0)).count();
     if house_count < 3 || colony_trees >= (house_count as f64 * 1.3) as usize || hash1(seed) >= 0.55 {
-        return ops; // too small, leafy enough already, or the roll said "not this check"
+        return Vec::new();
     }
     let h = blds[(hash1(seed + 1.0) * house_count as f64) as usize % house_count];
     let ta = hash1(seed + 2.0) * TAU;
     let tr = 4.5 + hash1(seed + 3.0) * 6.0;
     let tx = h.0 + ta.cos() * tr;
     let tz = h.1 + ta.sin() * tr;
-    if in_water(&zones, tx, tz) || blockers.iter().any(|&(ox, oz)| (ox - tx).abs() < 2.6 && (oz - tz).abs() < 2.6) {
-        return ops; // on a plot / another tree / in a lake → skip
+    if in_water_seeded(&zs, tx, tz) || blockers.iter().any(|&(ox, oz)| (ox - tx).abs() < 2.6 && (oz - tz).abs() < 2.6) {
+        return Vec::new();
     }
     let s = 0.7 + hash1(seed + 4.0) * 0.5;
-    let _ = ops.push(object! { "op" => "add", "kind" => "tree", "pos" => array![tx, 0.0, tz], "scale" => array![s, s, s] });
-    ops
+    store.add(Structure { kind: SK_TREE, x: tx, z: tz, rot: 0.0, sx: s, sy: s, sz: s, color: 0, keep: false, region: 0 });
+    vec![OP_ADD, SK_TREE as f64, tx, tz, 0.0, s, s, s, 0.0]
 }
 
-/// IMMIGRATION DECISION — Rust owns the rescue logic (extinction-proofing + genetic rescue + anti-inbreeding gene
-/// flow). JS gathers the LIVE per-kind counts + vigour (from agentManager — Rust can't see the live agent set) and
-/// hands them in as `counts` = `{kind: {n, geneSum}, …}`; this decides HOW MANY of each deficient kind walk in, with
-/// rescued vigour, clustered near the player so founders can pair up. Returns add-creature ops (kind/pos/gene) that JS
-/// pushes into world.objects (→ revealed as agents). `seed` varies per check (the sim tick). Ported from Scene.
-pub fn immigration_ops(counts: &JsonValue, px: f64, pz: f64, global_avg: f64, seed: f64) -> JsonValue {
-    let mut ops = JsonValue::new_array();
-    const FLOORS: [(&str, usize); 5] = [("rabbit", 6), ("kangaroo", 4), ("person", 4), ("cat", 4), ("lion", 2)];
+// ── FOREST — plant/grow a wood ahead of the player (faithful port of city.ts forestOps) ──────────────────────
+const FOREST_KINDS: [&str; 3] = ["tree", "tree", "pine"];
+fn is_tree(k: &str) -> bool {
+    k == "tree" || k == "pine"
+}
+
+// ── LAKE — dig/enlarge a pond ahead of the player (faithful port of city.ts lakeOps) ──────────────────────────
+
+// ── Generator BINARY op stream (docs/world-data-architecture.md — the jzon-drop) ──────────────────────────────────
+// The generators (forest/lake/city) read a binary world snapshot + emit this flat tagged f64 stream INSTEAD of a jzon
+// ops array; JS decodes it back into the SAME engine Op[] (then fed to applyOps), so behaviour is parity-identical with
+// no JSON crossing the boundary. No string table needed — every field encodes as a number: kindCode (structpack), the
+// packed color u32, the material/shape codes below, and a REMOVE references its target zone/object by SLOT (its index
+// in the binary snapshot JS supplied), which JS maps back to the string id. Stride 10; meaning of lanes is per-op-type.
+pub const GEN_STRIDE: usize = 10;
+pub const GOP_ADD: f64 = 0.0; // [0, kindCode, x, z, sx, sy, sz, rot, colorU32, _]
+pub const GOP_ADDZONE: f64 = 1.0; // [1, x, z, size, materialCode, shapeCode, _, _, _, _]
+pub const GOP_REMOVE: f64 = 2.0; // [2, slot, _, _, _, _, _, _, _, _]
+pub const GOP_ADDPATH: f64 = 3.0; // [3, fromX, fromZ, toX, toZ, width, materialCode, _, _, _]
+pub const MAT_WATER: f64 = 0.0;
+pub const MAT_PATH: f64 = 1.0;
+pub const SHAPE_BLOB: f64 = 0.0;
+
+fn gop_add(out: &mut Vec<f64>, kind: u8, x: f64, z: f64, s: [f64; 3], rot: f64, color: u32) {
+    out.extend_from_slice(&[GOP_ADD, kind as f64, x, z, s[0], s[1], s[2], rot, color as f64, 0.0]);
+}
+fn gop_addzone(out: &mut Vec<f64>, x: f64, z: f64, size: f64, mat: f64, shape: f64) {
+    out.extend_from_slice(&[GOP_ADDZONE, x, z, size, mat, shape, 0.0, 0.0, 0.0, 0.0]);
+}
+fn gop_remove(out: &mut Vec<f64>, slot: usize) {
+    out.extend_from_slice(&[GOP_REMOVE, slot as f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+}
+fn gop_addpath(out: &mut Vec<f64>, from: (f64, f64), to: (f64, f64), width: f64, mat: f64) {
+    out.extend_from_slice(&[GOP_ADDPATH, from.0, from.1, to.0, to.1, width, mat, 0.0, 0.0, 0.0]);
+}
+
+/// LAKE (binary) — `zones` = WATER zones `[px,pz,size,seed]×n` (JS pre-filters to water; the seed lane is unused here).
+/// Same logic as `lake_ops`; a REMOVE references the chosen zone by its SLOT (index in `zones`), which JS maps to its id.
+pub fn lake_ops_bin(zones: &[f64], px: f64, pz: f64, yaw: f64) -> Vec<f64> {
+    let (fx, fz) = (yaw.sin(), -yaw.cos());
+    let (tx, tz) = (px + fx * 18.0, pz + fz * 18.0);
+    let mut best: Option<(usize, f64, f64, f64)> = None; // (slot, x, z, size)
+    let mut bd = f64::INFINITY;
+    for (slot, z) in zones.chunks_exact(4).enumerate() {
+        let (zx, zz, size) = (z[0], z[1], z[2]);
+        let d = (zx - tx).hypot(zz - tz);
+        if d < size + 16.0 && d < bd {
+            bd = d;
+            best = Some((slot, zx, zz, size));
+        }
+    }
+    let mut out = Vec::new();
+    if let Some((slot, zx, zz, size)) = best {
+        gop_remove(&mut out, slot);
+        gop_addzone(&mut out, zx, zz, size + 6.0, MAT_WATER, SHAPE_BLOB);
+    } else {
+        gop_addzone(&mut out, tx, tz, 13.0, MAT_WATER, SHAPE_BLOB);
+    }
+    out
+}
+
+/// FOREST (binary) — reads trees/pines from the store, water from `zones` (`[px,pz,size,seed]×n`). Same geometry as
+/// `forest_ops`; emits GOP_ADD tree ops at pre-placed spots (applyOps still collision-resolves them after JS decode).
+pub fn forest_ops_bin(store: &StructureStore, zones: &[f64], px: f64, pz: f64, yaw: f64) -> Vec<f64> {
+    let (fx, fz) = (yaw.sin(), -yaw.cos());
+    let (tx, tz) = (px + fx * 14.0, pz + fz * 14.0);
+    let near: Vec<(f64, f64)> = store
+        .live_slots()
+        .iter()
+        .filter_map(|&s| store.get(s))
+        .filter(|st| st.kind == SK_TREE || st.kind == SK_PINE)
+        .map(|st| (st.x, st.z))
+        .filter(|&(x, z)| (x - tx).hypot(z - tz) < 40.0)
+        .collect();
+    let (cx, cz) = if near.is_empty() {
+        (tx, tz)
+    } else {
+        let n = near.len() as f64;
+        (near.iter().map(|p| p.0).sum::<f64>() / n, near.iter().map(|p| p.1).sum::<f64>() / n)
+    };
+    let mut inner_r = 0.0f64;
+    for &(x, z) in &near {
+        inner_r = inner_r.max((x - cx).hypot(z - cz));
+    }
+    let outer_r = inner_r + if near.is_empty() { 14.0 } else { 16.0 };
+    let area = std::f64::consts::PI * (outer_r * outer_r - inner_r * inner_r);
+    let count = (area / 16.0).round().clamp(8.0, 32.0) as i32;
+    let ga = std::f64::consts::PI * (3.0 - 5.0f64.sqrt()); // golden angle
+    let zs = zones_seeded(zones);
+    let mut out = Vec::new();
+    for i in 0..count {
+        let t = (i as f64 + 0.5) / count as f64;
+        let r = (inner_r * inner_r + t * (outer_r * outer_r - inner_r * inner_r)).sqrt();
+        let a = i as f64 * ga + hash1(i as f64) * 0.6;
+        let jr = 1.0 + (hash1(i as f64 + 99.0) - 0.5) * 4.0;
+        let x = cx + a.cos() * (r + jr);
+        let z = cz + a.sin() * (r + jr);
+        if in_water_seeded(&zs, x, z) {
+            continue; // trees don't grow in the lake
+        }
+        let kind = if FOREST_KINDS[(hash1(i as f64 + 7.0) * FOREST_KINDS.len() as f64) as usize] == "pine" { SK_PINE } else { SK_TREE };
+        let s = 0.8 + hash1(i as f64 + 31.0) * 0.7;
+        gop_add(&mut out, kind, x, z, [s, s, s], hash1(i as f64 + 51.0) * 360.0, 0);
+    }
+    out
+}
+
+const MAT_PLAZA: f64 = 2.0; // GEN_MATERIAL index (must match structpack.ts GEN_MATERIAL)
+const SHAPE_RECT: f64 = 1.0; // GEN_SHAPE index
+
+/// "#rrggbb" → packed u32 (so a block's wall tone crosses the boundary as a number, not a string). 0 on a bad string.
+fn hex_to_u32(s: &str) -> u32 {
+    u32::from_str_radix(s.strip_prefix('#').unwrap_or(s), 16).unwrap_or(0)
+}
+
+/// CITY (binary) — reads buildings from the (seeded) store, water from `zones` (`[px,pz,size,seed]×n`), and the
+/// removable old spokes/plaza from `removables` (`[tag(0=path-from,1=plaza), x, z]×n`, JS maps a returned slot → id).
+/// Same geometry as `city_ops`; emits GOP_REMOVE/ADDZONE/ADDPATH/ADD (plaza, spoke roads, ring lamps, block buildings).
+pub fn city_ops_bin(store: &StructureStore, zones: &[f64], removables: &[f64], px: f64, pz: f64, yaw: f64) -> Vec<f64> {
+    let (fx, fz) = (yaw.sin(), -yaw.cos());
+    let (tx, tz) = (px + fx * 16.0, pz + fz * 16.0);
+    let near: Vec<(f64, f64)> = store
+        .live_slots()
+        .iter()
+        .filter_map(|&s| store.get(s))
+        .filter(|st| st.kind == SK_HOUSE || st.kind == SK_CABIN || st.kind == SK_TOWER)
+        .map(|st| (st.x, st.z))
+        .filter(|&(x, z)| (x - tx).hypot(z - tz) < 45.0)
+        .collect();
+    let (cx, cz) = if near.is_empty() {
+        (js_round(tx / 2.0) * 2.0, js_round(tz / 2.0) * 2.0)
+    } else {
+        let n = near.len() as f64;
+        (near.iter().map(|p| p.0).sum::<f64>() / n, near.iter().map(|p| p.1).sum::<f64>() / n)
+    };
+    let mut max_r = 0.0f64;
+    for &(x, z) in &near {
+        max_r = max_r.max((x - cx).hypot(z - cz));
+    }
+    const RING_GAP: f64 = 16.0;
+    let ring_r = if near.is_empty() { 16.0 } else { max_r + RING_GAP };
+    let ring = if near.is_empty() { 0.0 } else { js_round(max_r / RING_GAP) };
+    let spokes = 6;
+    let road_w = 4.0;
+    let edge = ring_r + 8.0;
+    let zs = zones_seeded(zones);
+    let mut out = Vec::new();
+
+    // RE-LAY: remove the old city spokes (paths from near the centre) + the old plaza, then re-add fresh ones below.
+    for (slot, r) in removables.chunks_exact(3).enumerate() {
+        let (tag, x, z) = (r[0], r[1], r[2]);
+        if (tag == 0.0 && (x - cx).hypot(z - cz) < 6.0) || (tag == 1.0 && (x - cx).hypot(z - cz) < 10.0) {
+            gop_remove(&mut out, slot);
+        }
+    }
+    if !in_water_seeded(&zs, cx, cz) {
+        gop_addzone(&mut out, cx, cz, 15.0f64.min(6.0 + ring * 2.0), MAT_PLAZA, SHAPE_RECT);
+    }
+    let mut spoke_ang: Vec<f64> = Vec::new();
+    for s in 0..spokes {
+        let ang = (s as f64 / spokes as f64) * TAU + 0.26;
+        spoke_ang.push(ang);
+        gop_addpath(&mut out, (cx, cz), (cx + ang.cos() * edge, cz + ang.sin() * edge), road_w, MAT_PATH);
+        let off = road_w / 2.0 + 0.6;
+        let lx = cx + ang.cos() * ring_r - ang.sin() * off;
+        let lz = cz + ang.sin() * ring_r + ang.cos() * off;
+        if !in_water_seeded(&zs, lx, lz) {
+            gop_add(&mut out, SK_LAMP, lx, lz, [1.0, 1.0, 1.0], 0.0, 0);
+        }
+    }
+
+    let spacing = 13.0 + ring * 3.0;
+    let count = js_round(TAU * ring_r / spacing).clamp(5.0, 30.0) as i32;
+    let district = district_for(ring as i32);
+    let clear_ang = 0.26f64.min((road_w / 2.0 + 2.0) / ring_r);
+    let sector_w = TAU / spokes as f64;
+    for i in 0..count {
+        let a = (i as f64 / count as f64) * TAU + ring * 0.4 + 0.13;
+        let mut on_road = false;
+        for &sa in &spoke_ang {
+            let da = ((((a - sa) % TAU) + TAU + std::f64::consts::PI) % TAU) - std::f64::consts::PI; // shortest angular dist
+            if da.abs() < clear_ang {
+                on_road = true;
+            }
+        }
+        if on_road {
+            continue; // leave the street clear
+        }
+        let jr = ring_r + (hash1(ring * 31.0 + i as f64 * 7.0) - 0.5) * RING_GAP * 0.4;
+        let x = cx + a.cos() * jr;
+        let z = cz + a.sin() * jr;
+        if in_water_seeded(&zs, x, z) {
+            continue; // never build on a lake
+        }
+        let sector = ((((a - 0.26) % TAU) + TAU) % TAU / sector_w).floor();
+        let b_seed = ring * 23.0 + sector * 7.0;
+        let tower_block = hash1(b_seed + 11.0) < district.tower_chance;
+        let block_tone = district.tones[(hash1(b_seed + 3.0) * district.tones.len() as f64) as usize];
+        let w_base = lerp(district.w, hash1(b_seed + 5.0));
+        let h_base = lerp(district.h, hash1(b_seed + 7.0));
+        let seed = i as f64 + ring * 17.0;
+        let (kind_code, is_tower) = if tower_block {
+            (SK_TOWER, true)
+        } else if BUILDINGS[(i % 2) as usize] == "house" {
+            (SK_HOUSE, false)
+        } else {
+            (SK_CABIN, false)
+        };
+        let wide = w_base * (0.92 + hash1(seed) * 0.16);
+        let tall = h_base * (0.9 + hash1(seed + 5.0) * 0.2);
+        let rot_deg = (cx - x).atan2(cz - z).to_degrees() + (hash1(seed + 9.0) - 0.5) * 16.0;
+        let color = if is_tower { 0 } else { hex_to_u32(block_tone) }; // a block shares one wall tone; towers keep stone
+        gop_add(&mut out, kind_code, x, z, [wide, tall, wide], rot_deg, color);
+    }
+    out
+}
+
+/// IMMIGRATION (binary) — `counts` = `[n, geneSum]×5` in FLOORS order (rabbit, kangaroo, person, cat, lion). Returns a
+/// flat `[floorIdx, x, z, gene]×n` add-creature stream (JS maps floorIdx → the kind string). Same rng draw order as
+/// `immigration_ops` so the founders land identically — only the JSON crossing is gone.
+pub fn immigration_ops_bin(counts: &[f64], px: f64, pz: f64, global_avg: f64, seed: f64) -> Vec<f64> {
+    const FLOOR: [usize; 5] = [6, 4, 4, 4, 2]; // floor counts; index → rabbit, kangaroo, person, cat, lion
     const GENEFLOW_MAX: usize = 8;
     const GENEFLOW_CHANCE: f64 = 0.18;
     let mut rng = Mulberry32::new((seed as i64 as u32).wrapping_add(0x9e37_79b9));
-    for (kind, floor) in FLOORS {
-        let entry = &counts[kind];
-        let n = f(&entry["n"]) as usize;
-        let avg = if n > 0 { f(&entry["geneSum"]) / n as f64 } else { global_avg };
-        // HOW MANY arrive: near-extinct (≤1) → a viable founding group (≥3); below floor → top up; small-but-stable →
-        // occasional fresh blood (gene flow).
+    let mut out = Vec::new();
+    for (idx, &floor) in FLOOR.iter().enumerate() {
+        let n = counts.get(idx * 2).copied().unwrap_or(0.0) as usize;
+        let gene_sum = counts.get(idx * 2 + 1).copied().unwrap_or(0.0);
+        let avg = if n > 0 { gene_sum / n as f64 } else { global_avg };
         let bring = if n <= 1 {
             floor.max(3)
         } else if n < floor {
@@ -593,105 +806,132 @@ pub fn immigration_ops(counts: &JsonValue, px: f64, pz: f64, global_avg: f64, se
         if bring == 0 {
             continue;
         }
-        // GENETIC RESCUE: robust dispersers (≥~1.12, biased above the struggling locals, with spread) → LIFTS a degraded
-        // pool + injects diversity. A wave lands as ONE cluster (founders within mate-finding range), not scattered.
         let center = avg.max(global_avg).max(1.12);
         let base_a = rng.next() * TAU;
-        let base_r = 140.0 + rng.next() * 130.0; // 140–270 m out (was 55–85): immigrants walk in from the WILD, not at the
-        // player's feet — so a rescue never pops a cluster INSIDE/at a settlement the player is standing in (user). Still
-        // within the live span (~300 m) so they materialise, and clustered so founders pair up.
+        let base_r = 140.0 + rng.next() * 130.0; // immigrants walk in from the WILD (140–270 m), clustered to pair up
         let bx = px + base_a.cos() * base_r;
         let bz = pz + base_a.sin() * base_r;
         for _ in 0..bring {
             let x = bx + (rng.next() - 0.5) * 12.0;
             let z = bz + (rng.next() - 0.5) * 12.0;
             let gene = (center - 0.06 + rng.next() * 0.34).clamp(crate::world::GENE_MIN, crate::world::GENE_MAX);
-            let _ = ops.push(object! { "op" => "add", "kind" => kind, "pos" => array![x, 0.0, z], "gene" => gene });
+            out.extend_from_slice(&[idx as f64, x, z, gene]);
         }
     }
-    ops
+    out
 }
 
-// ── FOREST — plant/grow a wood ahead of the player (faithful port of city.ts forestOps) ──────────────────────
-const FOREST_KINDS: [&str; 3] = ["tree", "tree", "pine"];
-fn is_tree(k: &str) -> bool {
-    k == "tree" || k == "pine"
-}
-
-/// Ops that plant (or grow) a forest. Centre = nearby trees' centroid (grows the same wood), else ahead of the
-/// player; fills the next annulus outward with golden-spiral-spread, jittered trees. Returns an ops JSON array.
-pub fn forest_ops(world: &JsonValue, px: f64, pz: f64, yaw: f64) -> JsonValue {
-    let mut ops = JsonValue::new_array();
-    let (fx, fz) = (yaw.sin(), -yaw.cos());
-    let (tx, tz) = (px + fx * 14.0, pz + fz * 14.0);
-    let near: Vec<(f64, f64)> = world["objects"]
-        .members()
-        .filter(|o| is_tree(o["kind"].as_str().unwrap_or("")))
-        .map(pos_xz)
-        .filter(|&(x, z)| (x - tx).hypot(z - tz) < 40.0)
-        .collect();
-
-    let (cx, cz) = if near.is_empty() {
-        (tx, tz)
-    } else {
-        let n = near.len() as f64;
-        (near.iter().map(|p| p.0).sum::<f64>() / n, near.iter().map(|p| p.1).sum::<f64>() / n)
+/// SETTLEMENT PLAN (binary) — a deterministic town plan, packed flat: `[radius, numPaths, numObjects, <paths: fromX,
+/// fromZ, toX, toZ × P>, <objects: kindCode, x, z, rot, sx, sy, sz × O>]`. PATHS first then OBJECTS, matching the
+/// shared id counter in `settlement_plan` (JS rebuilds ids `{prefix}p{n}` / `{prefix}o{n}` in this order). All objects
+/// are `keep` structures; y is 0 (grounded by the caller). Same rng draws as `settlement_plan` → identical town.
+pub fn settlement_plan_bin(cx: f64, cz: f64, size: &str, seed: u32) -> Vec<f64> {
+    let mut rng = Mulberry32::new(seed);
+    let p = tier(size);
+    let mut objs: Vec<f64> = Vec::new(); // [kindCode, x, z, rot, sx, sy, sz]×O
+    let mut paths: Vec<f64> = Vec::new(); // [fromX, fromZ, toX, toZ]×P
+    let half = (p.blocks as f64 * GAP) / 2.0;
+    let mut lines: Vec<f64> = Vec::new();
+    for i in 0..=p.blocks {
+        lines.push(-half + i as f64 * GAP);
+    }
+    // STREET GRID — a path along every grid line, both axes
+    for &off in &lines {
+        paths.extend_from_slice(&[cx - half, cz + off, cx + half, cz + off]);
+        paths.extend_from_slice(&[cx + off, cz - half, cx + off, cz + half]);
+    }
+    // HOUSES line the E–W streets, set back both sides, facing the road
+    let kinds: &[&str] = match size {
+        "hamlet" => &["cabin", "cabin", "house"],
+        "city" => &["house", "house", "cabin", "manor"],
+        _ => &["house", "cabin", "house"],
     };
-    let mut inner_r = 0.0f64;
-    for &(x, z) in &near {
-        inner_r = inner_r.max((x - cx).hypot(z - cz));
-    }
-    let outer_r = inner_r + if near.is_empty() { 14.0 } else { 16.0 };
-
-    let area = std::f64::consts::PI * (outer_r * outer_r - inner_r * inner_r);
-    let count = (area / 16.0).round().clamp(8.0, 32.0) as i32;
-    let ga = std::f64::consts::PI * (3.0 - 5.0f64.sqrt()); // golden angle
-    let zones = wzones_of(&zones_vec(world));
-    for i in 0..count {
-        let t = (i as f64 + 0.5) / count as f64;
-        let r = (inner_r * inner_r + t * (outer_r * outer_r - inner_r * inner_r)).sqrt();
-        let a = i as f64 * ga + hash1(i as f64) * 0.6;
-        let jr = 1.0 + (hash1(i as f64 + 99.0) - 0.5) * 4.0;
-        let x = cx + a.cos() * (r + jr);
-        let z = cz + a.sin() * (r + jr);
-        if in_water(&zones, x, z) {
-            continue; // trees don't grow in the lake
+    let mut placed = 0;
+    let cols = ((p.blocks as f64 * GAP) / HOUSE_SPACING).floor().max(1.0) as i32;
+    'outer: for &off in &lines {
+        for c in 0..=cols {
+            for &side_z in &[-SETBACK, SETBACK] {
+                if placed >= p.houses {
+                    break 'outer;
+                }
+                if rng.next() < 0.18 {
+                    continue; // a few empty plots
+                }
+                let hx = cx - half + 4.0 + c as f64 * HOUSE_SPACING + (rng.next() - 0.5) * 1.4;
+                let hz = cz + off + side_z + (rng.next() - 0.5) * 1.2;
+                let kind = kinds[(rng.next() * kinds.len() as f64) as usize];
+                let s = 0.9 + rng.next() * 0.5;
+                objs.extend_from_slice(&[sk_code(kind) as f64, hx, hz, if side_z < 0.0 { 0.0 } else { 180.0 }, s, s, s]);
+                placed += 1;
+            }
         }
-        let kind = FOREST_KINDS[(hash1(i as f64 + 7.0) * FOREST_KINDS.len() as f64) as usize];
-        let s = 0.8 + hash1(i as f64 + 31.0) * 0.7;
-        let _ = ops.push(object! { "op" => "add", "kind" => kind, "pos" => array![x, 0.0, z], "scale" => array![s, s, s], "rot" => hash1(i as f64 + 51.0) * 360.0 });
     }
-    ops
+    // CENTRAL PLAZA: a well at the crossroads + a lamp beside it
+    objs.extend_from_slice(&[sk_code("well") as f64, cx, cz, 0.0, 1.0, 1.0, 1.0]);
+    objs.extend_from_slice(&[sk_code("lamp") as f64, cx + 2.5, cz + 2.5, 0.0, 1.0, 1.0, 1.0]);
+    // WATCHTOWER(S) at corners
+    for t in 0..p.towers {
+        let corner = if t == 0 { [-half, -half] } else { [half, half] };
+        objs.extend_from_slice(&[sk_code("tower") as f64, cx + corner[0], cz + corner[1], 0.0, 1.0, 1.3, 1.0]);
+    }
+    // LAMPS at street intersections (skip the centre — the well's there)
+    for &ox in &lines {
+        for &oz in &lines {
+            if ox == 0.0 && oz == 0.0 {
+                continue;
+            }
+            if rng.next() < 0.5 {
+                objs.extend_from_slice(&[sk_code("lamp") as f64, cx + ox, cz + oz, 0.0, 1.0, 1.0, 1.0]);
+            }
+        }
+    }
+    // PERIMETER FENCE (town/city) — a ring just outside the grid with a GATE gap on the +X road
+    if p.fenced {
+        let r = half + 6.0;
+        let per = 2.0 * std::f64::consts::PI * r;
+        let segs = (per / 1.4).floor().max(8.0) as i32;
+        for i in 0..segs {
+            let ang = (i as f64 / segs as f64) * std::f64::consts::PI * 2.0;
+            if ang.abs() < 0.18 || (ang - std::f64::consts::PI * 2.0).abs() < 0.18 {
+                continue; // gate gap
+            }
+            objs.extend_from_slice(&[sk_code("fence") as f64, cx + ang.cos() * r, cz + ang.sin() * r, ang.to_degrees() + 90.0, 1.0, 1.0, 1.0]);
+        }
+    }
+    let radius = half + if p.fenced { 8.0 } else { 4.0 };
+    let mut out = vec![radius, (paths.len() / 4) as f64, (objs.len() / 7) as f64];
+    out.extend_from_slice(&paths);
+    out.extend_from_slice(&objs);
+    out
 }
 
-// ── LAKE — dig/enlarge a pond ahead of the player (faithful port of city.ts lakeOps) ──────────────────────────
-/// Ops to dig (or grow) a lake: a fresh organic pond ahead of you, or — if you're at an existing one — remove it
-/// and re-add a bigger zone centred the same. Returns an ops JSON array.
-pub fn lake_ops(world: &JsonValue, px: f64, pz: f64, yaw: f64) -> JsonValue {
-    let mut ops = JsonValue::new_array();
-    let (fx, fz) = (yaw.sin(), -yaw.cos());
-    let (tx, tz) = (px + fx * 18.0, pz + fz * 18.0);
-    let mut best: Option<(String, f64, f64, f64)> = None; // (id, x, z, size)
-    let mut bd = f64::INFINITY;
-    for z in world["zones"].members() {
-        if z["material"].as_str() != Some("water") {
-            continue;
-        }
-        let (zx, zz) = pos_xz(z);
-        let size = f(&z["size"]);
-        let d = (zx - tx).hypot(zz - tz);
-        if d < size + 16.0 && d < bd {
-            bd = d;
-            best = Some((z["id"].as_str().unwrap_or("").to_string(), zx, zz, size));
-        }
+/// DEMO GALLERY (binary) — Rust owns the whole multi-town LAYOUT (mutual SPACING, column grid, per-site size + seed),
+/// not just each town's plan, per "Rust owns all compute". A spaced gallery of every settlement size for seeding /
+/// preview. Returns `[numSites, numPaths, numObjects, <sites: cx,cz,sizeCode × S>, <paths×4>, <objects×7>]` (paths
+/// then objects, with global ids assigned JS-side). Bump `GAP` here — never in the renderer — to change the spread.
+pub fn demo_gallery_bin() -> Vec<f64> {
+    const GAP: f64 = 480.0; // mutual distance between seeded towns (doubled from the old JS 240)
+    const COLS: i64 = 4;
+    const COUNT: i64 = 12;
+    const SIZES: [&str; 4] = ["hamlet", "village", "town", "city"];
+    let mut sites: Vec<f64> = Vec::new();
+    let mut all_paths: Vec<f64> = Vec::new();
+    let mut all_objs: Vec<f64> = Vec::new();
+    for k in 0..COUNT {
+        let sidx = (k as usize) % SIZES.len();
+        let cx = 160.0 + (k % COLS) as f64 * GAP;
+        let cz = -GAP + (k / COLS) as f64 * GAP;
+        sites.extend_from_slice(&[cx, cz, sidx as f64]);
+        let plan = settlement_plan_bin(cx, cz, SIZES[sidx], (k * 1000 + 7) as u32);
+        let (np, no) = (plan[1] as usize, plan[2] as usize);
+        all_paths.extend_from_slice(&plan[3..3 + np * 4]);
+        all_objs.extend_from_slice(&plan[3 + np * 4..3 + np * 4 + no * 7]);
     }
-    if let Some((id, zx, zz, size)) = best {
-        let _ = ops.push(object! { "op" => "remove", "id" => id });
-        let _ = ops.push(object! { "op" => "addZone", "material" => "water", "shape" => "blob", "pos" => array![zx, 0.0, zz], "size" => size + 6.0 });
-    } else {
-        let _ = ops.push(object! { "op" => "addZone", "material" => "water", "shape" => "blob", "pos" => array![tx, 0.0, tz], "size" => 13.0 });
-    }
-    ops
+    let mut out = vec![COUNT as f64, (all_paths.len() / 4) as f64, (all_objs.len() / 7) as f64];
+    out.extend_from_slice(&sites);
+    out.extend_from_slice(&all_paths);
+    out.extend_from_slice(&all_objs);
+    out
 }
 
 // ── CITY — build/grow a concentric, district-zoned city ahead of the player (port of city.ts cityOps) ─────────
@@ -726,112 +966,6 @@ fn js_round(x: f64) -> f64 {
     (x + 0.5).floor()
 }
 
-/// Ops that build (or grow) a city — the next concentric ring outward of district-zoned, plaza-facing buildings +
-/// radial spoke roads + lamps + a growing central plaza. Faithful port of city.ts cityOps. Returns an ops array.
-pub fn city_ops(world: &JsonValue, px: f64, pz: f64, yaw: f64) -> JsonValue {
-    let mut ops = JsonValue::new_array();
-    let (fx, fz) = (yaw.sin(), -yaw.cos());
-    let (tx, tz) = (px + fx * 16.0, pz + fz * 16.0);
-    let near: Vec<(f64, f64)> = world["objects"]
-        .members()
-        .filter(|o| is_building(o["kind"].as_str().unwrap_or("")))
-        .map(pos_xz)
-        .filter(|&(x, z)| (x - tx).hypot(z - tz) < 45.0)
-        .collect();
-
-    let (cx, cz) = if near.is_empty() {
-        (js_round(tx / 2.0) * 2.0, js_round(tz / 2.0) * 2.0)
-    } else {
-        let n = near.len() as f64;
-        (near.iter().map(|p| p.0).sum::<f64>() / n, near.iter().map(|p| p.1).sum::<f64>() / n)
-    };
-    let mut max_r = 0.0f64;
-    for &(x, z) in &near {
-        max_r = max_r.max((x - cx).hypot(z - cz));
-    }
-    const RING_GAP: f64 = 16.0;
-    let ring_r = if near.is_empty() { 16.0 } else { max_r + RING_GAP };
-    let ring = if near.is_empty() { 0.0 } else { js_round(max_r / RING_GAP) };
-    let spokes = 6;
-    let road_w = 4.0;
-    let edge = ring_r + 8.0;
-
-    // RE-LAY the road network + plaza so they always reach the rim as the city grows: remove the old city spokes
-    // (paths starting at the centre) and the old plaza; fresh ones are added below. User-drawn roads are untouched.
-    for p in world["paths"].members() {
-        if (f(&p["from"][0]) - cx).hypot(f(&p["from"][2]) - cz) < 6.0 {
-            let _ = ops.push(object! { "op" => "remove", "id" => p["id"].as_str().unwrap_or("") });
-        }
-    }
-    for z in world["zones"].members() {
-        if z["material"].as_str() == Some("plaza") {
-            let (zx, zz) = pos_xz(z);
-            if (zx - cx).hypot(zz - cz) < 10.0 {
-                let _ = ops.push(object! { "op" => "remove", "id" => z["id"].as_str().unwrap_or("") });
-            }
-        }
-    }
-    let zones = wzones_of(&zones_vec(world));
-    if !in_water(&zones, cx, cz) {
-        let _ = ops.push(object! { "op" => "addZone", "material" => "plaza", "shape" => "rect", "pos" => array![cx, 0.0, cz], "size" => 15.0f64.min(6.0 + ring * 2.0) });
-    }
-    let mut spoke_ang: Vec<f64> = Vec::new();
-    for s in 0..spokes {
-        let ang = (s as f64 / spokes as f64) * TAU + 0.26;
-        spoke_ang.push(ang);
-        let _ = ops.push(object! { "op" => "addPath", "material" => "path", "fromPos" => array![cx, 0.0, cz], "toPos" => array![cx + ang.cos() * edge, 0.0, cz + ang.sin() * edge], "width" => road_w });
-        let off = road_w / 2.0 + 0.6;
-        let lx = cx + ang.cos() * ring_r - ang.sin() * off;
-        let lz = cz + ang.sin() * ring_r + ang.cos() * off;
-        if !in_water(&zones, lx, lz) {
-            let _ = ops.push(object! { "op" => "add", "kind" => "lamp", "pos" => array![lx, 0.0, lz] });
-        }
-    }
-
-    let spacing = 13.0 + ring * 3.0;
-    let count = js_round(TAU * ring_r / spacing).clamp(5.0, 30.0) as i32;
-    let district = district_for(ring as i32);
-    let clear_ang = 0.26f64.min((road_w / 2.0 + 2.0) / ring_r);
-    let sector_w = TAU / spokes as f64;
-    for i in 0..count {
-        let a = (i as f64 / count as f64) * TAU + ring * 0.4 + 0.13;
-        let mut on_road = false;
-        for &sa in &spoke_ang {
-            let da = ((((a - sa) % TAU) + TAU + std::f64::consts::PI) % TAU) - std::f64::consts::PI; // shortest angular dist
-            if da.abs() < clear_ang {
-                on_road = true;
-            }
-        }
-        if on_road {
-            continue; // leave the street clear
-        }
-        let jr = ring_r + (hash1(ring * 31.0 + i as f64 * 7.0) - 0.5) * RING_GAP * 0.4;
-        let x = cx + a.cos() * jr;
-        let z = cz + a.sin() * jr;
-        if in_water(&zones, x, z) {
-            continue; // never build on a lake
-        }
-        // BLOCK coherence: everything in the same wedge of the same ring shares a style baseline
-        let sector = ((((a - 0.26) % TAU) + TAU) % TAU / sector_w).floor();
-        let b_seed = ring * 23.0 + sector * 7.0;
-        let tower_block = hash1(b_seed + 11.0) < district.tower_chance;
-        let block_tone = district.tones[(hash1(b_seed + 3.0) * district.tones.len() as f64) as usize];
-        let w_base = lerp(district.w, hash1(b_seed + 5.0));
-        let h_base = lerp(district.h, hash1(b_seed + 7.0));
-        let seed = i as f64 + ring * 17.0;
-        let kind = if tower_block { "tower" } else { BUILDINGS[(i % 2) as usize] };
-        let wide = w_base * (0.92 + hash1(seed) * 0.16);
-        let tall = h_base * (0.9 + hash1(seed + 5.0) * 0.2);
-        let rot_deg = (cx - x).atan2(cz - z).to_degrees() + (hash1(seed + 9.0) - 0.5) * 16.0;
-        let mut o = object! { "op" => "add", "kind" => kind, "pos" => array![x, 0.0, z], "rot" => rot_deg, "scale" => array![wide, tall, wide] };
-        if kind != "tower" {
-            o["color"] = block_tone.into(); // towers keep stone; a block shares one wall tone
-        }
-        let _ = ops.push(o);
-    }
-    ops
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,273 +986,275 @@ mod tests {
     }
 
     #[test]
-    fn settlement_scales_with_tier() {
-        let hamlet = settlement_plan(0.0, 0.0, "hamlet", 7, "t_");
-        let city = settlement_plan(0.0, 0.0, "city", 7, "t_");
-        let houses = |v: &JsonValue| v["objects"].members().filter(|o| matches!(o["kind"].as_str(), Some("house" | "cabin" | "manor"))).count();
-        assert!(houses(&city) > houses(&hamlet), "a city should plan more houses than a hamlet");
-        // a city is fenced; a hamlet is not
-        let fenced = |v: &JsonValue| v["objects"].members().any(|o| o["kind"] == "fence");
-        assert!(fenced(&city) && !fenced(&hamlet));
+    fn well_ops_store_dedups_and_avoids_water() {
+        // BINARY well placement: seed the store with an existing well + pack the lake zone (carrying its computed
+        // seed). Three requests — near the existing well (deduped) · in the lake (rejected) · fresh dry ground (built)
+        // — must yield exactly the one fresh dry well.
+        let mut store = StructureStore::new();
+        store.add(Structure { kind: SK_WELL, x: 0.0, z: 0.0, rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: true, region: 0 });
+        let reqs = [5.0, 0.0, 100.0, 0.0, 300.0, 0.0];
+        let zones = [100.0, 0.0, 20.0, crate::engine::water_seed("lake")];
+        let bin_adds: Vec<(f64, f64)> = well_ops_store(&mut store, &reqs, &zones).chunks_exact(9).map(|c| (c[2], c[3])).collect();
+        assert_eq!(bin_adds.len(), 1, "only the fresh dry well builds (dedup + water rejection)");
+        let (wx, wz) = bin_adds[0];
+        assert!((wx - 300.0).abs() < 1e-9 && wz.abs() < 1e-9, "the placed well is the fresh dry one at ~300,0, got {bin_adds:?}");
     }
 
     #[test]
-    fn grave_site_buries_outside_town_and_skips_wild_deaths() {
-        let world = object! {
-            "objects" => array![
-                object! { "id" => "h0", "kind" => "house", "pos" => array![0.0, 0.0, 0.0] },
-                object! { "id" => "h1", "kind" => "house", "pos" => array![10.0, 0.0, 0.0] },
-            ],
-            "zones" => array![],
-        };
-        // a death near the town → a grave OUTSIDE the home cluster (centroid ~(5,0))
-        let r = grave_site(&world, 5.0, 4.0);
-        assert!(!r.is_null(), "a death near a settlement should get a grave");
-        let d = (f(&r["x"]) - 5.0).hypot(f(&r["z"]));
-        assert!(d > 15.0, "grave should sit OUTSIDE the homes, got dist {d}");
-        // a WILD death (no building within ~70 m) → no grave
-        assert!(grave_site(&world, 600.0, 600.0).is_null(), "a wild death gets no grave");
-    }
-
-    #[test]
-    fn grave_site_never_in_water() {
-        // the town sits under one big lake → every plot direction is wet → no grave (engine knows water)
-        let world = object! {
-            "objects" => array![object! { "id" => "h0", "kind" => "house", "pos" => array![0.0, 0.0, 0.0] }],
-            "zones" => array![object! { "material" => "water", "shape" => "blob", "pos" => array![0.0, 0.0, 0.0], "size" => 200.0 }],
-        };
-        assert!(grave_site(&world, 2.0, 2.0).is_null(), "no dry ground anywhere → no grave in the lake");
-    }
-
-    #[test]
-    fn settlement_ops_walls_a_cluster_and_is_idempotent() {
-        let world = object! {
-            "objects" => array![
-                object! { "id" => "h0", "kind" => "house", "pos" => array![0.0, 0.0, 0.0] },
-                object! { "id" => "h1", "kind" => "house", "pos" => array![12.0, 0.0, 0.0] },
-            ],
-            "zones" => array![],
-        };
-        let ops = settlement_ops(&world);
-        let adds: Vec<JsonValue> = ops.members().filter(|o| o["op"] == "add" && o["kind"] == "fence").cloned().collect();
-        assert!(adds.len() > 8, "two homes should be walled by several panels, got {}", adds.len());
-        // apply the panels, then re-run → IDEMPOTENT (the position-diff finds them all → no new ops)
-        let mut w2 = world.clone();
-        for (i, a) in adds.iter().enumerate() {
-            let _ = w2["objects"].push(object! { "id" => format!("f{i}"), "kind" => "fence", "pos" => a["pos"].clone() });
+    fn grave_site_store_buries_outside_town_and_skips_wild_deaths() {
+        // BINARY grave placement: a death inside a 3-home town gets a dry plot OUTSIDE the home cluster (centroid
+        // ~(5,3.3)); a wild death (no building in range) gets none.
+        let mut store = StructureStore::new();
+        let homes = [(0.0, 0.0), (10.0, 0.0), (5.0, 10.0)];
+        for &(x, z) in &homes {
+            store.add(Structure { kind: SK_HOUSE, x, z, rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: false, region: 0 });
         }
-        let ops2 = settlement_ops(&w2);
-        assert_eq!(ops2.members().count(), 0, "an already-walled town should emit nothing (idempotent), got {}", ops2.members().count());
-    }
-
-    // a fence panel's ground line: centre, unit direction (local +X under the Y-rotation), length
-    fn panel_dir_len(o: &JsonValue) -> ((f64, f64), (f64, f64), f64) {
-        let (x, z) = pos_xz(o);
-        let rot = f(&o["rot"]) * std::f64::consts::PI / 180.0;
-        let len = f(&o["scale"][0]) * 1.4;
-        ((x, z), (rot.cos(), -rot.sin()), len)
-    }
-    // two panels OVERLAP if they're near-parallel (<~10°), on the same line (perp < 0.5 m), and their extents overlap
-    // by > 1 m — i.e. stacked / duplicated. (Corner panels meet at an ANGLE, so they're excluded; a convex ring can't
-    // cross itself.)
-    fn panels_overlap(a: &JsonValue, b: &JsonValue) -> bool {
-        let (ca, da, la) = panel_dir_len(a);
-        let (cb, db, lb) = panel_dir_len(b);
-        if (da.0 * db.0 + da.1 * db.1).abs() < 0.985 {
-            return false;
-        }
-        let rel = (cb.0 - ca.0, cb.1 - ca.1);
-        let along = rel.0 * da.0 + rel.1 * da.1;
-        let perp = (rel.0 - da.0 * along, rel.1 - da.1 * along);
-        if perp.0.hypot(perp.1) > 0.5 {
-            return false;
-        }
-        let lo = (-la / 2.0).max((along - lb / 2.0).min(along + lb / 2.0));
-        let hi = (la / 2.0).min((along - lb / 2.0).max(along + lb / 2.0));
-        hi - lo > 1.0
+        let (dx, dz) = (6.0, 4.0);
+        let bin = grave_site_store(&store, dx, dz, &[]);
+        assert!(!bin.is_empty(), "a death inside the town gets a plot");
+        let (cx, cz) = (5.0, 10.0 / 3.0); // home centroid
+        let d = (bin[0] - cx).hypot(bin[1] - cz);
+        assert!(d > 10.0, "the grave sits OUTSIDE the homes (d={d} m from centroid), got {bin:?}");
+        // a wild death (no town in range) → no grave
+        assert!(grave_site_store(&store, 500.0, 500.0, &[]).is_empty(), "a wild death gets no grave");
     }
 
     #[test]
-    fn settlement_wall_is_a_complete_closed_ring() {
-        // the wall must be COMPLETE — no gate, no missing section (user: "fence not fully complete"). Build a town's
-        // wall, take each panel's bearing from the home centroid, sort, and assert NO angular gap between consecutive
-        // panels is large enough to be a hole (panels abut all the way round).
-        let world = object! {
-            "objects" => array![
-                object! { "id" => "h0", "kind" => "house", "pos" => array![0.0, 0.0, 0.0] },
-                object! { "id" => "h1", "kind" => "house", "pos" => array![14.0, 0.0, 6.0] },
-                object! { "id" => "h2", "kind" => "house", "pos" => array![6.0, 0.0, 16.0] },
-            ],
-            "zones" => array![],
-        };
-        let (cx, cz) = (20.0 / 3.0, 22.0 / 3.0); // home centroid (matches settlement_ops)
-        let mut angs: Vec<f64> = settlement_ops(&world)
-            .members()
-            .filter(|o| o["op"] == "add" && o["kind"] == "fence")
-            .map(|o| (f(&o["pos"][2]) - cz).atan2(f(&o["pos"][0]) - cx))
-            .collect();
-        assert!(angs.len() > 12, "expected a full wall, got {} panels", angs.len());
-        angs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mut max_gap = 0.0f64;
-        for i in 0..angs.len() {
-            let next = if i + 1 < angs.len() { angs[i + 1] } else { angs[0] + TAU };
-            max_gap = max_gap.max(next - angs[i]);
+    fn grow_dormant_houses_develops_a_far_town_and_caps() {
+        // a small dormant cluster (3 homes) — far-town development should ADD homes around it, water-safe + clamped.
+        let cluster = [0.0, 0.0, 8.0, 0.0, 0.0, 8.0];
+        let ops = grow_dormant_houses(&cluster, 4, &[], 0.37);
+        let adds: Vec<(f64, f64)> = ops.chunks_exact(9).map(|c| (c[2], c[3])).collect();
+        assert!(!adds.is_empty() && adds.len() <= 4, "1..=4 new homes added, got {}", adds.len());
+        // each new home is a building kind (house/cabin) and near the cluster (within the footprint, not flung away)
+        for c in ops.chunks_exact(9) {
+            assert_eq!(c[0], OP_ADD);
+            assert!(c[1] == SK_HOUSE as f64 || c[1] == SK_CABIN as f64, "a home kind, got {}", c[1]);
+            assert!((c[2]).hypot(c[3]) < 80.0, "new home stays near the cluster ({}, {})", c[2], c[3]);
         }
-        assert!(max_gap < 0.6, "the ring has a HOLE: widest gap between panels is {max_gap:.2} rad (should be a tight, complete ring)");
+        // CAP: a cluster already at the colony cap (30 homes within 75 m) grows no further.
+        let mut full: Vec<f64> = Vec::new();
+        for i in 0..30 {
+            let a = i as f64 * 0.7;
+            full.push(a.cos() * 30.0);
+            full.push(a.sin() * 30.0);
+        }
+        assert!(grow_dormant_houses(&full, 4, &[], 0.5).is_empty(), "a colony at its cap stops building");
+        // want=0 and an empty cluster are no-ops
+        assert!(grow_dormant_houses(&cluster, 0, &[], 0.1).is_empty());
+        assert!(grow_dormant_houses(&[], 4, &[], 0.1).is_empty());
     }
 
-    // P2 (docs/spread-redesign.md): adding ONE house must NOT tear down + rebuild the whole ring. With the per-vertex
-    // wobble anchored to a STABLE corner home (not the drifting centroid), a build keeps almost every existing panel
-    // (the position-diff still matches) instead of mass remove+re-add (the "fence jumps/churns on every build" bug).
     #[test]
-    fn settlement_wall_is_stable_when_a_house_is_added() {
-        let homes = |extra: bool| {
-            let mut o = array![
-                object! { "id" => "h0", "kind" => "house", "pos" => array![0.0, 0.0, 0.0] },
-                object! { "id" => "h1", "kind" => "house", "pos" => array![10.0, 0.0, 2.0] },
-                object! { "id" => "h2", "kind" => "house", "pos" => array![3.0, 0.0, 11.0] },
-                object! { "id" => "h3", "kind" => "house", "pos" => array![12.0, 0.0, 12.0] },
-            ];
-            if extra {
-                let _ = o.push(object! { "id" => "h4", "kind" => "house", "pos" => array![6.0, 0.0, 5.0] }); // an INFILL house inside the hull
+    fn build_ops_store_clamps_infill_inside() {
+        // The settlement-growth rule (user): a build NEAR a town is pulled INSIDE its footprint (the wall doesn't
+        // balloon to wrap a house dropped just outside it); a build in the founding dead-zone is rejected; a build far
+        // enough founds a NEW town at its requested spot. (This intentionally DIVERGES from the old build_ops — that
+        // jzon twin is being retired — so it's no longer a parity test.)
+        let mut store = StructureStore::new();
+        for &(x, z) in &[(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)] {
+            store.add(Structure { kind: SK_HOUSE, x, z, rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: false, region: 0 });
+        }
+        // cluster centroid ≈ (2.7, 2.7), spread ≈ 6 m → infill limit ≈ 14 m. Requests: infill dropped 60 m out (in the
+        // band) · founding dead-zone @ 120 m (rejected) · open ground @ 400 m (founds a town).
+        let breqs = [60.0, 0.0, 120.0, 0.0, 400.0, 0.0];
+        let adds: Vec<(f64, f64)> = build_ops_store(&mut store, &breqs, &[]).chunks_exact(9).map(|c| (c[2], c[3])).collect();
+
+        assert_eq!(adds.len(), 2, "the clamped infill + the far founding land; the dead-zone build is rejected");
+        let infill = adds.iter().find(|&&(x, _)| x < 100.0).expect("an infill build");
+        let d = (infill.0 - 2.7_f64).hypot(infill.1 - 2.7);
+        assert!(d < 24.0, "infill pulled INSIDE the footprint (d={d} m from centroid), not left at the requested 60 m");
+        assert!(adds.iter().any(|&(x, _)| x > 390.0), "the far build founds a NEW town at its requested ~400 m");
+    }
+
+    #[test]
+    fn settlement_ops_store_walls_a_cluster_and_is_idempotent() {
+        // BINARY wall fit: 3 spread homes are ringed by a real closed wall (>12 panels), and the position-diff state
+        // lives in the store so re-fitting with no change emits zero ops (STATEFUL idempotency).
+        let mut store = StructureStore::new();
+        for &(x, z) in &[(0.0, 0.0), (14.0, 6.0), (6.0, 16.0)] {
+            store.add(Structure { kind: SK_HOUSE, x, z, rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: false, region: 0 });
+        }
+        let bin = settlement_ops_store(&mut store, &[], &[]);
+        let panels = bin.chunks_exact(9).filter(|c| c[0] == OP_ADD).count();
+        assert!(panels > 12, "a real closed wall, got {panels} panels");
+        // STATEFUL idempotency: the store now holds the fences; re-fitting with no change emits nothing (the diff lives in the store).
+        assert!(settlement_ops_store(&mut store, &[], &[]).is_empty(), "idempotent re-fit emits zero ops");
+    }
+
+    #[test]
+    fn settlement_ops_store_local_fit_leaves_other_towns() {
+        // LOCAL fit: when a structure changes in town A, ONLY town A's wall re-fits — town B's stored wall is left
+        // exactly as-is (the "fence moves randomly while I fly over another town" fix). A whole-world re-fit off the
+        // partial live home set was the bug; now `changed` scopes it.
+        let mut store = StructureStore::new();
+        let home = |s: &mut StructureStore, x: f64, z: f64| s.add(Structure { kind: SK_HOUSE, x, z, rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: false, region: 0 });
+        for &(x, z) in &[(0.0, 0.0), (12.0, 0.0), (0.0, 12.0)] {
+            home(&mut store, x, z); // town A at origin
+        }
+        for &(x, z) in &[(300.0, 0.0), (312.0, 0.0), (300.0, 12.0)] {
+            home(&mut store, x, z); // town B, 300 m east
+        }
+        let _ = settlement_ops_store(&mut store, &[], &[]); // fit EVERY town once (load reconcile)
+        let b_wall = |s: &StructureStore| s.live_slots().iter().filter_map(|&sl| s.get(sl)).filter(|st| st.kind == SK_FENCE && (st.x - 304.0).hypot(st.z - 4.0) < 60.0).map(|st| ((st.x * 100.0) as i64, (st.z * 100.0) as i64)).collect::<std::collections::BTreeSet<_>>();
+        let b_before = b_wall(&store);
+
+        home(&mut store, 8.0, 8.0); // a settler raises a NEW home in town A
+        let ops = settlement_ops_store(&mut store, &[], &[8.0, 8.0]); // re-fit ONLY town A (the change is at 8,8)
+        let b_after = b_wall(&store);
+
+        assert_eq!(b_before, b_after, "town B's wall must be byte-identical when only town A changes");
+        assert!(!b_before.is_empty(), "town B actually has a wall (guards a vacuous test)");
+        assert!(ops.chunks_exact(9).any(|c| c[0] == OP_ADD), "town A re-fit + grew its wall for the new home");
+    }
+
+    #[test]
+    fn settlement_ops_store_refit_after_shrink_leaves_no_stranded_ring() {
+        // A WIDE town is walled, then its WEST homes decay away → its footprint shrinks + its centroid shifts east. The
+        // re-fit must RECLAIM the old wide ring's far-west panels (owned by nearest home), not strand them as a phantom
+        // outer layer / spur (the user's "multi-layer fence, fence extending out"). The old radius-from-centroid keep
+        // zone missed them because the centroid moved.
+        let mut store = StructureStore::new();
+        let home = |s: &mut StructureStore, x: f64, z: f64| s.add(Structure { kind: SK_HOUSE, x, z, rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: false, region: 0 });
+        let mut west: Vec<u32> = Vec::new();
+        for &(x, z) in &[(-44.0, -6.0), (-44.0, 6.0), (-30.0, 0.0), (-16.0, 8.0)] {
+            west.push(home(&mut store, x, z)); // the side that will decay
+        }
+        for &(x, z) in &[(0.0, 0.0), (14.0, -6.0), (28.0, 6.0), (40.0, 0.0)] {
+            home(&mut store, x, z); // the survivors
+        }
+        let _ = settlement_ops_store(&mut store, &[], &[]); // fit the WIDE wall
+        let far_west = |s: &StructureStore| s.live_slots().iter().filter_map(|&sl| s.get(sl)).filter(|st| st.kind == SK_FENCE && st.x < -40.0).count();
+        assert!(far_west(&store) > 0, "the wide town is walled out west (guards a vacuous test)");
+
+        for sl in west {
+            store.remove(sl); // the west homes decay away → town now spans only x∈[-16,40]
+        }
+        let _ = settlement_ops_store(&mut store, &[], &[10.0, 0.0]); // re-fit (a change inside the town)
+
+        assert_eq!(far_west(&store), 0, "the old far-west ring is reclaimed, NOT left as a phantom outer layer");
+        assert!(store.live_slots().iter().filter_map(|&sl| store.get(sl)).any(|st| st.kind == SK_FENCE), "the shrunk town is still walled");
+    }
+
+    #[test]
+    fn vegetation_ops_store_plants_deterministically() {
+        let homes = [(0.0f64, 0.0f64), (10.0, 0.0), (5.0, 10.0), (15.0, 8.0)];
+        let mk = |hs: &[(f64, f64)]| {
+            let mut st = StructureStore::new();
+            for &(x, z) in hs {
+                st.add(Structure { kind: SK_HOUSE, x, z, rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: false, region: 0 });
             }
-            o
+            st
         };
-        // 1) fit the base town's wall (no existing fences → every panel is an 'add')
-        let base = settlement_ops(&object! { "objects" => homes(false), "zones" => array![] });
-        let panels: Vec<JsonValue> = base.members().filter(|o| o["op"] == "add" && o["kind"] == "fence").cloned().collect();
-        let total = panels.len();
-        // 2) world = town + a NEW infill house + those panels already materialised as existing fences
-        let mut objs = homes(true);
-        for (i, p) in panels.iter().enumerate() {
-            let _ = objs.push(object! { "id" => format!("fc{i}"), "kind" => "fence", "pos" => p["pos"].clone(), "rot" => p["rot"].clone(), "scale" => p["scale"].clone() });
+        let mut hit = None;
+        for k in 0..40 {
+            let seed = k as f64 * 3.0 + 1.0;
+            let op = vegetation_ops_store(&mut mk(&homes), seed, &[]);
+            if !op.is_empty() {
+                hit = Some((seed, op));
+                break;
+            }
         }
-        // 3) re-fit with the extra house present → how much of the ring gets torn out?
-        let removes = settlement_ops(&object! { "objects" => objs, "zones" => array![] }).members().filter(|o| o["op"] == "remove").count();
-        eprintln!("[wall-stable] base {total} panels; after +1 house: {removes} removed");
-        assert!(total > 10, "sanity: a real wall");
-        assert!(removes * 3 < total, "adding a house must keep MOST of the ring (stable), not rebuild it (removed {removes}/{total})");
+        let (seed, op) = hit.expect("some seed should roll 'plant'");
+        assert_eq!(op[1], SK_TREE as f64);
+        let (tx, tz) = (op[2], op[3]);
+        assert!(homes.iter().any(|&(bx, bz)| (bx - tx).hypot(bz - tz) <= 10.6), "tree planted near a home");
+        assert_eq!(vegetation_ops_store(&mut mk(&homes), seed, &[])[2..4], op[2..4], "deterministic for a fixed seed");
     }
 
     #[test]
-    fn settlement_walls_do_not_overlap() {
-        // settlement A (3 spread homes near origin) + a SECOND town B ~80 m away. Their walls must not stack on each
-        // other, and within a wall no panel may overlap another.
-        let world = object! {
-            "objects" => array![
-                object! { "id" => "a0", "kind" => "house", "pos" => array![0.0, 0.0, 0.0] },
-                object! { "id" => "a1", "kind" => "house", "pos" => array![14.0, 0.0, 6.0] },
-                object! { "id" => "a2", "kind" => "house", "pos" => array![6.0, 0.0, 16.0] },
-                object! { "id" => "b0", "kind" => "house", "pos" => array![85.0, 0.0, 0.0] },
-                object! { "id" => "b1", "kind" => "house", "pos" => array![99.0, 0.0, 8.0] },
-            ],
-            "zones" => array![],
-        };
-        let panels: Vec<JsonValue> = settlement_ops(&world).members().filter(|o| o["op"] == "add" && o["kind"] == "fence").cloned().collect();
-        assert!(panels.len() > 12, "expected full walls, got {} panels", panels.len());
-        let mut overlaps = 0;
-        for i in 0..panels.len() {
-            for j in (i + 1)..panels.len() {
-                if panels_overlap(&panels[i], &panels[j]) {
-                    overlaps += 1;
+    fn lake_ops_bin_grows_and_digs() {
+        // BINARY lake: grow an existing pond → the REMOVE references the zone by SLOT (its index in the water-zones
+        // array JS supplies) and the new blob is centred the same, 6 m bigger.
+        let (px, pz, yaw) = (0.0, 0.0, 0.0);
+        let zones = [10.0, 0.0, 12.0, crate::engine::water_seed("lake")];
+        let bin = lake_ops_bin(&zones, px, pz, yaw);
+        let recs: Vec<&[f64]> = bin.chunks_exact(GEN_STRIDE).collect();
+        let b_remove_slot = recs.iter().find(|r| r[0] == GOP_REMOVE).map(|r| r[1] as usize);
+        let b_zone = recs.iter().find(|r| r[0] == GOP_ADDZONE).map(|r| (r[1], r[2], r[3])).unwrap();
+        assert_eq!(b_remove_slot, Some(0), "removes the only water zone, slot 0");
+        assert_eq!(b_zone, (10.0, 0.0, 18.0), "the grown pond is centred the same, 6 m bigger");
+
+        // fresh pond (no water nearby) → exactly one 13 m blob at the target, no remove
+        let bin2 = lake_ops_bin(&[], px, pz, yaw);
+        assert_eq!(bin2.chunks_exact(GEN_STRIDE).count(), 1, "one fresh op");
+        assert_eq!((bin2[0], bin2[3]), (GOP_ADDZONE, 13.0), "one fresh 13 m pond");
+    }
+
+    #[test]
+    fn forest_ops_bin_plants_a_wood() {
+        // BINARY forest: an empty area plants a fresh wood (golden-spiral spread) of valid tree/pine kinds.
+        let (px, pz, yaw) = (0.0, 0.0, 0.0);
+        let store = StructureStore::new(); // no existing trees
+        let b: Vec<(f64, f64, u8)> = forest_ops_bin(&store, &[], px, pz, yaw).chunks_exact(GEN_STRIDE).filter(|r| r[0] == GOP_ADD).map(|r| (r[2], r[3], r[1] as u8)).collect();
+        assert!(!b.is_empty(), "an empty area plants a fresh wood");
+        for (_, _, kind) in &b {
+            assert!(*kind == SK_TREE || *kind == SK_PINE, "every planted tree is a tree or pine, got kind {kind}");
+        }
+    }
+
+    #[test]
+    fn city_ops_bin_grows_a_ring() {
+        // BINARY city: grow a ring around an existing 3-building cluster → adds buildings + lamps (valid kinds), one
+        // plaza zone, and the spoke roads.
+        let objs = [(SK_HOUSE, 0.0, 0.0), (SK_HOUSE, 14.0, 6.0), (SK_TOWER, 6.0, 16.0)];
+        let (px, pz, yaw) = (0.0, 0.0, 0.0);
+        let mut store = StructureStore::new();
+        for &(kind, x, z) in &objs {
+            store.add(Structure { kind, x, z, rot: 0.0, sx: 1.0, sy: 1.0, sz: 1.0, color: 0, keep: false, region: 0 });
+        }
+        let bin = city_ops_bin(&store, &[], &[], px, pz, yaw);
+        let adds = bin.chunks_exact(GEN_STRIDE).filter(|r| r[0] == GOP_ADD).count();
+        let bcount = |t: f64| bin.chunks_exact(GEN_STRIDE).filter(|r| r[0] == t).count();
+        assert!(adds > 0, "the ring adds buildings + lamps, got {adds}");
+        assert_eq!(bcount(GOP_ADDZONE), 1, "one central plaza");
+        assert_eq!(bcount(GOP_ADDPATH), 6, "six spoke roads");
+        for r in bin.chunks_exact(GEN_STRIDE).filter(|r| r[0] == GOP_ADD) {
+            let k = r[1] as u8;
+            assert!(k == SK_HOUSE || k == SK_CABIN || k == SK_TOWER || k == SK_LAMP, "a city add is a building or lamp, got kind {k}");
+        }
+    }
+
+    #[test]
+    fn immigration_ops_bin_rescues_deficient_species() {
+        // BINARY immigration: rabbit extinct (n=0) → a founding group walks in; cat healthy (n=10) → none. `counts`
+        // = `[n, geneSum]×5` in FLOORS order (rabbit, kangaroo, person, cat, lion).
+        let (px, pz, ga, seed) = (5.0, -3.0, 1.2, 7.0);
+        let kinds = ["rabbit", "kangaroo", "person", "cat", "lion"];
+        let cbin = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 0.0, 0.0]; // only cat is stocked (n=10)
+        let b: Vec<(&str, f64)> = immigration_ops_bin(&cbin, px, pz, ga, seed).chunks_exact(4).map(|c| (kinds[c[0] as usize], c[3])).collect();
+        let rabbits = b.iter().filter(|(k, _)| *k == "rabbit").count();
+        assert!(rabbits >= 3, "an extinct species walks in a founding group, got {rabbits}");
+        assert!(b.iter().all(|(k, _)| *k != "cat"), "the healthy cat does not immigrate");
+        for (_, gene) in &b {
+            assert!((crate::world::GENE_MIN..=crate::world::GENE_MAX).contains(gene) && *gene >= 1.0, "migrant gene rescued + in band, got {gene}");
+        }
+    }
+
+    #[test]
+    fn settlement_plan_bin_scales_with_tier() {
+        // BINARY town plan: a city plans more houses than a hamlet, and a city is fenced while a hamlet is not. The
+        // plan packs `[radius, numPaths, numObjects, <paths×4>, <objects×7>]`.
+        let (cx, cz, seed) = (100.0, -50.0, 1234u32);
+        let homes_and_fenced = |size: &str| {
+            let bin = settlement_plan_bin(cx, cz, size, seed);
+            let (np, no) = (bin[1] as usize, bin[2] as usize);
+            let ostart = 3 + np * 4;
+            let mut homes = 0usize;
+            let mut fenced = false;
+            for i in 0..no {
+                let k = bin[ostart + i * 7] as u8;
+                if k == SK_HOUSE || k == SK_CABIN {
+                    homes += 1;
+                } else if k == SK_FENCE {
+                    fenced = true;
                 }
             }
-        }
-        assert_eq!(overlaps, 0, "found {overlaps} overlapping fence-panel pairs (stacked/duplicated walls)");
-    }
-
-    #[test]
-    fn build_ops_never_places_a_house_in_water() {
-        let world = object! {
-            "objects" => array![],
-            "zones" => array![object! { "material" => "water", "shape" => "blob", "pos" => array![0.0, 0.0, 0.0], "size" => 25.0 }],
+            (homes, fenced)
         };
-        let mut builds = JsonValue::new_array(); // a spread of requests straight across the lake
-        for i in -4..=8 {
-            let _ = builds.push(object! { "x" => (i as f64) * 8.0, "z" => 0.0 });
-        }
-        let adds: Vec<JsonValue> = build_ops(&world, &builds).members().filter(|o| o["op"] == "add").cloned().collect();
-        assert!(!adds.is_empty(), "the dry requests should build");
-        let zones = wzones_of(&zones_vec(&world));
-        for a in &adds {
-            let (x, z) = (f(&a["pos"][0]), f(&a["pos"][2]));
-            assert!(
-                !in_water(&zones, x, z) && !in_water(&zones, x - 4.0, z) && !in_water(&zones, x + 4.0, z) && !in_water(&zones, x, z - 4.0) && !in_water(&zones, x, z + 4.0),
-                "house at ({x},{z}) must clear water + a 4 m footprint margin"
-            );
-        }
-    }
-
-    #[test]
-    fn build_ops_caps_a_dense_colony() {
-        // a tight cluster of requests (all within one colony radius) caps at COLONY_MAX (10) homes
-        let world = object! { "objects" => array![], "zones" => array![] };
-        let mut builds = JsonValue::new_array();
-        for i in 0..30 {
-            let _ = builds.push(object! { "x" => (i % 5) as f64 * 8.0, "z" => (i / 5) as f64 * 8.0 });
-        }
-        let adds = build_ops(&world, &builds).members().filter(|o| o["op"] == "add").count();
-        assert!(adds <= 10, "a dense colony caps at 10 homes, got {adds}");
-        assert!(adds >= 5, "but several should build, got {adds}");
-    }
-
-    #[test]
-    fn build_ops_founds_a_new_town_past_the_gap_but_not_inside_it() {
-        // One existing town at the origin. A pioneer the sim shoves out to ~FOUND_GAP (240 m) FOUNDS a new DISTINCT
-        // town where it lands; a build still CLOSE IN (well inside the gap) is rejected, so a town can't creep/found
-        // into its neighbour (no merge). The gap is DERIVED from the sim's FOUND_GAP → one source of truth, and the
-        // old fixed 350 m DEAD ZONE (which no emergent disperser could reach → towns only ever merged) is gone.
-        let world = object! { "objects" => array![object! { "id" => "h0", "kind" => "house", "pos" => array![0.0, 0.0, 0.0] }], "zones" => array![] };
-        let founds = |x: f64| build_ops(&world, &array![object! { "x" => x, "z" => 0.0 }]).members().filter(|o| o["op"] == "add").count();
-        assert_eq!(founds(240.0), 1, "a pioneer out at ~FOUND_GAP should FOUND a new distinct town where it lands");
-        assert_eq!(founds(400.0), 1, "and certainly one well past the gap");
-        assert_eq!(founds(120.0), 0, "a build still close in (inside the gap) is rejected → no creep/merge into a neighbour");
-    }
-
-    #[test]
-    fn well_ops_dedups_and_avoids_water() {
-        let world = object! {
-            "objects" => array![object! { "id" => "w0", "kind" => "well", "pos" => array![0.0, 0.0, 0.0] }],
-            "zones" => array![object! { "material" => "water", "shape" => "blob", "pos" => array![100.0, 0.0, 0.0], "size" => 20.0 }],
-        };
-        // near the existing well (deduped) · in the lake (rejected) · fresh dry ground (built)
-        let reqs = array![object! { "x" => 5.0, "z" => 0.0 }, object! { "x" => 100.0, "z" => 0.0 }, object! { "x" => 300.0, "z" => 0.0 }];
-        let adds = well_ops(&world, &reqs).members().filter(|o| o["op"] == "add").count();
-        assert_eq!(adds, 1, "only the fresh dry well should build, got {adds}");
-    }
-
-    #[test]
-    fn vegetation_ops_bounded_and_needs_a_town() {
-        let small = object! { "objects" => array![object! { "id" => "h0", "kind" => "house", "pos" => array![0.0, 0.0, 0.0] }], "zones" => array![] };
-        assert_eq!(vegetation_ops(&small, 1.0).members().count(), 0, "a lone home gets no orchard");
-        let town = object! {
-            "objects" => array![
-                object! { "id" => "h0", "kind" => "house", "pos" => array![0.0, 0.0, 0.0] },
-                object! { "id" => "h1", "kind" => "house", "pos" => array![10.0, 0.0, 0.0] },
-                object! { "id" => "h2", "kind" => "house", "pos" => array![5.0, 0.0, 10.0] },
-            ],
-            "zones" => array![],
-        };
-        for s in 0..20 {
-            assert!(vegetation_ops(&town, s as f64).members().count() <= 1, "at most one tree per call");
-        }
-    }
-
-    #[test]
-    fn immigration_rescues_deficient_species() {
-        // rabbit fully extinct (n=0) → a founding group; cat healthy + above gene-flow window (n=10) → none
-        let counts = object! {
-            "rabbit" => object! { "n" => 0, "geneSum" => 0.0 },
-            "cat" => object! { "n" => 10, "geneSum" => 10.0 },
-        };
-        let ops = immigration_ops(&counts, 0.0, 0.0, 1.2, 5.0);
-        let rabbits = ops.members().filter(|o| o["op"] == "add" && o["kind"] == "rabbit").count();
-        let cats = ops.members().filter(|o| o["op"] == "add" && o["kind"] == "cat").count();
-        assert!(rabbits >= 3, "an extinct species walks in a founding group, got {rabbits}");
-        assert_eq!(cats, 0, "a healthy species gets none, got {cats}");
-        for o in ops.members() {
-            let g = f(&o["gene"]);
-            assert!((0.6..=1.6).contains(&g) && g >= 1.0, "migrant gene rescued + in band, got {g}");
-        }
+        let (hamlet_homes, hamlet_fenced) = homes_and_fenced("hamlet");
+        let (city_homes, city_fenced) = homes_and_fenced("city");
+        assert!(city_homes > hamlet_homes, "a city plans more houses than a hamlet ({city_homes} vs {hamlet_homes})");
+        assert!(city_fenced && !hamlet_fenced, "a city is fenced; a hamlet is not");
     }
 }

@@ -101,6 +101,7 @@
 		let na = 0;
 		let np = 0;
 		const night = agentManager.nightValue; // 0 day … 1 night → eyeshine brightness
+		const t = wind.uTime.value; // hoisted: identical for every agent this frame (was re-read inside the loop)
 		agentManager.forEach((m) => {
 			if (m.lod !== 2) return; // far agents (living OR corpses) → impostors; near ones draw in full
 			const a = m.agent;
@@ -124,9 +125,10 @@
 				// (A hunting predator is always within ~24m → a near Critter, not an impostor, so it glares there.)
 				// Living eyes BLINK — a brief, per-agent-staggered dim so the distant stare reads as ALIVE, not a
 				// static LED. Phase by seedId → unsynchronised; ~0.3s dim every ~7s; corpses (glow 0) unaffected.
-				const blink = Math.sin(wind.uTime.value * 0.9 + (m.seedId & 1023) * 0.0123) > 0.99 ? 0.06 : 1;
-				const glow = m.dead ? 0 : night * (PREDATORS.has(m.kind) ? 1.2 : 0.65) * blink;
-				const ec = PREDATORS.has(m.kind) ? EYE_PRED : EYE_PREY;
+				const isPred = PREDATORS.has(m.kind); // one Set lookup, reused for glow weight + eye colour
+				// glow is 0 in daytime or for corpses → skip the per-agent blink sin entirely on those (the common case)
+				const glow = m.dead || night === 0 ? 0 : night * (isPred ? 1.2 : 0.65) * (Math.sin(t * 0.9 + (m.seedId & 1023) * 0.0123) > 0.99 ? 0.06 : 1);
+				const ec = isPred ? EYE_PRED : EYE_PREY;
 				aEye[na * 3] = ec[0] * glow;
 				aEye[na * 3 + 1] = ec[1] * glow;
 				aEye[na * 3 + 2] = ec[2] * glow;

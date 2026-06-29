@@ -8,10 +8,9 @@ license = "MIT"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# The engine port (op application + world JSON) uses jzon — a fast DOM JSON lib (continuation of json-rust). DOM
-# round-trips unknown world fields for free (no serde structs to keep in sync); the user picked it for speed.
+# The op-engine + world-gen are a fully BINARY (typed-struct, no-JSON) implementation now, so the crate has no
+# runtime DOM-JSON dependency — values cross the wasm boundary as flat typed arrays + parallel string vecs.
 [dependencies]
-jzon = "0.12"
 
 # wasm-bindgen only on the wasm target → native `cargo test` (parity checks) stays dependency-light + fast.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -3,6 +3,7 @@
 // ramps into rolling hills + sparse mountains far out, so the distance feels vast — all from a
 // cheap analytic function (the player-following mesh re-samples it; no stored geometry).
 import type { TerrainFeature } from './world';
+import { clock } from './clock';
 
 function smoothstep(a: number, b: number, x: number): number {
 	const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
@@ -52,4 +53,17 @@ export function heightAt(x: number, z: number, features?: TerrainFeature[]): num
 	let h = ambient(x, z);
 	if (features) for (const f of features) h += featureHeight(x, z, f);
 	return h;
+}
+
+// Per-render-frame ground-Y memo. `heightAt` is heavy (8 trig in ambient() + a loop over every terrain feature) and
+// the SAME agent samples it twice each frame — once in its renderer (body Y), once in the contact-shadow pass. Cache
+// the result on the agent object, keyed by the render-frame counter: the first caller computes, the rest reuse. The
+// two callers pass marginally different positions (interpolated rx/rz vs raw x/z, <0.2 m apart), so reusing one is
+// imperceptible — and it actually aligns the body and its shadow to the exact same ground height.
+export function groundYCached(m: { _gy?: number; _gyf?: number }, x: number, z: number, features?: TerrainFeature[]): number {
+	if (m._gyf !== clock.frame) {
+		m._gy = heightAt(x, z, features);
+		m._gyf = clock.frame;
+	}
+	return m._gy as number;
 }

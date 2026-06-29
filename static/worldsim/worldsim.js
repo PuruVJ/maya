@@ -1,5 +1,185 @@
 /* @ts-self-types="./worldsim.d.ts" */
 
+/**
+ * The `apply_ops_bin` result: the new world as the SAME parallel arrays JS packs in, plus conflicts. Read once via
+ * the getters (each clones — this is a cold per-edit call, not a hot path).
+ */
+export class ApplyResult {
+    static __wrap(ptr) {
+        const obj = Object.create(ApplyResult.prototype);
+        obj.__wbg_ptr = ptr;
+        ApplyResultFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        ApplyResultFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_applyresult_free(ptr, 0);
+    }
+    /**
+     * @returns {string[]}
+     */
+    get conflict_blockers() {
+        const ret = wasm.applyresult_conflict_blockers(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get conflict_labels() {
+        const ret = wasm.applyresult_conflict_labels(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string}
+     */
+    get ground() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.applyresult_ground(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string[]}
+     */
+    get obj_colors() {
+        const ret = wasm.applyresult_obj_colors(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get obj_ids() {
+        const ret = wasm.applyresult_obj_ids(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get obj_kinds() {
+        const ret = wasm.applyresult_obj_kinds(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    get obj_num() {
+        const ret = wasm.applyresult_obj_num(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get path_ids() {
+        const ret = wasm.applyresult_path_ids(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get path_materials() {
+        const ret = wasm.applyresult_path_materials(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    get path_num() {
+        const ret = wasm.applyresult_path_num(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @returns {string}
+     */
+    get sky() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.applyresult_sky(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    get terrain_num() {
+        const ret = wasm.applyresult_terrain_num(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get zone_ids() {
+        const ret = wasm.applyresult_zone_ids(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get zone_materials() {
+        const ret = wasm.applyresult_zone_materials(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    get zone_num() {
+        const ret = wasm.applyresult_zone_num(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get zone_shapes() {
+        const ret = wasm.applyresult_zone_shapes(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+}
+if (Symbol.dispose) ApplyResult.prototype[Symbol.dispose] = ApplyResult.prototype.free;
+
 export class Sim {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -349,32 +529,315 @@ export class Sim {
 }
 if (Symbol.dispose) Sim.prototype[Symbol.dispose] = Sim.prototype.free;
 
+export class WorldGen {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WorldGenFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_worldgen_free(ptr, 0);
+    }
+    /**
+     * @param {Float64Array} reqs
+     * @param {Float64Array} zones
+     * @returns {Float64Array}
+     */
+    build(reqs, zones) {
+        const ptr0 = passArrayF64ToWasm0(reqs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_build(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        var v3 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v3;
+    }
+    /**
+     * CITY generator (binary) — reads buildings from the (seeded) store, water from `zones`, and the removable old
+     * spokes/plaza from `removables` (`[tag,x,z]×n`; a returned REMOVE slot maps back to a path/plaza id JS-side).
+     * @param {Float64Array} zones
+     * @param {Float64Array} removables
+     * @param {number} px
+     * @param {number} pz
+     * @param {number} yaw
+     * @returns {Float64Array}
+     */
+    city(zones, removables, px, pz, yaw) {
+        const ptr0 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF64ToWasm0(removables, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_city(this.__wbg_ptr, ptr0, len0, ptr1, len1, px, pz, yaw);
+        var v3 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v3;
+    }
+    /**
+     * DEMO GALLERY (binary) — Rust owns the whole multi-town layout (spacing/grid/sizes), packed as `[numSites,
+     * numPaths, numObjects, <sites: cx,cz,sizeCode>, <paths×4>, <objects×7>]`. JS just materialises it.
+     * @returns {Float64Array}
+     */
+    demo_gallery() {
+        const ret = wasm.worldgen_demo_gallery(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @param {Uint8Array} buf
+     */
+    deserialize(buf) {
+        const ptr0 = passArray8ToWasm0(buf, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.worldgen_deserialize(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * FOREST generator (binary) — reads trees from the (seeded) store, water from `zones`. Returns the GEN op stream.
+     * @param {Float64Array} zones
+     * @param {number} px
+     * @param {number} pz
+     * @param {number} yaw
+     * @returns {Float64Array}
+     */
+    forest(zones, px, pz, yaw) {
+        const ptr0 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_forest(this.__wbg_ptr, ptr0, len0, px, pz, yaw);
+        var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v2;
+    }
+    /**
+     * @param {number} dx
+     * @param {number} dz
+     * @param {Float64Array} zones
+     * @returns {Float64Array}
+     */
+    grave(dx, dz, zones) {
+        const ptr0 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_grave(this.__wbg_ptr, dx, dz, ptr0, len0);
+        var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v2;
+    }
+    /**
+     * DORMANT settlement growth (self-sustaining world): grow a FAR cluster's homes via a throwaway store (does
+     * NOT touch the live `self.store`). `houses` = the cluster's `[x,z]×n`; returns up to `want` new build ops.
+     * @param {Float64Array} houses
+     * @param {number} want
+     * @param {Float64Array} zones
+     * @param {number} seed
+     * @returns {Float64Array}
+     */
+    grow_dormant(houses, want, zones, seed) {
+        const ptr0 = passArrayF64ToWasm0(houses, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_grow_dormant(this.__wbg_ptr, ptr0, len0, want, ptr1, len1, seed);
+        var v3 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v3;
+    }
+    /**
+     * IMMIGRATION decision (binary) — `counts` = `[n,geneSum]×5` (FLOORS order rabbit,kangaroo,person,cat,lion).
+     * Returns a flat `[floorIdx,x,z,gene]×n` add-creature stream (no store needed; JS maps floorIdx → kind).
+     * @param {Float64Array} counts
+     * @param {number} px
+     * @param {number} pz
+     * @param {number} global_avg
+     * @param {number} seed
+     * @returns {Float64Array}
+     */
+    immigration(counts, px, pz, global_avg, seed) {
+        const ptr0 = passArrayF64ToWasm0(counts, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_immigration(this.__wbg_ptr, ptr0, len0, px, pz, global_avg, seed);
+        var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v2;
+    }
+    /**
+     * LAKE generator (binary) — `zones` = water zones `[px,pz,size,seed]×n`. Returns the GEN op stream (stride 10);
+     * a REMOVE references its target zone by slot (its index in `zones`), which JS maps back to the zone id.
+     * @param {Float64Array} zones
+     * @param {number} px
+     * @param {number} pz
+     * @param {number} yaw
+     * @returns {Float64Array}
+     */
+    lake(zones, px, pz, yaw) {
+        const ptr0 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_lake(this.__wbg_ptr, ptr0, len0, px, pz, yaw);
+        var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v2;
+    }
+    /**
+     * @returns {number}
+     */
+    len() {
+        const ret = wasm.worldgen_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    constructor() {
+        const ret = wasm.worldgen_new();
+        this.__wbg_ptr = ret;
+        WorldGenFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Replace the store from a flat SoA `[kind, x, z, rot, sx, sy, sz, color, keep]×n`. JS packs world.objects'
+     * structures (in array order) once at load + whenever the structure set changes; the slot of each entry = its
+     * index here, so a returned REMOVE slot maps back to the object id JS packed at that index.
+     * @param {Float64Array} soa
+     */
+    seed(soa) {
+        const ptr0 = passArrayF64ToWasm0(soa, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.worldgen_seed(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * Binary snapshot of the live structures → IndexedDB stores the bytes (no JSON). Restored via `deserialize`.
+     * @returns {Uint8Array}
+     */
+    serialize() {
+        const ret = wasm.worldgen_serialize(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * `changed` = positions `[x,z]×n` of structures changed this frame → only those towns' walls re-fit (others
+     * stay put). Empty = fit every town (the one-time load reconcile).
+     * @param {Float64Array} zones
+     * @param {Float64Array} changed
+     * @returns {Float64Array}
+     */
+    settlement(zones, changed) {
+        const ptr0 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF64ToWasm0(changed, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_settlement(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        var v3 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v3;
+    }
+    /**
+     * SETTLEMENT PLAN (binary) — a deterministic town plan packed as `[radius, numPaths, numObjects, <paths×4>,
+     * <objects×7>]` (paths then objects; JS rebuilds ids + Path/WorldObject shapes). No store needed.
+     * @param {number} cx
+     * @param {number} cz
+     * @param {string} size
+     * @param {number} seed
+     * @returns {Float64Array}
+     */
+    town_plan(cx, cz, size, seed) {
+        const ptr0 = passStringToWasm0(size, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_town_plan(this.__wbg_ptr, cx, cz, ptr0, len0, seed);
+        var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v2;
+    }
+    /**
+     * @param {number} seed
+     * @param {Float64Array} zones
+     * @returns {Float64Array}
+     */
+    veg(seed, zones) {
+        const ptr0 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_veg(this.__wbg_ptr, seed, ptr0, len0);
+        var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v2;
+    }
+    /**
+     * @param {Float64Array} reqs
+     * @param {Float64Array} zones
+     * @returns {Float64Array}
+     */
+    well(reqs, zones) {
+        const ptr0 = passArrayF64ToWasm0(reqs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.worldgen_well(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        var v3 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v3;
+    }
+}
+if (Symbol.dispose) WorldGen.prototype[Symbol.dispose] = WorldGen.prototype.free;
+
 /**
- * THE ENGINE (no JS engine): apply `ops_json` to `world_json` for a player at (px,pz,yaw). Returns a JSON
- * string `{"world": <new world>, "conflicts": [...]}`. The world DOM round-trips unknown fields untouched.
- * Faithful port of the old engine.ts applyOps — see crate::engine (parity-tested against the JS originals).
- * @param {string} world_json
- * @param {string} ops_json
+ * THE BINARY ENGINE (the jzon-drop path, docs/world-data-architecture.md). Same op→world layer as `apply_ops`
+ * but NO JSON: the world + ops cross as parallel string vecs + a flat f64 SoA (see engine_bin decode fns), the
+ * new world + conflicts ride back in `ApplyResult`. Parity-pinned to `apply_ops` (engine_bin parity test + the
+ * JS vitest). `obj_num` stride 9, `zone_num` 4, `path_num` 7, `terrain_num` 5; `op_num` 19, `op_strs` 11.
+ * @param {string[]} obj_ids
+ * @param {string[]} obj_kinds
+ * @param {string[]} obj_colors
+ * @param {Float64Array} obj_num
+ * @param {string[]} zone_ids
+ * @param {string[]} zone_materials
+ * @param {string[]} zone_shapes
+ * @param {Float64Array} zone_num
+ * @param {string[]} path_ids
+ * @param {string[]} path_materials
+ * @param {Float64Array} path_num
+ * @param {Float64Array} terrain_num
+ * @param {string} ground
+ * @param {string} sky
+ * @param {Float64Array} op_num
+ * @param {string[]} op_strs
  * @param {number} px
  * @param {number} pz
  * @param {number} yaw
- * @returns {string}
+ * @returns {ApplyResult}
  */
-export function apply_ops(world_json, ops_json, px, pz, yaw) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(ops_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.apply_ops(ptr0, len0, ptr1, len1, px, pz, yaw);
-        deferred3_0 = ret[0];
-        deferred3_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
-    }
+export function apply_ops_bin(obj_ids, obj_kinds, obj_colors, obj_num, zone_ids, zone_materials, zone_shapes, zone_num, path_ids, path_materials, path_num, terrain_num, ground, sky, op_num, op_strs, px, pz, yaw) {
+    const ptr0 = passArrayJsValueToWasm0(obj_ids, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayJsValueToWasm0(obj_kinds, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArrayJsValueToWasm0(obj_colors, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passArrayF64ToWasm0(obj_num, wasm.__wbindgen_malloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ptr4 = passArrayJsValueToWasm0(zone_ids, wasm.__wbindgen_malloc);
+    const len4 = WASM_VECTOR_LEN;
+    const ptr5 = passArrayJsValueToWasm0(zone_materials, wasm.__wbindgen_malloc);
+    const len5 = WASM_VECTOR_LEN;
+    const ptr6 = passArrayJsValueToWasm0(zone_shapes, wasm.__wbindgen_malloc);
+    const len6 = WASM_VECTOR_LEN;
+    const ptr7 = passArrayF64ToWasm0(zone_num, wasm.__wbindgen_malloc);
+    const len7 = WASM_VECTOR_LEN;
+    const ptr8 = passArrayJsValueToWasm0(path_ids, wasm.__wbindgen_malloc);
+    const len8 = WASM_VECTOR_LEN;
+    const ptr9 = passArrayJsValueToWasm0(path_materials, wasm.__wbindgen_malloc);
+    const len9 = WASM_VECTOR_LEN;
+    const ptr10 = passArrayF64ToWasm0(path_num, wasm.__wbindgen_malloc);
+    const len10 = WASM_VECTOR_LEN;
+    const ptr11 = passArrayF64ToWasm0(terrain_num, wasm.__wbindgen_malloc);
+    const len11 = WASM_VECTOR_LEN;
+    const ptr12 = passStringToWasm0(ground, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len12 = WASM_VECTOR_LEN;
+    const ptr13 = passStringToWasm0(sky, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len13 = WASM_VECTOR_LEN;
+    const ptr14 = passArrayF64ToWasm0(op_num, wasm.__wbindgen_malloc);
+    const len14 = WASM_VECTOR_LEN;
+    const ptr15 = passArrayJsValueToWasm0(op_strs, wasm.__wbindgen_malloc);
+    const len15 = WASM_VECTOR_LEN;
+    const ret = wasm.apply_ops_bin(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10, ptr11, len11, ptr12, len12, ptr13, len13, ptr14, len14, ptr15, len15, px, pz, yaw);
+    return ApplyResult.__wrap(ret);
 }
 
 /**
@@ -396,31 +859,6 @@ export function band_spread(count, ax, az, r) {
 }
 
 /**
- * HOUSE PLACEMENT — Rust owns it. Reads the world DOM + this frame's build requests (`builds_json` = `[{x,z},…]`),
- * returns add-house ops obeying the colony rules + a water margin (no homes dipping into the lake). Replaces the
- * Scene.svelte `drainBuilds` handler.
- * @param {string} world_json
- * @param {string} builds_json
- * @returns {string}
- */
-export function build_ops(world_json, builds_json) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(builds_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.build_ops(ptr0, len0, ptr1, len1);
-        deferred3_0 = ret[0];
-        deferred3_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
-    }
-}
-
-/**
  * AMBIENT BUSHES near (px,pz). Flat [x, z, scale, rot, colorHash] × n.
  * @param {number} px
  * @param {number} pz
@@ -432,30 +870,6 @@ export function bushes_near(px, pz, reach) {
     var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
     return v1;
-}
-
-/**
- * CITY generator — builds/grows the next concentric ring of a district-zoned city ahead of the player. Reads
- * the world DOM (objects + paths + zones), returns an ops JSON array. Ported from city.ts cityOps.
- * @param {string} world_json
- * @param {number} px
- * @param {number} pz
- * @param {number} yaw
- * @returns {string}
- */
-export function city_ops(world_json, px, pz, yaw) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.city_ops(ptr0, len0, px, pz, yaw);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
 }
 
 /**
@@ -522,30 +936,6 @@ export function ff_targets(rabbit, cat, kangaroo, person, lion, dino, scale, dt)
 }
 
 /**
- * FOREST generator — Rust owns the world-gen. Reads the world DOM (`world_json`) + player (px,pz,yaw), returns
- * an ops JSON array that plants/grows a wood. Ported from city.ts forestOps (parity-pinned by worldgen.test.ts).
- * @param {string} world_json
- * @param {number} px
- * @param {number} pz
- * @param {number} yaw
- * @returns {string}
- */
-export function forest_ops(world_json, px, pz, yaw) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.forest_ops(ptr0, len0, px, pz, yaw);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
  * The VIGOR gene bounds [GENE_MIN, GENE_MAX] — the sim's source of truth, so the JS clamps that defensively
  * keep a read-back/aggregate gene in range read it from here instead of hard-coding 0.6/1.6 in six places.
  * @returns {Float64Array}
@@ -571,54 +961,6 @@ export function gestation_secs() {
 }
 
 /**
- * GRAVE SITE — Rust owns it (the engine knows water → no graves in lakes). Returns `{x,z}` for a dry cemetery plot
- * outside the deceased's settlement, or `null` for a wild death. Replaces Scene.svelte `graveyardSpot`.
- * @param {string} world_json
- * @param {number} dx
- * @param {number} dz
- * @returns {string}
- */
-export function grave_site(world_json, dx, dz) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.grave_site(ptr0, len0, dx, dz);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
- * IMMIGRATION DECISION — Rust owns the species-rescue logic. `counts_json` = `{kind:{n,geneSum},…}` (live counts JS
- * gathered from agentManager), → add-creature ops (kind/pos/gene) for deficient kinds. Replaces Scene's rescue loop.
- * @param {string} counts_json
- * @param {number} px
- * @param {number} pz
- * @param {number} global_avg
- * @param {number} seed
- * @returns {string}
- */
-export function immigration_ops(counts_json, px, pz, global_avg, seed) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(counts_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.immigration_ops(ptr0, len0, px, pz, global_avg, seed);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
  * Kind FOOTPRINT [radius, height] — engine.rs `kind_rh` is the collision source of truth. The JS `KINDS` table
  * keeps its own r/h copy (it also carries render geometry), so a parity test (src/lib/kinds.test.ts) pins the JS
  * numbers to these — a drift would mean placement/collision disagreeing with what's drawn. Unknown → fallback.
@@ -632,30 +974,6 @@ export function kind_rh(kind) {
     var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
     return v2;
-}
-
-/**
- * LAKE generator — digs/grows a pond ahead of the player. Reads the world DOM, returns an ops JSON array.
- * Ported from city.ts lakeOps.
- * @param {string} world_json
- * @param {number} px
- * @param {number} pz
- * @param {number} yaw
- * @returns {string}
- */
-export function lake_ops(world_json, px, pz, yaw) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.lake_ops(ptr0, len0, px, pz, yaw);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
 }
 
 /**
@@ -750,54 +1068,24 @@ export function rng_seed_from(s) {
 }
 
 /**
- * INCREMENTAL SETTLEMENT WALLS — Rust owns the placement. Reads the world DOM, clusters homes into settlements,
- * returns an ops JSON array that keeps each ringed by a haphazard, hole-free perimeter (grows with the town,
- * around water, demolishing rocks). Idempotent via a position-diff vs the existing auto-fence. Replaces the old
- * JS `replanSettlement` in Scene.svelte (compute now lives in Rust, per "Rust owns all compute").
- * @param {string} world_json
- * @returns {string}
+ * STATELESS settlement wall refit (the jzon-drop for the away-growth / fast-forward path). Builds a THROWAWAY
+ * `StructureStore` from `soa` (`[kind,x,z,rot,sx,sy,sz,color,keep]×n`, same layout as `WorldGen.seed`), fits every
+ * town's perimeter against `zones` (water `[px,pz,size,seed]×n`), and returns the GEN op stream — WITHOUT touching
+ * the persistent live `WorldGen` store, so the renderer's incremental fence state is never clobbered. A REMOVE
+ * references its target by slot (index in `soa`), which JS maps back to the object id it packed at that index.
+ * @param {Float64Array} soa
+ * @param {Float64Array} zones
+ * @returns {Float64Array}
  */
-export function settlement_ops(world_json) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.settlement_ops(ptr0, len0);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
- * PROCEDURAL SETTLEMENT PLAN — Rust owns the world-gen. Returns a JSON string `{objects, paths, radius}` for a
- * planned town at (cx,cz) of `size` ("hamlet"|"village"|"town"|"city"), deterministic in `seed`. Ported from
- * the old settlementPlanner.ts (parity-pinned by src/lib/worldgen.test.ts).
- * @param {number} cx
- * @param {number} cz
- * @param {string} size
- * @param {number} seed
- * @param {string} id_prefix
- * @returns {string}
- */
-export function settlement_plan(cx, cz, size, seed, id_prefix) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const ptr0 = passStringToWasm0(size, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(id_prefix, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.settlement_plan(cx, cz, ptr0, len0, seed, ptr1, len1);
-        deferred3_0 = ret[0];
-        deferred3_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
-    }
+export function settlement_ops_bin(soa, zones) {
+    const ptr0 = passArrayF64ToWasm0(soa, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF64ToWasm0(zones, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.settlement_ops_bin(ptr0, len0, ptr1, len1);
+    var v3 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+    return v3;
 }
 
 /**
@@ -840,28 +1128,6 @@ export function trees_near(px, pz, reach) {
 }
 
 /**
- * COLONY VEGETATION — Rust owns it. `seed` varies per call (the sim tick) → at most one add-tree op so a town
- * greens over time. Replaces Scene's colony-vegetation block.
- * @param {string} world_json
- * @param {number} seed
- * @returns {string}
- */
-export function vegetation_ops(world_json, seed) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.vegetation_ops(ptr0, len0, seed);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
  * Pond SHORELINE radius factor at `ang` for a `seed` — the organic-blob edge. The render keeps a native copy
  * (player wade check runs per frame, pre-wasm-load), so this exists to PARITY-TEST that copy against Rust.
  * @param {number} seed
@@ -886,30 +1152,6 @@ export function water_seed(id) {
 }
 
 /**
- * WELL PLACEMENT — Rust owns it. `wells_json` = `[{x,z},…]` dig requests → add-well ops (grid-snapped, never in a
- * lake, deduped). Replaces the Scene `drainWells` handler.
- * @param {string} world_json
- * @param {string} wells_json
- * @returns {string}
- */
-export function well_ops(world_json, wells_json) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const ptr0 = passStringToWasm0(world_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(wells_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.well_ops(ptr0, len0, ptr1, len1);
-        deferred3_0 = ret[0];
-        deferred3_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
-    }
-}
-
-/**
  * World-AREA carrying-capacity multiplier from the built count — the SAME formula the sim + fast-forward use, so
  * the scale JS feeds into `cap_for`/`ff_targets` can never drift. JS counts the buildings; Rust owns the math.
  * @param {number} builds
@@ -922,8 +1164,21 @@ export function world_area_scale(builds) {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg___wbindgen_string_get_71bb4348194e31f0: function(arg0, arg1) {
+            const obj = arg1;
+            const ret = typeof(obj) === 'string' ? obj : undefined;
+            var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
         __wbg___wbindgen_throw_ea4887a5f8f9a9db: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
+        },
+        __wbindgen_cast_0000000000000001: function(arg0, arg1) {
+            // Cast intrinsic for `Ref(String) -> Externref`.
+            const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
         },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
@@ -941,9 +1196,21 @@ function __wbg_get_imports() {
     };
 }
 
+const ApplyResultFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_applyresult_free(ptr, 1));
 const SimFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_sim_free(ptr, 1));
+const WorldGenFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_worldgen_free(ptr, 1));
+
+function addToExternrefTable0(obj) {
+    const idx = wasm.__externref_table_alloc();
+    wasm.__wbindgen_externrefs.set(idx, obj);
+    return idx;
+}
 
 function getArrayF32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
@@ -955,9 +1222,33 @@ function getArrayF64FromWasm0(ptr, len) {
     return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
 }
 
+function getArrayJsValueFromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    const mem = getDataViewMemory0();
+    const result = [];
+    for (let i = ptr; i < ptr + 4 * len; i += 4) {
+        result.push(wasm.__wbindgen_externrefs.get(mem.getUint32(i, true)));
+    }
+    wasm.__externref_drop_slice(ptr, len);
+    return result;
+}
+
 function getArrayU32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
+let cachedDataViewMemory0 = null;
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
 }
 
 let cachedFloat32ArrayMemory0 = null;
@@ -996,9 +1287,20 @@ function getUint8ArrayMemory0() {
     return cachedUint8ArrayMemory0;
 }
 
+function isLikeNone(x) {
+    return x === undefined || x === null;
+}
+
 function passArray32ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 4, 4) >>> 0;
     getUint32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
@@ -1007,6 +1309,16 @@ function passArrayF64ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 8, 8) >>> 0;
     getFloat64ArrayMemory0().set(arg, ptr / 8);
     WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayJsValueToWasm0(array, malloc) {
+    const ptr = malloc(array.length * 4, 4) >>> 0;
+    for (let i = 0; i < array.length; i++) {
+        const add = addToExternrefTable0(array[i]);
+        getDataViewMemory0().setUint32(ptr + 4 * i, add, true);
+    }
+    WASM_VECTOR_LEN = array.length;
     return ptr;
 }
 
@@ -1081,6 +1393,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedDataViewMemory0 = null;
     cachedFloat32ArrayMemory0 = null;
     cachedFloat64ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;

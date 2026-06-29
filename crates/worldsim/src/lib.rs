@@ -22,12 +22,14 @@
 mod clock;
 mod eco;
 mod engine;
+mod engine_bin;
 mod rng;
 mod simrng;
 mod spatialhash;
 mod world;
 mod worldgen;
 mod steering;
+mod structstore;
 
 pub use clock::{SimClock, DT};
 pub use eco::{aggressive, eco, kind_from_code, prize, sleep_secs, slash_max, speed_for, Eco, Hunts, Kind, DEFAULT_SLEEP_SECS};
@@ -211,107 +213,272 @@ mod wasm_api {
             .collect()
     }
 
-    /// THE ENGINE (no JS engine): apply `ops_json` to `world_json` for a player at (px,pz,yaw). Returns a JSON
-    /// string `{"world": <new world>, "conflicts": [...]}`. The world DOM round-trips unknown fields untouched.
-    /// Faithful port of the old engine.ts applyOps — see crate::engine (parity-tested against the JS originals).
+    /// THE BINARY ENGINE (the jzon-drop path, docs/world-data-architecture.md). Same op→world layer as `apply_ops`
+    /// but NO JSON: the world + ops cross as parallel string vecs + a flat f64 SoA (see engine_bin decode fns), the
+    /// new world + conflicts ride back in `ApplyResult`. Parity-pinned to `apply_ops` (engine_bin parity test + the
+    /// JS vitest). `obj_num` stride 9, `zone_num` 4, `path_num` 7, `terrain_num` 5; `op_num` 19, `op_strs` 11.
     #[wasm_bindgen]
-    pub fn apply_ops(world_json: &str, ops_json: &str, px: f64, pz: f64, yaw: f64) -> String {
-        let mut world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        let ops = jzon::parse(ops_json).unwrap_or_else(|_| jzon::JsonValue::new_array());
-        let conflicts = crate::engine::apply_ops(&mut world, &ops, px, pz, yaw);
-        let mut out = jzon::JsonValue::new_object();
-        out["world"] = world;
-        let mut c = jzon::JsonValue::new_array();
-        for cf in conflicts {
-            let _ = c.push(cf);
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_ops_bin(
+        obj_ids: Vec<String>,
+        obj_kinds: Vec<String>,
+        obj_colors: Vec<String>,
+        obj_num: &[f64],
+        zone_ids: Vec<String>,
+        zone_materials: Vec<String>,
+        zone_shapes: Vec<String>,
+        zone_num: &[f64],
+        path_ids: Vec<String>,
+        path_materials: Vec<String>,
+        path_num: &[f64],
+        terrain_num: &[f64],
+        ground: String,
+        sky: String,
+        op_num: &[f64],
+        op_strs: Vec<String>,
+        px: f64,
+        pz: f64,
+        yaw: f64,
+    ) -> ApplyResult {
+        use crate::engine_bin as eb;
+        let mut world = eb::EWorld {
+            objects: eb::decode_objs(&obj_ids, &obj_kinds, &obj_colors, obj_num),
+            zones: eb::decode_zones(&zone_ids, &zone_materials, &zone_shapes, zone_num),
+            paths: eb::decode_paths(&path_ids, &path_materials, path_num),
+            terrain: eb::decode_terrain(terrain_num),
+            ground,
+            sky,
+        };
+        let ops = eb::decode_ops(op_num, &op_strs);
+        let conflicts = eb::apply_ops_bin(&mut world, &ops, px, pz, yaw);
+        let (obj_ids, obj_kinds, obj_colors, obj_num) = eb::encode_objs(&world.objects);
+        let (zone_ids, zone_materials, zone_shapes, zone_num) = eb::encode_zones(&world.zones);
+        let (path_ids, path_materials, path_num) = eb::encode_paths(&world.paths);
+        ApplyResult {
+            obj_ids,
+            obj_kinds,
+            obj_colors,
+            obj_num,
+            zone_ids,
+            zone_materials,
+            zone_shapes,
+            zone_num,
+            path_ids,
+            path_materials,
+            path_num,
+            terrain_num: eb::encode_terrain(&world.terrain),
+            ground: world.ground,
+            sky: world.sky,
+            conflict_labels: conflicts.iter().map(|c| c.label.clone()).collect(),
+            // each conflict's blocker ids comma-joined (ids are `o<base36>` — no commas); JS splits, "" → no blockers
+            conflict_blockers: conflicts.iter().map(|c| c.blockers.join(",")).collect(),
         }
-        out["conflicts"] = c;
-        out.dump()
     }
 
-    /// PROCEDURAL SETTLEMENT PLAN — Rust owns the world-gen. Returns a JSON string `{objects, paths, radius}` for a
-    /// planned town at (cx,cz) of `size` ("hamlet"|"village"|"town"|"city"), deterministic in `seed`. Ported from
-    /// the old settlementPlanner.ts (parity-pinned by src/lib/worldgen.test.ts).
+    /// The `apply_ops_bin` result: the new world as the SAME parallel arrays JS packs in, plus conflicts. Read once via
+    /// the getters (each clones — this is a cold per-edit call, not a hot path).
     #[wasm_bindgen]
-    pub fn settlement_plan(cx: f64, cz: f64, size: &str, seed: u32, id_prefix: &str) -> String {
-        crate::worldgen::settlement_plan(cx, cz, size, seed, id_prefix).dump()
+    pub struct ApplyResult {
+        obj_ids: Vec<String>,
+        obj_kinds: Vec<String>,
+        obj_colors: Vec<String>,
+        obj_num: Vec<f64>,
+        zone_ids: Vec<String>,
+        zone_materials: Vec<String>,
+        zone_shapes: Vec<String>,
+        zone_num: Vec<f64>,
+        path_ids: Vec<String>,
+        path_materials: Vec<String>,
+        path_num: Vec<f64>,
+        terrain_num: Vec<f64>,
+        ground: String,
+        sky: String,
+        conflict_labels: Vec<String>,
+        conflict_blockers: Vec<String>,
     }
 
-    /// FOREST generator — Rust owns the world-gen. Reads the world DOM (`world_json`) + player (px,pz,yaw), returns
-    /// an ops JSON array that plants/grows a wood. Ported from city.ts forestOps (parity-pinned by worldgen.test.ts).
     #[wasm_bindgen]
-    pub fn forest_ops(world_json: &str, px: f64, pz: f64, yaw: f64) -> String {
-        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        crate::worldgen::forest_ops(&world, px, pz, yaw).dump()
+    impl ApplyResult {
+        #[wasm_bindgen(getter)]
+        pub fn obj_ids(&self) -> Vec<String> {
+            self.obj_ids.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn obj_kinds(&self) -> Vec<String> {
+            self.obj_kinds.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn obj_colors(&self) -> Vec<String> {
+            self.obj_colors.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn obj_num(&self) -> Vec<f64> {
+            self.obj_num.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn zone_ids(&self) -> Vec<String> {
+            self.zone_ids.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn zone_materials(&self) -> Vec<String> {
+            self.zone_materials.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn zone_shapes(&self) -> Vec<String> {
+            self.zone_shapes.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn zone_num(&self) -> Vec<f64> {
+            self.zone_num.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn path_ids(&self) -> Vec<String> {
+            self.path_ids.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn path_materials(&self) -> Vec<String> {
+            self.path_materials.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn path_num(&self) -> Vec<f64> {
+            self.path_num.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn terrain_num(&self) -> Vec<f64> {
+            self.terrain_num.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn ground(&self) -> String {
+            self.ground.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn sky(&self) -> String {
+            self.sky.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn conflict_labels(&self) -> Vec<String> {
+            self.conflict_labels.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn conflict_blockers(&self) -> Vec<String> {
+            self.conflict_blockers.clone()
+        }
     }
 
-    /// LAKE generator — digs/grows a pond ahead of the player. Reads the world DOM, returns an ops JSON array.
-    /// Ported from city.ts lakeOps.
+    /// STATELESS settlement wall refit (the jzon-drop for the away-growth / fast-forward path). Builds a THROWAWAY
+    /// `StructureStore` from `soa` (`[kind,x,z,rot,sx,sy,sz,color,keep]×n`, same layout as `WorldGen.seed`), fits every
+    /// town's perimeter against `zones` (water `[px,pz,size,seed]×n`), and returns the GEN op stream — WITHOUT touching
+    /// the persistent live `WorldGen` store, so the renderer's incremental fence state is never clobbered. A REMOVE
+    /// references its target by slot (index in `soa`), which JS maps back to the object id it packed at that index.
     #[wasm_bindgen]
-    pub fn lake_ops(world_json: &str, px: f64, pz: f64, yaw: f64) -> String {
-        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        crate::worldgen::lake_ops(&world, px, pz, yaw).dump()
+    pub fn settlement_ops_bin(soa: &[f64], zones: &[f64]) -> Vec<f64> {
+        let mut store = crate::structstore::StructureStore::new();
+        for c in soa.chunks_exact(9) {
+            store.add(crate::structstore::Structure { kind: c[0] as u8, x: c[1], z: c[2], rot: c[3], sx: c[4], sy: c[5], sz: c[6], color: c[7] as u32, keep: c[8] != 0.0, region: 0 });
+        }
+        crate::worldgen::settlement_ops_store(&mut store, zones, &[]) // empty `changed` → fit every town
     }
 
-    /// CITY generator — builds/grows the next concentric ring of a district-zoned city ahead of the player. Reads
-    /// the world DOM (objects + paths + zones), returns an ops JSON array. Ported from city.ts cityOps.
+    // ───────────────────────── the STRUCTURE store bridge (binary worldgen) ─────────────────────────
+    // `WorldGen` owns a persistent StructureStore (binary SoA + spatial grid) so the worldgen ops run against an
+    // in-wasm structure arena instead of receiving `JSON.stringify(world)` every event — docs/world-data-architecture.md.
+    // JS seeds it from the (bounded ≤STRUCT_BUDGET) live structures whenever they change, then calls the ops with small
+    // binary inputs and applies the returned Float64Array op stream `[op,kind,x,z,rot,sx,sy,sz,color]×n` (op 0=add,
+    // 1=remove-by-slot; slot indexes the SoA order JS seeded, so JS maps it back to the object id). No JSON either way.
     #[wasm_bindgen]
-    pub fn city_ops(world_json: &str, px: f64, pz: f64, yaw: f64) -> String {
-        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        crate::worldgen::city_ops(&world, px, pz, yaw).dump()
+    pub struct WorldGen {
+        store: crate::structstore::StructureStore,
     }
 
-    /// INCREMENTAL SETTLEMENT WALLS — Rust owns the placement. Reads the world DOM, clusters homes into settlements,
-    /// returns an ops JSON array that keeps each ringed by a haphazard, hole-free perimeter (grows with the town,
-    /// around water, demolishing rocks). Idempotent via a position-diff vs the existing auto-fence. Replaces the old
-    /// JS `replanSettlement` in Scene.svelte (compute now lives in Rust, per "Rust owns all compute").
     #[wasm_bindgen]
-    pub fn settlement_ops(world_json: &str) -> String {
-        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        crate::worldgen::settlement_ops(&world).dump()
-    }
+    impl WorldGen {
+        #[wasm_bindgen(constructor)]
+        pub fn new() -> WorldGen {
+            WorldGen { store: crate::structstore::StructureStore::new() }
+        }
 
-    /// GRAVE SITE — Rust owns it (the engine knows water → no graves in lakes). Returns `{x,z}` for a dry cemetery plot
-    /// outside the deceased's settlement, or `null` for a wild death. Replaces Scene.svelte `graveyardSpot`.
-    #[wasm_bindgen]
-    pub fn grave_site(world_json: &str, dx: f64, dz: f64) -> String {
-        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        crate::worldgen::grave_site(&world, dx, dz).dump()
-    }
+        /// Replace the store from a flat SoA `[kind, x, z, rot, sx, sy, sz, color, keep]×n`. JS packs world.objects'
+        /// structures (in array order) once at load + whenever the structure set changes; the slot of each entry = its
+        /// index here, so a returned REMOVE slot maps back to the object id JS packed at that index.
+        pub fn seed(&mut self, soa: &[f64]) {
+            self.store.clear();
+            for c in soa.chunks_exact(9) {
+                self.store.add(crate::structstore::Structure {
+                    kind: c[0] as u8,
+                    x: c[1],
+                    z: c[2],
+                    rot: c[3],
+                    sx: c[4],
+                    sy: c[5],
+                    sz: c[6],
+                    color: c[7] as u32,
+                    keep: c[8] != 0.0,
+                    region: 0,
+                });
+            }
+        }
 
-    /// HOUSE PLACEMENT — Rust owns it. Reads the world DOM + this frame's build requests (`builds_json` = `[{x,z},…]`),
-    /// returns add-house ops obeying the colony rules + a water margin (no homes dipping into the lake). Replaces the
-    /// Scene.svelte `drainBuilds` handler.
-    #[wasm_bindgen]
-    pub fn build_ops(world_json: &str, builds_json: &str) -> String {
-        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        let builds = jzon::parse(builds_json).unwrap_or_else(|_| jzon::JsonValue::new_array());
-        crate::worldgen::build_ops(&world, &builds).dump()
-    }
-
-    /// WELL PLACEMENT — Rust owns it. `wells_json` = `[{x,z},…]` dig requests → add-well ops (grid-snapped, never in a
-    /// lake, deduped). Replaces the Scene `drainWells` handler.
-    #[wasm_bindgen]
-    pub fn well_ops(world_json: &str, wells_json: &str) -> String {
-        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        let wells = jzon::parse(wells_json).unwrap_or_else(|_| jzon::JsonValue::new_array());
-        crate::worldgen::well_ops(&world, &wells).dump()
-    }
-
-    /// COLONY VEGETATION — Rust owns it. `seed` varies per call (the sim tick) → at most one add-tree op so a town
-    /// greens over time. Replaces Scene's colony-vegetation block.
-    #[wasm_bindgen]
-    pub fn vegetation_ops(world_json: &str, seed: f64) -> String {
-        let world = jzon::parse(world_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        crate::worldgen::vegetation_ops(&world, seed).dump()
-    }
-
-    /// IMMIGRATION DECISION — Rust owns the species-rescue logic. `counts_json` = `{kind:{n,geneSum},…}` (live counts JS
-    /// gathered from agentManager), → add-creature ops (kind/pos/gene) for deficient kinds. Replaces Scene's rescue loop.
-    #[wasm_bindgen]
-    pub fn immigration_ops(counts_json: &str, px: f64, pz: f64, global_avg: f64, seed: f64) -> String {
-        let counts = jzon::parse(counts_json).unwrap_or_else(|_| jzon::JsonValue::new_object());
-        crate::worldgen::immigration_ops(&counts, px, pz, global_avg, seed).dump()
+        pub fn well(&mut self, reqs: &[f64], zones: &[f64]) -> Vec<f64> {
+            crate::worldgen::well_ops_store(&mut self.store, reqs, zones)
+        }
+        pub fn build(&mut self, reqs: &[f64], zones: &[f64]) -> Vec<f64> {
+            crate::worldgen::build_ops_store(&mut self.store, reqs, zones)
+        }
+        /// DORMANT settlement growth (self-sustaining world): grow a FAR cluster's homes via a throwaway store (does
+        /// NOT touch the live `self.store`). `houses` = the cluster's `[x,z]×n`; returns up to `want` new build ops.
+        pub fn grow_dormant(&self, houses: &[f64], want: u32, zones: &[f64], seed: f64) -> Vec<f64> {
+            crate::worldgen::grow_dormant_houses(houses, want as usize, zones, seed)
+        }
+        pub fn grave(&mut self, dx: f64, dz: f64, zones: &[f64]) -> Vec<f64> {
+            crate::worldgen::grave_site_store(&self.store, dx, dz, zones)
+        }
+        pub fn veg(&mut self, seed: f64, zones: &[f64]) -> Vec<f64> {
+            crate::worldgen::vegetation_ops_store(&mut self.store, seed, zones)
+        }
+        /// `changed` = positions `[x,z]×n` of structures changed this frame → only those towns' walls re-fit (others
+        /// stay put). Empty = fit every town (the one-time load reconcile).
+        pub fn settlement(&mut self, zones: &[f64], changed: &[f64]) -> Vec<f64> {
+            crate::worldgen::settlement_ops_store(&mut self.store, zones, changed)
+        }
+        /// LAKE generator (binary) — `zones` = water zones `[px,pz,size,seed]×n`. Returns the GEN op stream (stride 10);
+        /// a REMOVE references its target zone by slot (its index in `zones`), which JS maps back to the zone id.
+        pub fn lake(&self, zones: &[f64], px: f64, pz: f64, yaw: f64) -> Vec<f64> {
+            crate::worldgen::lake_ops_bin(zones, px, pz, yaw)
+        }
+        /// FOREST generator (binary) — reads trees from the (seeded) store, water from `zones`. Returns the GEN op stream.
+        pub fn forest(&self, zones: &[f64], px: f64, pz: f64, yaw: f64) -> Vec<f64> {
+            crate::worldgen::forest_ops_bin(&self.store, zones, px, pz, yaw)
+        }
+        /// CITY generator (binary) — reads buildings from the (seeded) store, water from `zones`, and the removable old
+        /// spokes/plaza from `removables` (`[tag,x,z]×n`; a returned REMOVE slot maps back to a path/plaza id JS-side).
+        pub fn city(&self, zones: &[f64], removables: &[f64], px: f64, pz: f64, yaw: f64) -> Vec<f64> {
+            crate::worldgen::city_ops_bin(&self.store, zones, removables, px, pz, yaw)
+        }
+        /// IMMIGRATION decision (binary) — `counts` = `[n,geneSum]×5` (FLOORS order rabbit,kangaroo,person,cat,lion).
+        /// Returns a flat `[floorIdx,x,z,gene]×n` add-creature stream (no store needed; JS maps floorIdx → kind).
+        pub fn immigration(&self, counts: &[f64], px: f64, pz: f64, global_avg: f64, seed: f64) -> Vec<f64> {
+            crate::worldgen::immigration_ops_bin(counts, px, pz, global_avg, seed)
+        }
+        /// SETTLEMENT PLAN (binary) — a deterministic town plan packed as `[radius, numPaths, numObjects, <paths×4>,
+        /// <objects×7>]` (paths then objects; JS rebuilds ids + Path/WorldObject shapes). No store needed.
+        pub fn town_plan(&self, cx: f64, cz: f64, size: &str, seed: u32) -> Vec<f64> {
+            crate::worldgen::settlement_plan_bin(cx, cz, size, seed)
+        }
+        /// DEMO GALLERY (binary) — Rust owns the whole multi-town layout (spacing/grid/sizes), packed as `[numSites,
+        /// numPaths, numObjects, <sites: cx,cz,sizeCode>, <paths×4>, <objects×7>]`. JS just materialises it.
+        pub fn demo_gallery(&self) -> Vec<f64> {
+            crate::worldgen::demo_gallery_bin()
+        }
+        /// Binary snapshot of the live structures → IndexedDB stores the bytes (no JSON). Restored via `deserialize`.
+        pub fn serialize(&self) -> Vec<u8> {
+            self.store.serialize()
+        }
+        pub fn deserialize(&mut self, buf: &[u8]) {
+            self.store.deserialize(buf);
+        }
+        pub fn len(&self) -> usize {
+            self.store.len()
+        }
     }
 
     // ───────────────────────── the agent-sim bridge ─────────────────────────

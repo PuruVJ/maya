@@ -35,6 +35,10 @@
 	let { world, obj, species = 'cat', companion = false }: { world: World; obj?: WorldObject; species?: string; companion?: boolean } = $props();
 	const S = untrack(() => SPECIES[species] ?? SPECIES.cat);
 	const isHerb = untrack(() => species === 'rabbit' || species === 'kangaroo'); // grazers: nibble grass when idle
+	// Species rendered by the instanced renderer (InstancedCreatures) instead of this articulated mesh — this Critter
+	// then only keeps the sim-agent registration alive. Hoppers (rabbit/kangaroo) bound whole-body; the LION trots with
+	// a leg-swing vertex shader (its legs actually move). Cat/dinosaur stay articulated for now. COMPANION always articulated.
+	const INSTANCED_SPECIES = untrack(() => !companion && (species === 'rabbit' || species === 'kangaroo')); // lion reverted to articulated (instanced WALK gait jumped, unpinned)
 	// predators get the warm/bright eyeshine (a threat watching from the dark); prey the cool pale glint. A
 	// predator CHARGING you swaps to a hot-red glare — set per-agent in the hot loop (the shared eyeshine mats
 	// can't vary per-instance, so we switch WHICH material the eyes use). $state so the swap re-renders the eyes.
@@ -155,6 +159,13 @@
 	let farTime = 0;
 
 	useTask((dt) => {
+		// PROTOTYPE: rabbits are drawn by the instanced InstancedRabbits renderer, so this Critter just keeps the
+		// sim-agent registration ($effect above) alive + skips ALL per-frame mesh work (hide + early-out). Flip the
+		// const to roll instancing out to more species (and remove the matching kind from Scene's Critter branch).
+		if (INSTANCED_SPECIES) {
+			if (group) group.visible = false;
+			return;
+		}
 		// TIME-LAPSE: run the render animation at the sim's clock.rate (the worker ticks rate× faster, so bodies
 		// travel rate× per real second) — otherwise the gait skates / the body jitters in place instead of striding.
 		dt *= clock.rate;
@@ -366,7 +377,7 @@
 
 <!-- the articulated body is mounted only when NEAR (showMesh); a far+alive agent draws via the instanced
      impostor instead, so the scene graph stays small at herd scale. -->
-{#if showMesh}
+{#if showMesh && !INSTANCED_SPECIES}
 	<T.Group bind:ref={group} userData={{ objectId: obj?.id }}>
 		<T.Group bind:ref={core}>
 			{#if species === 'rabbit'}

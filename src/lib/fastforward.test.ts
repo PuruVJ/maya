@@ -33,6 +33,24 @@ describe('fastForward — welcome-back population catch-up', () => {
 		expect(after).toBeGreaterThan(before);
 	});
 
+	it('a settled town keeps DEVELOPING over a long absence — not stuck at its starting size', () => {
+		// THE "came back hours later, the world was STUCK at similar numbers" bug. A town already past hamlet size must
+		// keep growing houses AND people over a long away (the co-development spiral), not sit at a sparse fixed point.
+		const w = emptyWorld('t');
+		for (let i = 0; i < 6; i++) w.objects.push({ id: 'h' + i, kind: 'house', pos: [(i % 3) * 8, 0, ((i / 3) | 0) * 8], keep: true } as WorldObject);
+		for (let i = 0; i < 40; i++) w.objects.push({ id: 'p' + i, kind: 'person', pos: [(i % 8) * 2, 0, 20 + ((i / 8) | 0) * 2], gene: 1 } as WorldObject);
+		for (let i = 0; i < 30; i++) w.objects.push({ id: 'r' + i, kind: 'rabbit', pos: [i, 0, -30], gene: 1 } as WorldObject);
+		const homes = (x: { objects: WorldObject[] }) => x.objects.filter((o) => o.kind === 'house' || o.kind === 'cabin').length;
+		const ppl = (x: { objects: WorldObject[] }) => x.objects.filter((o) => o.kind === 'person').length;
+		const h0 = homes(w);
+		const p0 = ppl(w);
+		fastForward(w, 12 * 3600 * 1000, 'dev-', () => 0); // 12 hours away
+		// eslint-disable-next-line no-console
+		console.log(`[ff-dev] houses ${h0}→${homes(w)}, people ${p0}→${ppl(w)}`);
+		expect(homes(w)).toBeGreaterThan(h0 + 4); // the town BUILT OUT (homes co-grow with people — the spiral)
+		expect(ppl(w)).toBeGreaterThan(p0 + 8); // …and its population climbed with the new homes (not stuck at ~40)
+	});
+
 	it('grows each kind NEAR its existing cluster, not stranded in the empty gap between far-flung groups', () => {
 		// a colony of PEOPLE at the origin + a wild RABBIT herd 400 m east, with a big empty gap between (the demo's
 		// shape). The away-growth must fill out each group where it lives — not smear arrivals across the dead gap
@@ -48,6 +66,20 @@ describe('fastForward — welcome-back population catch-up', () => {
 		expect(newRabbits.length).toBeGreaterThan(0);
 		expect(newPeople.every((o) => o.pos[0] < 100)).toBe(true); // people grew AT the origin colony
 		expect(newRabbits.every((o) => o.pos[0] > 300)).toBe(true); // rabbits grew AT the wild herd — none in the 100–300 gap
+	});
+
+	it('SPREADS into new towns once a settlement fills up — not one fat blob (people↔houses spread)', () => {
+		// A dense settlement: enough people that the housing target (~1 home / 13 people) far exceeds one town's house
+		// cap, so the surplus must FOUND new towns ≥FOUND_GAP (240 m) out instead of cramming every home into the origin.
+		const w = emptyWorld('t');
+		for (let i = 0; i < 6; i++) w.objects.push({ id: 'b' + i, kind: 'house', pos: [(i % 3) * 8, 0, ((i / 3) | 0) * 8], gene: 1 } as WorldObject);
+		for (let i = 0; i < 400; i++) w.objects.push({ id: 'p' + i, kind: 'person', pos: [(i % 20) - 10, 0, ((i / 20) | 0) - 10], gene: 1 } as WorldObject);
+		const res = fastForward(w, 24 * 3600 * 1000, 'sp-', () => 0); // a day away → lots of housing demand
+		expect(res.houses).toBeGreaterThan(0);
+		const newHomes = w.objects.filter((o) => o.id.startsWith('sp-') && ['house', 'cabin', 'tower'].includes(o.kind));
+		// at least one new home is founded a real distance (≥ ~half the found gap) from the origin town → a SECOND town
+		const far = newHomes.filter((h) => Math.hypot(h.pos[0], h.pos[2]) > 120);
+		expect(far.length, `spread: ${newHomes.length} new homes, ${far.length} of them >120 m out`).toBeGreaterThan(0);
 	});
 
 	it('is a no-op for a blink away (<30 s) — nothing to advance', () => {
