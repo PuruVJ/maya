@@ -123,7 +123,7 @@ const CH_MIGRATE: i32 = 30; // RNG channel for the per-(agent,settlement) jitter
 // industrious lineage peels off tiny hamlets, a homebody one tolerates a big village → towns of varied size,
 // selectable, spreading in every direction. This REPLACES the centripetal migration + the rarely-firing crowd reflex.
 const SETTLEMENT_LINK_R: f64 = 70.0; // houses within this chain (single-link) into ONE settlement → true per-town pop/centroid
-pub const FOUND_GAP: f64 = 240.0; // MINIMUM town SPACING — a founding house is rejected within this of another town (worldgen::build_ops reads it too → ONE source of truth for spacing)
+pub const FOUND_GAP: f64 = 160.0; // MINIMUM town SPACING — a founding house is rejected within this of another town (worldgen::build_ops reads it too → ONE source of truth). LOWERED 300→160 so towns sit close enough to SEE on return (user: "reduce distance between settlements"); PIONEER_REACH stays ≫ this so spread still happens
 const PIONEER_REACH: f64 = 480.0; // how far the outward pioneer push PERSISTS before fading (2× the spacing). A pioneer keeps being driven away from its over-full town until THIS far out, so it reaches open ground and founds a DISTANT town — instead of the push dying at the spacing gap, where family cohesion immediately re-pools the family back into the parent (the "one ever-growing blob" bug). Split from FOUND_GAP so reach ≫ spacing ⇒ real spread; people-only path, orthogonal to the boldness niche.
 const PIONEER_CAP_BASE: f64 = 13.0; // town size (people) a NEUTRAL (industry=1) person tolerates before pioneering
 const PIONEER_CAP_MIN: f64 = 5.0; // an industrious founder (high industry) peels off a tiny hamlet …

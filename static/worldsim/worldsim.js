@@ -1470,7 +1470,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('worldsim_bg.wasm?v=9f7ce3405a', import.meta.url);
+        module_or_path = new URL('worldsim_bg.wasm?v=dad8902a26', import.meta.url);
     }
     const imports = __wbg_get_imports();
 

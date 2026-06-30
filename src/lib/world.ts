@@ -1,7 +1,6 @@
 // Canonical world-state types + builders. This is what gets gzip+base64'd into the URL.
 import { math } from './math';
 import { inWater } from './water';
-import { packStructures, packWaterZones, kindStr, OP_STRIDE, OP_ADD } from './structpack';
 import DEMO_SNAPSHOT from './demoWorld.json';
 
 export interface WorldObject {
@@ -87,6 +86,34 @@ export function worldAreaScale(objects: { kind: string }[]): number {
 	return math.worldAreaScale(builds); // Rust owns the FORMULA (single source of truth); JS only counts the buildings
 }
 
+const SETTLEMENT_COLONY_R = 75; // a building within this of a town centroid belongs to that town (matches the sim's COLONY_R)
+
+/** Count DISTINCT live settlements in an object list — buildings clustered by SETTLEMENT_COLONY_R, ≥2 homes = a town.
+ *  Used (with {@link dormantSettlementCount}) to enforce ONE global town cap across the live slice AND the dormant
+ *  regions, so the away-catch-up converges instead of founding a fresh batch every jump (user: "3×+1d → 84 towns"). */
+export function liveSettlementCount(objects: { kind: string; pos: number[] }[]): number {
+	const cl: { cx: number; cz: number; n: number }[] = [];
+	for (const o of objects) {
+		if (!BUILDING_KINDS.has(o.kind)) continue;
+		const c = cl.find((g) => (g.cx - o.pos[0]) ** 2 + (g.cz - o.pos[2]) ** 2 < SETTLEMENT_COLONY_R * SETTLEMENT_COLONY_R);
+		if (c) ((c.cx = (c.cx * c.n + o.pos[0]) / (c.n + 1)), (c.cz = (c.cz * c.n + o.pos[2]) / (c.n + 1)), c.n++);
+		else cl.push({ cx: o.pos[0], cz: o.pos[2], n: 1 });
+	}
+	return cl.reduce((s, g) => s + (g.n >= 2 ? 1 : 0), 0);
+}
+
+/** Count dormant (offloaded) settlements — regions holding ≥2 buildings. Pairs with {@link liveSettlementCount}. */
+export function dormantSettlementCount(world: { regions?: Record<string, { statics?: { kind: string }[] }> }): number {
+	if (!world.regions) return 0;
+	let n = 0;
+	for (const k in world.regions) {
+		let b = 0;
+		for (const s of world.regions[k].statics ?? []) if (BUILDING_KINDS.has(s.kind)) b++;
+		if (b >= 2) n++;
+	}
+	return n;
+}
+
 // NOTE: there is deliberately NO load-time population trim. A world's population is DURABLE — it accumulates as
 // the player + the sim grow it, and reloading must never snap it back (the old `capCreatures` carrying-cap trim
 // caused "140 humans → 56 on reload"). VITALITY is Mother Nature's job: the director (nature.svelte.ts) tunes the
@@ -118,10 +145,11 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 	// far-town development (streaming.ts) would have done over the same hours.
 	const CHUNKS = 6;
 	const cdt = dt / CHUNKS;
-	const FOUND_GAP = 240; // MINIMUM town spacing (mirrors Rust world::FOUND_GAP) — a new anchor must clear this of every town
+	const FOUND_GAP = 160; // MINIMUM town spacing (mirrors Rust world::FOUND_GAP) — a new anchor must clear this of every town (LOWERED → towns sit close enough to SEE)
+	const MAX_CLUSTERS = 48; // HARD CAP on the GLOBAL town count (live clusters + dormant regions). Past this, towns GROW but no NEW ones found → the world CONVERGES instead of adding a fresh batch every jump (was per-live-slice → reset each jump → 84+ towns). MUST match streaming::MAX_SETTLEMENTS
 	const COLONY_R = 75; // a building within this of a town centroid belongs to that town (matches the sim's COLONY_R)
 	const PEOPLE_PER_HOUSE = 2.8; // homes a town grows toward per settler — matches the live far-town dev + the colony equilibrium (was a sparse ~13 → towns never developed past a hamlet)
-	const PER_CLUSTER_HOUSE_CAP = 30; // a town fills to ~this many homes, then its surplus founds a NEW town (matches worldgen COLONY_MAX*3)
+	const PER_CLUSTER_HOUSE_CAP = 12; // a town fills to ~this many homes, then its surplus founds a NEW town (small towns → more of them, more spread; matches worldgen colony_cap)
 	const GOLDEN = 2.399963229728653; // golden angle (rad) → successive new towns ring OUT evenly, never stacking on one bearing
 	let creatures = 0;
 	let houses = 0;
@@ -162,6 +190,19 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 		FF_KINDS.forEach((k, i) => {
 			target[k] = adv[i];
 		});
+		// PEOPLE grow toward the BREEDING PLATEAU, not the house carrying-capacity. ffTargets relaxes people toward
+		// cap_for(Person) ≈ 2.8×houses — exactly the houses they have → ZERO surplus → the world stalled as one
+		// over-housed blob that NEVER spread (user: "stuck at ~250, no new settlement after jumping 5 days"). The LIVE
+		// sim breeds PAST the houses (toward ≈0.54×soft_target(Person 185)×pop_scale ≈ 100×scale), and THAT surplus is
+		// what its pioneers turn into new colonies. Relax people toward that plateau so the away-catch-up carries the
+		// same surplus → it builds new homes + founds new towns (the spread) instead of plateauing at one town's worth.
+		// ≈ 0.54 × soft_target(Person)=185 per pop_scale unit. The clamp is RAISED above the live sim's pop_scale cap of 8
+		// (→ ~800 people) so a fast-forwarded world keeps GROWING + SPREADING across repeated jumps into a big, wide world
+		// instead of pinning at ~800 / ~24 towns after the first jump (user: "settlements not increasing after +1d"). The
+		// live sim soft-BRAKES breeding past its own cap but never CULLS, so a jumped-up population just persists.
+		const plateau = 100 * Math.min(scale, 12); // up to ~1200 people — aligned with the MAX_CLUSTERS town cap (≈36 towns × 12 homes × 2.8), so people don't over-crowd a finite set of towns
+		const p0 = Math.max(0.5, count.person ?? 0);
+		target.person = Math.max(target.person, Math.round(plateau / (1 + (plateau / p0 - 1) * Math.exp(-0.0009 * cdt))));
 		// materialise the deltas — add scattered newcomers (evolved vigour) NEAR their kind, or trim the surplus
 		for (const k of Object.keys(target)) {
 			const have = count[k] ?? 0;
@@ -215,7 +256,7 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 			// across the chunks rather than one dump; the per-cluster cap + new-town founding spread it.
 			const targetHomes = Math.ceil(people / PEOPLE_PER_HOUSE);
 			const deficit = Math.max(0, targetHomes - blds.length);
-			let toAdd = Math.min(deficit, Math.round((cdt / 900) * (people / PEOPLE_PER_HOUSE)) + 1, 200 - blds.length, 50);
+			let toAdd = Math.min(deficit, Math.round((cdt / 900) * (people / PEOPLE_PER_HOUSE)) + 1, 600 - blds.length, 50); // ≤50/chunk, ≤600 total (was 200 → pinned the world to ~16 towns)
 			let attempts = 0;
 			const placeIn = (cl: Cluster): boolean => {
 				// build BESIDE the cluster centroid (a ring jitter scaled to its size → blocks aligned on the 8 m grid)
@@ -232,26 +273,37 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 				houses++;
 				return true;
 			};
-			// FOUND a NEW town anchor ≥FOUND_GAP from every existing town, on a golden-angle ring radiating outward from the
-			// densest town's centroid. `founded` persists ACROSS chunks so successive new towns keep ringing out evenly.
+			// FOUND a NEW town at the EXPANDING FRONTIER — a golden-angle bearing at (settled radius + FOUND_GAP) from the
+			// world's centroid, trying several bearings/radii so it ALWAYS finds open ground even when the interior is
+			// packed. (The old single-bearing search from the densest town's centroid FAILED the moment the area filled —
+			// every candidate fell within FOUND_GAP of an existing town → it gave up → the world stagnated after the first
+			// jump: user "settlements not increasing after the first +1d". `founded` persists across chunks so towns keep
+			// spiralling outward ever-wider.)
 			const foundCluster = (): Cluster | null => {
-				const seed = clusters.reduce((best, c) => (c.n > best.n ? c : best), clusters[0]); // ring out from the biggest town
-				for (let r = FOUND_GAP * 1.1; r <= FOUND_GAP * 2.4; r += FOUND_GAP * 0.4) {
-					const a = founded * GOLDEN;
-					const ax = Math.round((seed.cx + Math.cos(a) * r) / 8) * 8;
-					const az = Math.round((seed.cz + Math.sin(a) * r) / 8) * 8;
+				// CAP on the GLOBAL town count — live clusters PLUS the dormant (offloaded) regions. Counting only the live
+				// slice was the bug: the offload empties it to ~few clusters each jump, so a fresh batch got founded every
+				// jump and piled up in dormant (user: "3×+1d → 84 settlements"). Counting both makes the world CONVERGE.
+				if (clusters.length + dormantSettlementCount(world as Parameters<typeof dormantSettlementCount>[0]) >= MAX_CLUSTERS) return null;
+				const gcx = clusters.reduce((s, c) => s + c.cx, 0) / clusters.length;
+				const gcz = clusters.reduce((s, c) => s + c.cz, 0) / clusters.length;
+				const settledR = clusters.reduce((m, c) => Math.max(m, Math.hypot(c.cx - gcx, c.cz - gcz)), 0);
+				const src = clusters.reduce((best, c) => (c.n > best.n ? c : best), clusters[0]); // founders come from the densest town
+				for (let attempt = 0; attempt < 16; attempt++) {
+					const a = founded * GOLDEN; // golden-angle → even outward spiral; `founded` advances EVERY attempt
+					const r = settledR + FOUND_GAP * (1.0 + (attempt % 4) * 0.4); // ring just past the frontier (a few radii)
+					founded++;
+					const ax = Math.round((gcx + Math.cos(a) * r) / 8) * 8;
+					const az = Math.round((gcz + Math.sin(a) * r) / 8) * 8;
 					if (inWater(world.zones, ax, az)) continue;
 					if (clusters.some((cl) => (cl.cx - ax) ** 2 + (cl.cz - az) ** 2 < FOUND_GAP * FOUND_GAP)) continue; // too close to an existing town
-					founded++;
 					const nc: Cluster = { cx: ax, cz: az, n: 0 };
 					clusters.push(nc);
-					// FOUNDERS: relocate a few people from the parent town to the new site so it's a LIVING colony — an
-					// ANCHOR the next chunk's population FF grows around — not a ghost of empty houses (user: "no new
-					// colonies"). MOVING (not adding) conserves the count, so the FF doesn't trim the founders back.
+					// FOUNDERS: move a few people from the densest town so the new one is a LIVING colony (the anchor the
+					// next chunk's FF grows around), not a ghost of empty houses. MOVING conserves the count → no FF trim.
 					let moved = 0;
 					for (const o of world.objects) {
 						if (moved >= 6) break;
-						if (o.kind !== 'person' || (o.pos[0] - seed.cx) ** 2 + (o.pos[2] - seed.cz) ** 2 > 60 * 60) continue;
+						if (o.kind !== 'person' || (o.pos[0] - src.cx) ** 2 + (o.pos[2] - src.cz) ** 2 > 80 * 80) continue;
 						const fa = moved * GOLDEN;
 						o.pos[0] = ax + Math.cos(fa) * 4;
 						o.pos[2] = az + Math.sin(fa) * 4;
@@ -274,33 +326,9 @@ export function fastForward<T extends { objects: WorldObject[]; zones?: Zone[] }
 		}
 	}
 
-	// REFIT THE WALLS after away-growth — new homes change the settlement footprint, so the perimeter must be re-fitted
-	// or you return to a STALE fence: a home standing ON an old panel, and the wall not reaching the new edge (user:
-	// "one house stands on a fence, one side isn't closed"). Same engine the live sim uses (settlement_ops), an
-	// idempotent position-diff: it removes panels a new home overran / that the grown wall no longer needs and adds the
-	// new perimeter. Skipped if the wasm math isn't up yet (the Scene's on-load fit then catches it).
-	if (houses > 0) {
-		// BINARY settlement (jzon-free), via the STATELESS refit — a throwaway store, so it never clobbers the live
-		// renderer's persistent fence store. `idBySlot` maps a REMOVE's store slot back to the object id we packed there.
-		const idBySlot: string[] = [];
-		const ops = math.settlementOpsBin(packStructures(world.objects, idBySlot), packWaterZones(world.zones, (id) => math.waterSeed(id) ?? 0));
-		if (ops) {
-			let fn = 0;
-			for (let i = 0; i + OP_STRIDE <= ops.length; i += OP_STRIDE) {
-				if (ops[i] === OP_ADD) {
-					const x = ops[i + 2];
-					const z = ops[i + 3];
-					world.objects.push({ id: idPrefix + 'fc' + fn++, kind: kindStr(ops[i + 1]), pos: [x, groundY(x, z), z], rot: ops[i + 4], scale: [ops[i + 5], ops[i + 6], ops[i + 7]] });
-				} else {
-					const id = idBySlot[ops[i + 1]];
-					if (id !== undefined) {
-						const idx = world.objects.findIndex((o) => o.id === id);
-						if (idx >= 0) world.objects.splice(idx, 1);
-					}
-				}
-			}
-		}
-	}
+	// (WALL REFIT REMOVED 2026-06-30) — automatic fencing was ripped out of the RENDERER long ago, but this away-growth
+	// refit kept generating fence OBJECTS that nobody draws. They piled up (a jumped/returned world had hundreds of
+	// invisible fences) and ate the live STRUCT budget, evicting real homes from the render. Fencing is dead → no refit.
 
 	// GRAVES while away — some of the dead are remembered. A few headstones near the settlement, time-proportional.
 	// Recompute the (now grown) homes + people after the development spiral — they were chunk-local inside the loop.

@@ -317,6 +317,7 @@
 			if (away <= 60_000) return; // a quick tab-flick → nothing worth catching up
 			timeTravel = true; // cover the catch-up behind the splash so the population JUMP never flashes on screen
 			const ff = fastForward(world, away, 'tf' + Math.random().toString(36).slice(2, 7) + '-', (x, z) => heightAt(x, z, world.terrain));
+			fastForwardDormantAway(world, away); // the DORMANT far world develops + SPREADS too (load path does this; tab-return missed it)
 			setTimeout(() => (timeTravel = false), 1000); // minimum 1 s block, then reveal the advanced world
 			if (ff.creatures || ff.houses) {
 				const mins = Math.round(away / 60_000);
@@ -340,6 +341,29 @@
 	// a per-second main-thread STALL, so it was cut (2026-06-21) and positions stopped persisting. The effect above
 	// brings them back the RIGHT way (big-world.md): an async DB snapshot at 15 s / on-hide, no URL, no per-frame
 	// cost. See docs/sim-decisions.md C2.
+
+	const SKIPS: [string, number][] = [
+		['1h', 3_600_000],
+		['6h', 21_600_000],
+		['1d', 86_400_000]
+	]; // skip-ahead presets shown in the HUD
+
+	// SKIP AHEAD (user): jump the world forward by `ms` and watch how it evolved without you — the SAME closed-form
+	// catch-up a reload / tab-return runs: `fastForward` develops the live slice, `fastForwardDormantAway` develops AND
+	// SPREADS the dormant far world (new satellite colonies). Lets you test away-development instantly, not over hours.
+	function jumpForward(ms: number) {
+		if (resetting) return;
+		timeTravel = true; // splash covers the population JUMP, then reveals the evolved world
+		const ff = fastForward(world, ms, 'sk' + Math.random().toString(36).slice(2, 7) + '-', (x, z) => heightAt(x, z, world.terrain));
+		fastForwardDormantAway(world, ms);
+		setTimeout(() => (timeTravel = false), 700);
+		const hrs = ms / 3_600_000;
+		const txt = hrs < 1 ? `${Math.round(ms / 60_000)} min` : hrs < 48 ? `${Math.round(hrs)} h` : `${Math.round(hrs / 24)} d`;
+		const parts: string[] = [];
+		if (ff.houses > 0) parts.push(`${ff.houses} new homes`);
+		if (ff.creatures > 0) parts.push(`${ff.creatures} more creatures`);
+		nature.announce(`⏩ Skipped ${txt} ahead${parts.length ? ' · ' + parts.join(', ') : ''}`);
+	}
 
 	// A TRUE reset. Just swapping `world = demoWorld()` isn't enough: the autosave + unload-save re-persist it, and
 	// the Rust sim worker keeps its own (growing) population independent of world.objects. So: suppress all saving,
@@ -479,6 +503,22 @@
 				onclick={() => setSpeed(s)}
 			>
 				{s}×
+			</button>
+		{/each}
+	</div>
+	<!-- SKIP AHEAD: jump the world forward + watch how it evolved without you — the SAME closed-form catch-up a
+	     reload/tab-return runs (develops + SPREADS the far world into new colonies). Test away-development instantly. -->
+	<div
+		class="pointer-events-auto inline-flex w-fit items-center gap-0.5 rounded-full border border-white/10 bg-zinc-900/55 p-0.5 pl-2 backdrop-blur-xl"
+		title="Skip the world forward — watch how it develops + spreads while you're away"
+	>
+		<span class="pr-0.5 text-xs font-semibold text-white/40">⏩ skip</span>
+		{#each SKIPS as [label, ms] (label)}
+			<button
+				class="rounded-full px-2.5 py-1 text-xs font-semibold text-white/55 transition hover:bg-white/10 hover:text-white"
+				onclick={() => jumpForward(ms)}
+			>
+				+{label}
 			</button>
 		{/each}
 	</div>

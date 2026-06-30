@@ -33,6 +33,24 @@ describe('fastForward — welcome-back population catch-up', () => {
 		expect(after).toBeGreaterThan(before);
 	});
 
+	it('SPREADS into MULTIPLE distant towns WITH people — not one over-housed blob (the "stuck at 250, no spread" fix)', () => {
+		const w = emptyWorld('t');
+		for (let i = 0; i < 10; i++) w.objects.push({ id: 'h' + i, kind: 'house', pos: [(i % 5) * 8, 0, ((i / 5) | 0) * 8] } as WorldObject);
+		for (let i = 0; i < 40; i++) w.objects.push({ id: 'p' + i, kind: 'person', pos: [(i % 8) * 2, 0, 20 + ((i / 8) | 0) * 2], gene: 1 } as WorldObject);
+		for (let i = 0; i < 30; i++) w.objects.push({ id: 'r' + i, kind: 'rabbit', pos: [i, 0, -30], gene: 1 } as WorldObject);
+		const p0 = w.objects.filter((o) => o.kind === 'person').length;
+		fastForward(w, 24 * 3600 * 1000, 'sp-', () => 0); // a day away
+		const ppl = w.objects.filter((o) => o.kind === 'person');
+		const far = (o: WorldObject) => Math.hypot(o.pos[0], o.pos[2]) > 240;
+		const farHomes = w.objects.filter((o) => (o.kind === 'house' || o.kind === 'cabin') && far(o)).length;
+		const farPeople = ppl.filter(far).length;
+		// eslint-disable-next-line no-console
+		console.log(`[spread-grow] people ${p0}→${ppl.length}, far homes ${farHomes}, far people ${farPeople}`);
+		expect(ppl.length).toBeGreaterThan(p0 * 1.5); // GREW past the carrying cap (toward the plateau) — not stuck at ~2.8×houses
+		expect(farHomes).toBeGreaterThan(0); // founded DISTANT towns
+		expect(farPeople).toBeGreaterThan(0); // …that have RESIDENTS (not ghost houses)
+	});
+
 	it('a settled town keeps DEVELOPING over a long absence — not stuck at its starting size', () => {
 		// THE "came back hours later, the world was STUCK at similar numbers" bug. A town already past hamlet size must
 		// keep growing houses AND people over a long away (the co-development spiral), not sit at a sparse fixed point.
@@ -87,26 +105,6 @@ describe('fastForward — welcome-back population catch-up', () => {
 		expect(fastForward(w, 10_000, 'ff-', () => 0)).toEqual({ creatures: 0, houses: 0 });
 	});
 
-	it('REFITS the wall after away-growth — no home left standing on a fence panel, wall encloses the grown town', () => {
-		// the user came back to a town the catch-up had grown: a house ON a fence, and the wall not closed round the new
-		// edge. away-growth must re-fit the perimeter, not leave a stale ring. Seed a colony WITH a small fence already.
-		const w = colony();
-		for (let i = 0; i < 4; i++) w.objects.push({ id: 'p' + (8 + i), kind: 'person', pos: [i, 0, 6], gene: 1 } as WorldObject); // enough people to build
-		const res = fastForward(w, 12 * 3600 * 1000, 'tf-', (x, z) => 0); // 12 h away → city growth raises homes
-		expect(res.houses).toBeGreaterThan(0); // the catch-up actually built
-		const fences = w.objects.filter((o) => o.kind === 'fence');
-		const homes = w.objects.filter((o) => ['house', 'cabin', 'manor'].includes(o.kind));
-		expect(fences.length).toBeGreaterThan(8); // the wall was (re)fitted around the grown town
-		// no HOME sits on top of a fence panel (the user's "house on a fence")
-		for (const h of homes) {
-			const onFence = fences.some((f) => Math.hypot(f.pos[0] - h.pos[0], f.pos[2] - h.pos[2]) < 2.0);
-			expect(onFence, `home ${h.id} at ${h.pos} sits on a fence panel`).toBe(false);
-		}
-		// the wall RINGS the homes: every home is inside the fence's max radius from the home centroid
-		const cx = homes.reduce((s, h) => s + h.pos[0], 0) / homes.length;
-		const cz = homes.reduce((s, h) => s + h.pos[2], 0) / homes.length;
-		const fenceR = Math.max(...fences.map((f) => Math.hypot(f.pos[0] - cx, f.pos[2] - cz)));
-		const homeR = Math.max(...homes.map((h) => Math.hypot(h.pos[0] - cx, h.pos[2] - cz)));
-		expect(fenceR).toBeGreaterThan(homeR); // the perimeter sits OUTSIDE the furthest home (encloses it)
-	});
+	// (the old "REFITS the wall after away-growth" test was removed with the fence refit — fencing is dead; away-growth
+	// no longer generates invisible fence objects, so there's no perimeter to assert.)
 });

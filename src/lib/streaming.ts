@@ -8,6 +8,7 @@
 // Pure functions over the World (mutate objects + regions); Scene calls `streamRegions` whenever the player crosses
 // a region cell. Determinism: positions come from the seeded hash RNG so the same region re-materialises consistently.
 import type { World, WorldObject, RegionAggregate } from './world';
+import { liveSettlementCount } from './world';
 import { math } from './math';
 import { heightAt } from './terrain';
 import { kindDef } from './kinds';
@@ -32,13 +33,14 @@ const NOMAD_CAP = 3; // a sub-settlement (wild) region holds at most this many w
 // (~PEOPLE_PER_HOUSE settlers per home), bounded by COLONY_HOUSE_CAP (= the live colony cap, so a dormant town stops at
 // the same city size — no runaway), grown a few per pulse so the horizon glow thickens gradually, not in one bloom.
 const PEOPLE_PER_HOUSE = 2.8; // equilibrium settlers per home (≈ cap_for(Person, 30 houses)/30) → houses+people converge to the cap
-const COLONY_HOUSE_CAP = 30; // a dormant colony stops building here (matches the live COLONY_MAX*3); surplus simply isn't built
+const COLONY_HOUSE_CAP = 12; // a dormant colony stops building here (matches the live colony_cap); SMALL towns → more of them, more spread
 const GROW_HOUSES_PER_PULSE = 6; // cap on new homes per FF pulse → gradual growth + one cheap wgGrowDormant call
 // DORMANT SPREAD — the far world doesn't just FATTEN, it SPREADS. A FULL dormant settlement (at the colony cap) peels
 // founders into a NEW satellite town FOUND_GAP away, so an absence grows fresh COLONIES, not one ever-capped blob
 // (user: "if I'm not moving, only one settlement grows + no new colonies"). Mirrors the live pioneer spread.
-const FOUND_GAP = 240; // min town spacing (matches Rust world::FOUND_GAP) → a satellite lands ≥ this from its parent
-const SPREAD_POP_MIN = 60; // a town only spreads once genuinely populous (peeling founders then can't empty it)
+const FOUND_GAP = 160; // min town spacing (matches Rust world::FOUND_GAP) → a satellite lands ≥ this from its parent (LOWERED → towns sit close enough to SEE; user "reduce distance between settlements")
+const SPREAD_POP_MIN = 30; // a town spreads once this populous (a full small 12-house town ≈ 56 people still spreads)
+const MAX_SETTLEMENTS = 48; // HARD CAP on the GLOBAL town count (dormant regions + live slice). Without it the satellite founding is EXPONENTIAL (895 towns / 50 k people, user "damnnn"). Past this, existing towns GROW but no NEW ones found → CONVERGES, populous but FINITE. MUST match world::MAX_CLUSTERS
 const SPREAD_FOUNDERS = 10; // people peeled into each new satellite (its founding stock; grows via FF afterwards)
 const GOLDEN = 2.399963229728653; // golden angle → successive satellites ring OUT evenly around the parent
 
@@ -368,6 +370,14 @@ export function fastForwardDormantAway(world: World, awayMs: number): void {
  *  then DEVELOPS on later chunks via advanceDormant (its founders relax toward its own carrying capacity + it builds). */
 function spreadDormantSettlements(world: World, chunk: number): void {
 	if (!world.regions) return;
+	// HARD CAP: stop founding NEW satellites once the world already has MAX_SETTLEMENTS towns. Without this the founding
+	// compounds — each full town spawns a satellite that itself fills + spawns more → EXPONENTIAL (895 towns / 50 k people).
+	// Past the cap the existing towns keep growing toward carrying capacity, so the world stays populous but FINITE.
+	let settled = 0;
+	for (const k in world.regions) if (regionBuildCount(world.regions[k]) >= SETTLEMENT_MIN) settled++;
+	// count the LIVE slice too — the live + dormant towns share ONE global cap, otherwise the live founder (world.ts)
+	// and this dormant spreader each found up to MAX independently and the world overshoots (user: "3×+1d → 84 towns").
+	if (settled + liveSettlementCount(world.objects) >= MAX_SETTLEMENTS) return;
 	for (const key of Object.keys(world.regions)) {
 		// snapshot the keys above — never spread FROM a satellite created this same pass (would chain-found in one go)
 		if (waking.has(key)) continue;

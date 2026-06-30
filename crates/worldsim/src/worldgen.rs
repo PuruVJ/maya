@@ -387,12 +387,10 @@ pub fn build_ops_store(store: &mut StructureStore, builds: &[f64], zones: &[f64]
                 }
             }
         }
-        // EFFECTIVE per-colony cap — RAISED from the old hard 10 so a DENSE town keeps building (the populous vision)
-        // instead of freezing at 10 homes while its people pile up. A thriving settlement raises ~1 home per ~6
-        // settlers; with no people count reachable here we scale off a higher BUILDING ceiling (COLONY_MAX*3 ≈ 30). It's
-        // still a REAL stop (not removed) so a colony past it spills its surplus into NEW towns (the spread) rather than
-        // becoming one ever-growing blob — just a city-sized stop, not a hamlet-sized one. Bounded by HOUSE_CAP.
-        let colony_cap = (COLONY_MAX * 3).min(HOUSE_CAP);
+        // EFFECTIVE per-colony cap — a SMALL village (user: "smaller number of houses together + more spread out"). A
+        // colony fills to ~this many homes then SPILLS its surplus into NEW towns (the spread), so the world reads as
+        // many small hamlets scattered wide, not a few fat blobs. A real stop (not removed); bounded by HOUSE_CAP.
+        let colony_cap = (COLONY_MAX + 2).min(HOUSE_CAP); // 12
         if near_in_colony >= colony_cap {
             continue; // this colony is full → no more infill here (its surplus founds NEW towns elsewhere)
         }
