@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { emptyWorld, type World, type WorldObject } from './world';
-import { regionOf, regionKey, activeKeys, collapseRegion, wakeRegion, streamRegions, drainWakes, enforceLiveBudget, fastForwardDormant, fastForwardDormantAway, trimDormantOvershoot, REGION_SIZE } from './streaming';
+import { regionOf, regionKey, activeKeys, collapseRegion, wakeRegion, streamRegions, drainWakes, enforceLiveBudget, fastForwardDormant, catchUpAway, trimDormantOvershoot, REGION_SIZE } from './streaming';
 import { heightAt } from './terrain';
 import { math } from './math';
 
@@ -286,7 +286,7 @@ describe('people ↔ houses coupling', () => {
 		for (let i = 0; i < 30; i++) statics.push({ id: `h${i}`, kind: 'house', pos: [(i % 6) * 8, 0, ((i / 6) | 0) * 8] } as WorldObject);
 		w.regions = { '0,0': { counts: { person: 84 }, gene: 1, statics, lastTick: 0 } };
 		const before = Object.keys(w.regions).length;
-		fastForwardDormantAway(w, 12 * 3600 * 1000); // 12 h away
+		catchUpAway(w, 12 * 3600 * 1000); // 12 h away
 		const homesIn = (k: string) => w.regions![k].statics.filter((s) => s.kind === 'house' || s.kind === 'cabin').length;
 		const keys = Object.keys(w.regions!);
 		const satellites = keys.filter((k) => k !== '0,0' && homesIn(k) >= 2 && (w.regions![k].counts.person ?? 0) > 0);
@@ -294,7 +294,7 @@ describe('people ↔ houses coupling', () => {
 		expect(satellites.length).toBeGreaterThan(0); // …and the satellites are REAL colonies (homes + people), not ghosts
 	});
 
-	it('B: fastForwardDormantAway catches up the DORMANT far world on load (frozen-while-closed fix)', () => {
+	it('B: catchUpAway catches up the DORMANT far world on load (frozen-while-closed fix)', () => {
 		// "came back hours later, the world was STUCK" — the dormant pulse advances by SIM ticks, frozen while the app is
 		// closed, so far settlements sat frozen on return. The load-time away catch-up must develop them by wall-clock.
 		const w = emptyWorld('t');
@@ -304,7 +304,7 @@ describe('people ↔ houses coupling', () => {
 		const homes = () => w.regions!['0,0'].statics.filter((s) => s.kind === 'house' || s.kind === 'cabin').length;
 		const h0 = homes();
 		const p0 = w.regions['0,0'].counts.person;
-		fastForwardDormantAway(w, 8 * 3600 * 1000); // 8 hours away
+		catchUpAway(w, 8 * 3600 * 1000); // 8 hours away
 		expect(w.regions['0,0'].counts.person).toBeGreaterThan(p0); // far population caught up toward capacity
 		expect(homes()).toBeGreaterThan(h0 + 4); // …and the far town DEVELOPED (the spiral, not just +6 once)
 	});

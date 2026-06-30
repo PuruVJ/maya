@@ -53,6 +53,61 @@ interface ApplyResultWasm {
 	free: () => void;
 }
 
+/** The `catch_up_bin` result (wasm-bindgen getters) — the advanced live objects + dormant regions as the SAME
+ *  parallel arrays we pack in. Read each getter once into a plain object, then `free()`. */
+interface CatchUpResultWasm {
+	readonly obj_ids: string[];
+	readonly obj_kinds: string[];
+	readonly obj_colors: string[];
+	readonly obj_num: Float64Array;
+	readonly reg_keys: string[];
+	readonly reg_num: Float64Array;
+	readonly reg_static_n: Float64Array;
+	readonly rs_ids: string[];
+	readonly rs_kinds: string[];
+	readonly rs_colors: string[];
+	readonly rs_num: Float64Array;
+	readonly creatures_added: number;
+	readonly houses_added: number;
+	free: () => void;
+}
+
+/** What `catchUp` packs IN (live objects + dormant regions + water/terrain). Objects/region-statics use the engine_bin
+ *  obj SoA (stride 9); regions: `regKeys` "rx,rz", `regNum` stride 8 `[counts×6, gene, lastTick]`, `regStaticN`. */
+export interface PackedCatchUp {
+	objIds: string[];
+	objKinds: string[];
+	objColors: string[];
+	objNum: Float64Array;
+	regKeys: string[];
+	regNum: Float64Array;
+	regStaticN: Float64Array;
+	rsIds: string[];
+	rsKinds: string[];
+	rsColors: string[];
+	rsNum: Float64Array;
+	water: Float64Array;
+	terrainNum: Float64Array;
+	elapsedMs: number;
+	seed: number;
+	idPrefix: string;
+}
+export interface RawCatchUp {
+	objIds: string[];
+	objKinds: string[];
+	objColors: string[];
+	objNum: Float64Array;
+	regKeys: string[];
+	regNum: Float64Array;
+	regStaticN: Float64Array;
+	rsIds: string[];
+	rsKinds: string[];
+	rsColors: string[];
+	rsNum: Float64Array;
+	creaturesAdded: number;
+	housesAdded: number;
+}
+
 /** What `applyOpsBin` packs IN and reads OUT (engine.ts owns the World↔arrays (un)packing). The `*Strs`/`*Num` split
  *  mirrors the Rust decode/encode: parallel string vecs + a flat f64 SoA, no JSON. */
 export interface PackedApply {
@@ -142,6 +197,24 @@ interface MathGlue {
 		yaw: number,
 	) => ApplyResultWasm;
 	settlement_ops_bin: (soa: Float64Array, zones: Float64Array) => Float64Array;
+	catch_up_bin: (
+		obj_ids: string[],
+		obj_kinds: string[],
+		obj_colors: string[],
+		obj_num: Float64Array,
+		reg_keys: string[],
+		reg_num: Float64Array,
+		reg_static_n: Float64Array,
+		rs_ids: string[],
+		rs_kinds: string[],
+		rs_colors: string[],
+		rs_num: Float64Array,
+		water: Float64Array,
+		terrain_num: Float64Array,
+		elapsed_ms: number,
+		seed: number,
+		id_prefix: string,
+	) => CatchUpResultWasm;
 }
 
 class WorldMath {
@@ -347,6 +420,49 @@ class WorldMath {
 				sky: r.sky,
 				conflictLabels: r.conflict_labels,
 				conflictBlockers: r.conflict_blockers,
+			};
+			r.free();
+			return out;
+		});
+	}
+
+	/** THE AWAY/JUMP CATCH-UP (no JSON) — advance the world by `p.elapsedMs` of absence in Rust (population relax +
+	 *  settlement founding/spread + the unified town cap). `p` is the live objects + dormant regions packed as parallel
+	 *  arrays (streaming.ts owns pack/unpack). Reads the wasm getters once into a plain object, then frees it. */
+	catchUp(p: PackedCatchUp): RawCatchUp | null {
+		return this.#call((g) => {
+			const r = g.catch_up_bin(
+				p.objIds,
+				p.objKinds,
+				p.objColors,
+				p.objNum,
+				p.regKeys,
+				p.regNum,
+				p.regStaticN,
+				p.rsIds,
+				p.rsKinds,
+				p.rsColors,
+				p.rsNum,
+				p.water,
+				p.terrainNum,
+				p.elapsedMs,
+				p.seed,
+				p.idPrefix,
+			);
+			const out: RawCatchUp = {
+				objIds: r.obj_ids,
+				objKinds: r.obj_kinds,
+				objColors: r.obj_colors,
+				objNum: r.obj_num,
+				regKeys: r.reg_keys,
+				regNum: r.reg_num,
+				regStaticN: r.reg_static_n,
+				rsIds: r.rs_ids,
+				rsKinds: r.rs_kinds,
+				rsColors: r.rs_colors,
+				rsNum: r.rs_num,
+				creaturesAdded: r.creatures_added,
+				housesAdded: r.houses_added,
 			};
 			r.free();
 			return out;

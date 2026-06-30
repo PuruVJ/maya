@@ -180,6 +180,143 @@ export class ApplyResult {
 }
 if (Symbol.dispose) ApplyResult.prototype[Symbol.dispose] = ApplyResult.prototype.free;
 
+/**
+ * The `catch_up_bin` result — the advanced live objects + dormant regions as the SAME parallel arrays JS packs,
+ * plus the net adds for the welcome-back readout. Read once via getters (cold per-jump call, not a hot path).
+ */
+export class CatchUpResult {
+    static __wrap(ptr) {
+        const obj = Object.create(CatchUpResult.prototype);
+        obj.__wbg_ptr = ptr;
+        CatchUpResultFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        CatchUpResultFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_catchupresult_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get creatures_added() {
+        const ret = wasm.catchupresult_creatures_added(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get houses_added() {
+        const ret = wasm.catchupresult_houses_added(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get obj_colors() {
+        const ret = wasm.catchupresult_obj_colors(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get obj_ids() {
+        const ret = wasm.catchupresult_obj_ids(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get obj_kinds() {
+        const ret = wasm.catchupresult_obj_kinds(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    get obj_num() {
+        const ret = wasm.catchupresult_obj_num(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get reg_keys() {
+        const ret = wasm.catchupresult_reg_keys(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    get reg_num() {
+        const ret = wasm.catchupresult_reg_num(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    get reg_static_n() {
+        const ret = wasm.catchupresult_reg_static_n(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get rs_colors() {
+        const ret = wasm.catchupresult_rs_colors(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get rs_ids() {
+        const ret = wasm.catchupresult_rs_ids(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {string[]}
+     */
+    get rs_kinds() {
+        const ret = wasm.catchupresult_rs_kinds(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    get rs_num() {
+        const ret = wasm.catchupresult_rs_num(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+}
+if (Symbol.dispose) CatchUpResult.prototype[Symbol.dispose] = CatchUpResult.prototype.free;
+
 export class Sim {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -873,6 +1010,64 @@ export function bushes_near(px, pz, reach) {
 }
 
 /**
+ * THE AWAY/JUMP CATCH-UP (the closed-form advance run on reload / tab-return / ⏩ skip — Rust port of the JS
+ * world.ts fastForward + streaming.ts fastForwardDormantAway). Live objects + dormant regions cross as parallel
+ * arrays (engine_bin layout for objects/statics; regions: `reg_keys` "rx,rz", `reg_num` stride 8 `[counts×6,
+ * gene, lastTick]`, `reg_static_n` statics-per-region, statics as one concatenated obj SoA), advance by
+ * `elapsed_ms`, and the new world rides back in `CatchUpResult`. `water` = `[px,pz,size,seed]×m`, `terrain_num`
+ * stride 5. `seed` makes the placement jitter reproducible; `id_prefix` keys the new object ids.
+ * @param {string[]} obj_ids
+ * @param {string[]} obj_kinds
+ * @param {string[]} obj_colors
+ * @param {Float64Array} obj_num
+ * @param {string[]} reg_keys
+ * @param {Float64Array} reg_num
+ * @param {Float64Array} reg_static_n
+ * @param {string[]} rs_ids
+ * @param {string[]} rs_kinds
+ * @param {string[]} rs_colors
+ * @param {Float64Array} rs_num
+ * @param {Float64Array} water
+ * @param {Float64Array} terrain_num
+ * @param {number} elapsed_ms
+ * @param {number} seed
+ * @param {string} id_prefix
+ * @returns {CatchUpResult}
+ */
+export function catch_up_bin(obj_ids, obj_kinds, obj_colors, obj_num, reg_keys, reg_num, reg_static_n, rs_ids, rs_kinds, rs_colors, rs_num, water, terrain_num, elapsed_ms, seed, id_prefix) {
+    const ptr0 = passArrayJsValueToWasm0(obj_ids, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayJsValueToWasm0(obj_kinds, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArrayJsValueToWasm0(obj_colors, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passArrayF64ToWasm0(obj_num, wasm.__wbindgen_malloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ptr4 = passArrayJsValueToWasm0(reg_keys, wasm.__wbindgen_malloc);
+    const len4 = WASM_VECTOR_LEN;
+    const ptr5 = passArrayF64ToWasm0(reg_num, wasm.__wbindgen_malloc);
+    const len5 = WASM_VECTOR_LEN;
+    const ptr6 = passArrayF64ToWasm0(reg_static_n, wasm.__wbindgen_malloc);
+    const len6 = WASM_VECTOR_LEN;
+    const ptr7 = passArrayJsValueToWasm0(rs_ids, wasm.__wbindgen_malloc);
+    const len7 = WASM_VECTOR_LEN;
+    const ptr8 = passArrayJsValueToWasm0(rs_kinds, wasm.__wbindgen_malloc);
+    const len8 = WASM_VECTOR_LEN;
+    const ptr9 = passArrayJsValueToWasm0(rs_colors, wasm.__wbindgen_malloc);
+    const len9 = WASM_VECTOR_LEN;
+    const ptr10 = passArrayF64ToWasm0(rs_num, wasm.__wbindgen_malloc);
+    const len10 = WASM_VECTOR_LEN;
+    const ptr11 = passArrayF64ToWasm0(water, wasm.__wbindgen_malloc);
+    const len11 = WASM_VECTOR_LEN;
+    const ptr12 = passArrayF64ToWasm0(terrain_num, wasm.__wbindgen_malloc);
+    const len12 = WASM_VECTOR_LEN;
+    const ptr13 = passStringToWasm0(id_prefix, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len13 = WASM_VECTOR_LEN;
+    const ret = wasm.catch_up_bin(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10, ptr11, len11, ptr12, len12, elapsed_ms, seed, ptr13, len13);
+    return CatchUpResult.__wrap(ret);
+}
+
+/**
  * The RENDER slice of the eco table — [rank, speed_lo, speed_hi] per kind, by Kind order. Rust owns the full
  * canonical eco.rs; the renderer reads ONLY what it needs (gait speed range + rank) from here, no JS copy.
  * @returns {Float64Array}
@@ -1199,6 +1394,9 @@ function __wbg_get_imports() {
 const ApplyResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_applyresult_free(ptr, 1));
+const CatchUpResultFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_catchupresult_free(ptr, 1));
 const SimFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_sim_free(ptr, 1));
@@ -1470,7 +1668,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('worldsim_bg.wasm?v=dad8902a26', import.meta.url);
+        module_or_path = new URL('worldsim_bg.wasm?v=cebb5c45ab', import.meta.url);
     }
     const imports = __wbg_get_imports();
 

@@ -20,8 +20,8 @@
 	import { quality } from '$lib/quality.svelte';
 	import { nature } from '$lib/nature.svelte';
 	import TouchControls from '$lib/components/TouchControls.svelte';
-	import { demoWorld, emptyWorld, fastForward, WORLD_NAME, LEGACY_WORLD_NAMES, type World as WorldData } from '$lib/world';
-	import { trimDormantOvershoot, fastForwardDormantAway } from '$lib/streaming';
+	import { demoWorld, emptyWorld, WORLD_NAME, LEGACY_WORLD_NAMES, type World as WorldData } from '$lib/world';
+	import { trimDormantOvershoot, catchUpAway } from '$lib/streaming';
 	import { math } from '$lib/math';
 	import { heightAt } from '$lib/terrain';
 	import { encodeWorld, decodeWorld } from '$lib/share';
@@ -92,8 +92,8 @@
 		// restore the saved time-lapse speed (localStorage) → the chosen pace survives reloads
 		const savedSpeed = Number(localStorage.getItem(SPEED_KEY));
 		if (SPEEDS.includes(savedSpeed as (typeof SPEEDS)[number])) setSpeed(savedSpeed);
-		// Load the main-thread Rust math BEFORE fastForward, so the away-growth uses the real Rust numbers, not the
-		// permissive fallback. Same .wasm the worker uses — browser-cached.
+		// Load the main-thread Rust math BEFORE the away catch-up, so catchUpAway runs in real Rust, not the permissive
+		// fallback (which would no-op the jump). Same .wasm the worker uses — browser-cached.
 		await math.init();
 		const m = location.hash.match(/[#&]w=([^&]+)/);
 		if (m) {
@@ -119,10 +119,8 @@
 				// DETERMINISTIC AGGREGATE FAST-FORWARD (big-world.md §3): advance the population to "now" by however
 				// long you were away — closed-form, so even a week away is instant (no tick-replay hang).
 				const away = saved.savedAt ? Date.now() - saved.savedAt : 0;
-				const ff = away > 60_000 ? fastForward(w, away, 'ff' + Math.random().toString(36).slice(2, 7) + '-', (x, z) => heightAt(x, z, w.terrain)) : { creatures: 0, houses: 0 };
-				// the DORMANT far world catches up too — its per-region pulse advances by SIM ticks (frozen while the app
-				// is closed), so without this the far settlements you'd roamed away from stay frozen on return.
-				if (away > 60_000) fastForwardDormantAway(w, away);
+				// ONE Rust call advances BOTH the live slice AND the dormant far world (develop + spread, shared town cap).
+				const ff = catchUpAway(w, away);
 				world = w;
 				if (away > 60_000) {
 					const m = Math.round(away / 60_000);
@@ -316,8 +314,7 @@
 			hiddenAt = 0;
 			if (away <= 60_000) return; // a quick tab-flick → nothing worth catching up
 			timeTravel = true; // cover the catch-up behind the splash so the population JUMP never flashes on screen
-			const ff = fastForward(world, away, 'tf' + Math.random().toString(36).slice(2, 7) + '-', (x, z) => heightAt(x, z, world.terrain));
-			fastForwardDormantAway(world, away); // the DORMANT far world develops + SPREADS too (load path does this; tab-return missed it)
+			const ff = catchUpAway(world, away); // ONE Rust call: live slice + dormant far world both develop + spread
 			setTimeout(() => (timeTravel = false), 1000); // minimum 1 s block, then reveal the advanced world
 			if (ff.creatures || ff.houses) {
 				const mins = Math.round(away / 60_000);
@@ -349,13 +346,12 @@
 	]; // skip-ahead presets shown in the HUD
 
 	// SKIP AHEAD (user): jump the world forward by `ms` and watch how it evolved without you — the SAME closed-form
-	// catch-up a reload / tab-return runs: `fastForward` develops the live slice, `fastForwardDormantAway` develops AND
-	// SPREADS the dormant far world (new satellite colonies). Lets you test away-development instantly, not over hours.
+	// catch-up a reload / tab-return runs (`catchUpAway`): the live slice develops, and the dormant far world develops
+	// AND SPREADS into new satellite colonies. Lets you test away-development instantly, not over real hours.
 	function jumpForward(ms: number) {
 		if (resetting) return;
 		timeTravel = true; // splash covers the population JUMP, then reveals the evolved world
-		const ff = fastForward(world, ms, 'sk' + Math.random().toString(36).slice(2, 7) + '-', (x, z) => heightAt(x, z, world.terrain));
-		fastForwardDormantAway(world, ms);
+		const ff = catchUpAway(world, ms);
 		setTimeout(() => (timeTravel = false), 700);
 		const hrs = ms / 3_600_000;
 		const txt = hrs < 1 ? `${Math.round(ms / 60_000)} min` : hrs < 48 ? `${Math.round(hrs)} h` : `${Math.round(hrs / 24)} d`;

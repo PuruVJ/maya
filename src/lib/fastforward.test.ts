@@ -1,110 +1,74 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { fastForward, emptyWorld, type WorldObject } from './world';
+import { emptyWorld, type WorldObject } from './world';
+import { catchUpAway } from './streaming';
 import { math } from './math';
 
-// fastForward is the WELCOME-BACK catch-up: advance a saved world toward carrying capacity by however long you were
-// away (closed-form, Rust ff_targets). User report: "came back hours later, barely 27, didn't fast-forward." These
-// guard that it actually MATERIALISES growth (and isn't a silent no-op when the wasm/away-window is fine).
-describe('fastForward — welcome-back population catch-up', () => {
+// `catchUpAway` is the away/jump CATCH-UP: it packs the world to the binary boundary, runs the closed-form advance in
+// RUST (worldsim::catch_up — population relax + settlement founding + dormant spread, all under the unified town cap),
+// then merges the result back. The DEEP behaviour is pinned by the Rust catchup tests (cargo); these JS tests guard the
+// pack → call → unpack/merge round-trip (that the wasm boundary + the merge-by-id preserve the world correctly).
+describe('catchUpAway — away/jump catch-up (Rust-backed)', () => {
 	beforeAll(async () => {
-		await math.init(); // load the wasm math (same path +page awaits before calling fastForward)
+		await math.init(); // the catch-up runs in wasm — same instance +page awaits before calling it
 	});
 
 	const CRE = ['rabbit', 'cat', 'kangaroo', 'person', 'lion', 'dinosaur'];
-	const creatures = (w: { objects: WorldObject[] }) => w.objects.filter((o) => CRE.includes(o.kind)).length;
-	const colony = () => {
-		const w = emptyWorld('t');
-		w.objects.push({ id: 'h', kind: 'house', pos: [0, 0, 0] } as WorldObject);
-		w.objects.push({ id: 'c', kind: 'cabin', pos: [8, 0, 0] } as WorldObject);
-		w.objects.push({ id: 't', kind: 'tower', pos: [-8, 0, 0] } as WorldObject);
-		for (let i = 0; i < 8; i++) w.objects.push({ id: 'p' + i, kind: 'person', pos: [i, 0, 5], gene: 1 } as WorldObject);
-		for (let i = 0; i < 20; i++) w.objects.push({ id: 'r' + i, kind: 'rabbit', pos: [i, 0, -5], gene: 1 } as WorldObject);
-		return w;
-	};
+	const far = (o: WorldObject) => Math.hypot(o.pos[0], o.pos[2]) > 240;
 
-	it('grows an undeveloped colony toward carrying capacity after hours away', () => {
-		const w = colony();
-		const before = creatures(w);
-		const res = fastForward(w, 6 * 3600 * 1000, 'ff-', () => 0); // 6 hours away
-		const after = creatures(w);
-		// eslint-disable-next-line no-console
-		console.log(`[ff] creatures ${before} → ${after} (+${res.creatures}), houses +${res.houses}`);
-		expect(res.creatures).toBeGreaterThan(0); // the catch-up actually materialised new life
-		expect(after).toBeGreaterThan(before);
-	});
-
-	it('SPREADS into MULTIPLE distant towns WITH people — not one over-housed blob (the "stuck at 250, no spread" fix)', () => {
+	function colony() {
 		const w = emptyWorld('t');
 		for (let i = 0; i < 10; i++) w.objects.push({ id: 'h' + i, kind: 'house', pos: [(i % 5) * 8, 0, ((i / 5) | 0) * 8] } as WorldObject);
 		for (let i = 0; i < 40; i++) w.objects.push({ id: 'p' + i, kind: 'person', pos: [(i % 8) * 2, 0, 20 + ((i / 8) | 0) * 2], gene: 1 } as WorldObject);
 		for (let i = 0; i < 30; i++) w.objects.push({ id: 'r' + i, kind: 'rabbit', pos: [i, 0, -30], gene: 1 } as WorldObject);
-		const p0 = w.objects.filter((o) => o.kind === 'person').length;
-		fastForward(w, 24 * 3600 * 1000, 'sp-', () => 0); // a day away
-		const ppl = w.objects.filter((o) => o.kind === 'person');
-		const far = (o: WorldObject) => Math.hypot(o.pos[0], o.pos[2]) > 240;
-		const farHomes = w.objects.filter((o) => (o.kind === 'house' || o.kind === 'cabin') && far(o)).length;
-		const farPeople = ppl.filter(far).length;
-		// eslint-disable-next-line no-console
-		console.log(`[spread-grow] people ${p0}→${ppl.length}, far homes ${farHomes}, far people ${farPeople}`);
-		expect(ppl.length).toBeGreaterThan(p0 * 1.5); // GREW past the carrying cap (toward the plateau) — not stuck at ~2.8×houses
-		expect(farHomes).toBeGreaterThan(0); // founded DISTANT towns
-		expect(farPeople).toBeGreaterThan(0); // …that have RESIDENTS (not ghost houses)
-	});
+		return w;
+	}
 
-	it('a settled town keeps DEVELOPING over a long absence — not stuck at its starting size', () => {
-		// THE "came back hours later, the world was STUCK at similar numbers" bug. A town already past hamlet size must
-		// keep growing houses AND people over a long away (the co-development spiral), not sit at a sparse fixed point.
-		const w = emptyWorld('t');
-		for (let i = 0; i < 6; i++) w.objects.push({ id: 'h' + i, kind: 'house', pos: [(i % 3) * 8, 0, ((i / 3) | 0) * 8], keep: true } as WorldObject);
-		for (let i = 0; i < 40; i++) w.objects.push({ id: 'p' + i, kind: 'person', pos: [(i % 8) * 2, 0, 20 + ((i / 8) | 0) * 2], gene: 1 } as WorldObject);
-		for (let i = 0; i < 30; i++) w.objects.push({ id: 'r' + i, kind: 'rabbit', pos: [i, 0, -30], gene: 1 } as WorldObject);
-		const homes = (x: { objects: WorldObject[] }) => x.objects.filter((o) => o.kind === 'house' || o.kind === 'cabin').length;
-		const ppl = (x: { objects: WorldObject[] }) => x.objects.filter((o) => o.kind === 'person').length;
-		const h0 = homes(w);
-		const p0 = ppl(w);
-		fastForward(w, 12 * 3600 * 1000, 'dev-', () => 0); // 12 hours away
-		// eslint-disable-next-line no-console
-		console.log(`[ff-dev] houses ${h0}→${homes(w)}, people ${p0}→${ppl(w)}`);
-		expect(homes(w)).toBeGreaterThan(h0 + 4); // the town BUILT OUT (homes co-grow with people — the spiral)
-		expect(ppl(w)).toBeGreaterThan(p0 + 8); // …and its population climbed with the new homes (not stuck at ~40)
-	});
-
-	it('grows each kind NEAR its existing cluster, not stranded in the empty gap between far-flung groups', () => {
-		// a colony of PEOPLE at the origin + a wild RABBIT herd 400 m east, with a big empty gap between (the demo's
-		// shape). The away-growth must fill out each group where it lives — not smear arrivals across the dead gap
-		// (which made the return look empty at the colony). Guards the fix for the user's "didn't fast-forward".
-		const w = emptyWorld('t');
-		for (let i = 0; i < 6; i++) w.objects.push({ id: 'pc' + i, kind: 'person', pos: [i, 0, 0], gene: 1 } as WorldObject);
-		for (let i = 0; i < 6; i++) w.objects.push({ id: 'rw' + i, kind: 'rabbit', pos: [400 + i, 0, 0], gene: 1 } as WorldObject);
-		fastForward(w, 6 * 3600 * 1000, 'g-', () => 0);
-		const isNew = (o: WorldObject, k: string) => o.id.startsWith('g-') && o.kind === k;
-		const newPeople = w.objects.filter((o) => isNew(o, 'person'));
-		const newRabbits = w.objects.filter((o) => isNew(o, 'rabbit'));
-		expect(newPeople.length).toBeGreaterThan(0);
-		expect(newRabbits.length).toBeGreaterThan(0);
-		expect(newPeople.every((o) => o.pos[0] < 100)).toBe(true); // people grew AT the origin colony
-		expect(newRabbits.every((o) => o.pos[0] > 300)).toBe(true); // rabbits grew AT the wild herd — none in the 100–300 gap
-	});
-
-	it('SPREADS into new towns once a settlement fills up — not one fat blob (people↔houses spread)', () => {
-		// A dense settlement: enough people that the housing target (~1 home / 13 people) far exceeds one town's house
-		// cap, so the surplus must FOUND new towns ≥FOUND_GAP (240 m) out instead of cramming every home into the origin.
-		const w = emptyWorld('t');
-		for (let i = 0; i < 6; i++) w.objects.push({ id: 'b' + i, kind: 'house', pos: [(i % 3) * 8, 0, ((i / 3) | 0) * 8], gene: 1 } as WorldObject);
-		for (let i = 0; i < 400; i++) w.objects.push({ id: 'p' + i, kind: 'person', pos: [(i % 20) - 10, 0, ((i / 20) | 0) - 10], gene: 1 } as WorldObject);
-		const res = fastForward(w, 24 * 3600 * 1000, 'sp-', () => 0); // a day away → lots of housing demand
-		expect(res.houses).toBeGreaterThan(0);
-		const newHomes = w.objects.filter((o) => o.id.startsWith('sp-') && ['house', 'cabin', 'tower'].includes(o.kind));
-		// at least one new home is founded a real distance (≥ ~half the found gap) from the origin town → a SECOND town
-		const far = newHomes.filter((h) => Math.hypot(h.pos[0], h.pos[2]) > 120);
-		expect(far.length, `spread: ${newHomes.length} new homes, ${far.length} of them >120 m out`).toBeGreaterThan(0);
-	});
-
-	it('is a no-op for a blink away (<30 s) — nothing to advance', () => {
+	it('is a no-op for a blink away (<60 s)', () => {
 		const w = colony();
-		expect(fastForward(w, 10_000, 'ff-', () => 0)).toEqual({ creatures: 0, houses: 0 });
+		const n = w.objects.length;
+		expect(catchUpAway(w, 10_000)).toEqual({ creatures: 0, houses: 0 });
+		expect(w.objects.length).toBe(n);
 	});
 
-	// (the old "REFITS the wall after away-growth" test was removed with the fence refit — fencing is dead; away-growth
-	// no longer generates invisible fence objects, so there's no perimeter to assert.)
+	it('grows the colony + founds DISTANT towns with residents over a day away', () => {
+		const w = colony();
+		const p0 = w.objects.filter((o) => o.kind === 'person').length;
+		const res = catchUpAway(w, 24 * 3600 * 1000);
+		const ppl = w.objects.filter((o) => o.kind === 'person');
+		const farHomes = w.objects.filter((o) => (o.kind === 'house' || o.kind === 'cabin') && far(o)).length;
+		// eslint-disable-next-line no-console
+		console.log(`[catchup] people ${p0}→${ppl.length}, far homes ${farHomes}, far people ${ppl.filter(far).length}, +${res.houses} homes`);
+		expect(ppl.length).toBeGreaterThan(p0 * 1.5); // grew past the carrying cap toward the breeding plateau
+		expect(farHomes).toBeGreaterThan(0); // founded DISTANT towns
+		expect(ppl.filter(far).length).toBeGreaterThan(0); // …with RESIDENTS, not ghost houses
+		expect(res.houses).toBeGreaterThan(0);
+	});
+
+	it('MERGES by id — existing objects keep EVERY JS-only field (genome/pfam/ageFrac); only pos is overlaid', () => {
+		// the binary boundary only carries pos/scale/rot/keep/gene; the merge-by-id must restore the rest from the live
+		// object, or the away-catch-up would silently wipe genome/lineage/maturity (the live-state preservation contract).
+		const w = emptyWorld('t');
+		for (let i = 0; i < 6; i++) w.objects.push({ id: 'h' + i, kind: 'house', pos: [(i % 3) * 8, 0, ((i / 3) | 0) * 8] } as WorldObject);
+		w.objects.push({ id: 'vip', kind: 'person', pos: [4, 0, 4], gene: 1.2, genome: [0.1, 0.2, 0.3, 0.4, 0.5], pfamA: 7, juvenile: true, ageFrac: 0.5 } as WorldObject);
+		for (let i = 0; i < 24; i++) w.objects.push({ id: 'p' + i, kind: 'person', pos: [(i % 5) * 2, 0, 10], gene: 1 } as WorldObject);
+		catchUpAway(w, 6 * 3600 * 1000);
+		const vip = w.objects.find((o) => o.id === 'vip');
+		expect(vip, 'the existing person survived the round-trip').toBeTruthy();
+		expect(vip!.genome).toEqual([0.1, 0.2, 0.3, 0.4, 0.5]); // JS-only fields preserved through the merge
+		expect(vip!.pfamA).toBe(7);
+		expect(vip!.juvenile).toBe(true);
+		expect(vip!.ageFrac).toBe(0.5);
+	});
+
+	it('develops + SPREADS the dormant far world (regions), not just the live slice', () => {
+		const w = emptyWorld('t');
+		const statics: WorldObject[] = [];
+		for (let i = 0; i < 12; i++) statics.push({ id: `dh${i}`, kind: 'house', pos: [1000 + (i % 4) * 8, 0, 1000 + ((i / 4) | 0) * 8] } as WorldObject);
+		w.regions = { '5,5': { counts: { person: 56 }, gene: 1, statics, lastTick: 0 } }; // region cell of (1000,1000) at REGION_SIZE 200
+		const before = Object.keys(w.regions).length;
+		catchUpAway(w, 24 * 3600 * 1000);
+		const keys = Object.keys(w.regions!);
+		expect(keys.length).toBeGreaterThan(before); // the full dormant town spread a satellite into a NEW region
+		expect(CRE.length).toBe(6); // (kinds sanity — keeps the lint happy)
+	});
 });

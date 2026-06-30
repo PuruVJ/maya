@@ -380,6 +380,131 @@ mod wasm_api {
         crate::worldgen::settlement_ops_store(&mut store, zones, &[]) // empty `changed` → fit every town
     }
 
+    /// THE AWAY/JUMP CATCH-UP (the closed-form advance run on reload / tab-return / ⏩ skip — Rust port of the JS
+    /// world.ts fastForward + streaming.ts fastForwardDormantAway). Live objects + dormant regions cross as parallel
+    /// arrays (engine_bin layout for objects/statics; regions: `reg_keys` "rx,rz", `reg_num` stride 8 `[counts×6,
+    /// gene, lastTick]`, `reg_static_n` statics-per-region, statics as one concatenated obj SoA), advance by
+    /// `elapsed_ms`, and the new world rides back in `CatchUpResult`. `water` = `[px,pz,size,seed]×m`, `terrain_num`
+    /// stride 5. `seed` makes the placement jitter reproducible; `id_prefix` keys the new object ids.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn catch_up_bin(
+        obj_ids: Vec<String>,
+        obj_kinds: Vec<String>,
+        obj_colors: Vec<String>,
+        obj_num: &[f64],
+        reg_keys: Vec<String>,
+        reg_num: &[f64],
+        reg_static_n: &[f64],
+        rs_ids: Vec<String>,
+        rs_kinds: Vec<String>,
+        rs_colors: Vec<String>,
+        rs_num: &[f64],
+        water: &[f64],
+        terrain_num: &[f64],
+        elapsed_ms: f64,
+        seed: u32,
+        id_prefix: String,
+    ) -> CatchUpResult {
+        use crate::engine_bin as eb;
+        let objects = eb::decode_objs(&obj_ids, &obj_kinds, &obj_colors, obj_num);
+        let regions = crate::catchup::decode_regions(&reg_keys, reg_num, reg_static_n, &rs_ids, &rs_kinds, &rs_colors, rs_num);
+        let terrain = eb::decode_terrain(terrain_num);
+        let res = crate::catchup::catch_up(objects, regions, water, &terrain, elapsed_ms, &id_prefix, seed);
+        let (obj_ids, obj_kinds, obj_colors, obj_num) = eb::encode_objs(&res.objects);
+        let (reg_keys, reg_num, reg_static_n, rs_ids, rs_kinds, rs_colors, rs_num) = crate::catchup::encode_regions(&res.regions);
+        CatchUpResult {
+            obj_ids,
+            obj_kinds,
+            obj_colors,
+            obj_num,
+            reg_keys,
+            reg_num,
+            reg_static_n,
+            rs_ids,
+            rs_kinds,
+            rs_colors,
+            rs_num,
+            creatures_added: res.creatures_added as f64,
+            houses_added: res.houses_added as f64,
+        }
+    }
+
+    /// The `catch_up_bin` result — the advanced live objects + dormant regions as the SAME parallel arrays JS packs,
+    /// plus the net adds for the welcome-back readout. Read once via getters (cold per-jump call, not a hot path).
+    #[wasm_bindgen]
+    pub struct CatchUpResult {
+        obj_ids: Vec<String>,
+        obj_kinds: Vec<String>,
+        obj_colors: Vec<String>,
+        obj_num: Vec<f64>,
+        reg_keys: Vec<String>,
+        reg_num: Vec<f64>,
+        reg_static_n: Vec<f64>,
+        rs_ids: Vec<String>,
+        rs_kinds: Vec<String>,
+        rs_colors: Vec<String>,
+        rs_num: Vec<f64>,
+        creatures_added: f64,
+        houses_added: f64,
+    }
+
+    #[wasm_bindgen]
+    impl CatchUpResult {
+        #[wasm_bindgen(getter)]
+        pub fn obj_ids(&self) -> Vec<String> {
+            self.obj_ids.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn obj_kinds(&self) -> Vec<String> {
+            self.obj_kinds.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn obj_colors(&self) -> Vec<String> {
+            self.obj_colors.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn obj_num(&self) -> Vec<f64> {
+            self.obj_num.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn reg_keys(&self) -> Vec<String> {
+            self.reg_keys.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn reg_num(&self) -> Vec<f64> {
+            self.reg_num.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn reg_static_n(&self) -> Vec<f64> {
+            self.reg_static_n.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn rs_ids(&self) -> Vec<String> {
+            self.rs_ids.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn rs_kinds(&self) -> Vec<String> {
+            self.rs_kinds.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn rs_colors(&self) -> Vec<String> {
+            self.rs_colors.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn rs_num(&self) -> Vec<f64> {
+            self.rs_num.clone()
+        }
+        #[wasm_bindgen(getter)]
+        pub fn creatures_added(&self) -> f64 {
+            self.creatures_added
+        }
+        #[wasm_bindgen(getter)]
+        pub fn houses_added(&self) -> f64 {
+            self.houses_added
+        }
+    }
+
     // ───────────────────────── the STRUCTURE store bridge (binary worldgen) ─────────────────────────
     // `WorldGen` owns a persistent StructureStore (binary SoA + spatial grid) so the worldgen ops run against an
     // in-wasm structure arena instead of receiving `JSON.stringify(world)` every event — docs/world-data-architecture.md.
