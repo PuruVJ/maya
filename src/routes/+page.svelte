@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { dev } from '$app/environment';
 	import { replaceState } from '$app/navigation';
 	import { Canvas } from '@threlte/core';
 	import ProfilerOverlay from '$lib/components/ProfilerOverlay.svelte';
@@ -502,22 +503,25 @@
 			</button>
 		{/each}
 	</div>
-	<!-- SKIP AHEAD: jump the world forward + watch how it evolved without you — the SAME closed-form catch-up a
-	     reload/tab-return runs (develops + SPREADS the far world into new colonies). Test away-development instantly. -->
-	<div
-		class="pointer-events-auto inline-flex w-fit items-center gap-0.5 rounded-full border border-white/10 bg-zinc-900/55 p-0.5 pl-2 backdrop-blur-xl"
-		title="Skip the world forward — watch how it develops + spreads while you're away"
-	>
-		<span class="pr-0.5 text-xs font-semibold text-white/40">⏩ skip</span>
-		{#each SKIPS as [label, ms] (label)}
-			<button
-				class="rounded-full px-2.5 py-1 text-xs font-semibold text-white/55 transition hover:bg-white/10 hover:text-white"
-				onclick={() => jumpForward(ms)}
-			>
-				+{label}
-			</button>
-		{/each}
-	</div>
+	<!-- SKIP AHEAD (DEV ONLY): jump the world forward + watch how it evolved without you — the SAME closed-form catch-up
+	     a reload/tab-return runs (develops + SPREADS the far world into new colonies). A dev tool for testing
+	     away-development instantly; `dev` tree-shakes it out of the production bundle. -->
+	{#if dev}
+		<div
+			class="pointer-events-auto inline-flex w-fit items-center gap-0.5 rounded-full border border-white/10 bg-zinc-900/55 p-0.5 pl-2 backdrop-blur-xl"
+			title="Skip the world forward — watch how it develops + spreads while you're away (dev only)"
+		>
+			<span class="pr-0.5 text-xs font-semibold text-white/40">⏩ skip</span>
+			{#each SKIPS as [label, ms] (label)}
+				<button
+					class="rounded-full px-2.5 py-1 text-xs font-semibold text-white/55 transition hover:bg-white/10 hover:text-white"
+					onclick={() => jumpForward(ms)}
+				>
+					+{label}
+				</button>
+			{/each}
+		</div>
+	{/if}
 	<!-- QUALITY tier — Lite drops the decorative layers + caps resolution (smoother on weak devices/mobile). Auto-set
 	     on weak hardware; this lets you force either way. -->
 	<button
