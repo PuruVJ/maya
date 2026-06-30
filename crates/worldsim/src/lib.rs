@@ -19,6 +19,7 @@
 //! makes order-independent parallelism bit-identical. Pure `u32` wrapping arithmetic → BIT-EXACT with the
 //! JS implementation (pinned in `tests` against values produced by rng.ts).
 
+mod catchup;
 mod clock;
 mod eco;
 mod engine;
