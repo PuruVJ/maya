@@ -10,6 +10,7 @@
 	import { forEachTreeNear, treeRadius, onPath } from '$lib/scatter';
 	import { inWater } from '$lib/water';
 	import { touchInput } from '$lib/touchControls';
+	import { NPC, creatureMat } from '$lib/sharedAssets';
 	import { kindDef } from '$lib/kinds';
 	import type { World } from '$lib/world';
 
@@ -35,30 +36,11 @@
 	let collider = $state<any>();
 	let cam = $state<THREE.PerspectiveCamera>();
 	let visual = $state<THREE.Group>();
-	let tilt = $state<THREE.Group>(); // inner group → forward LEAN (local X) under the yaw'd visual
+	let legL = $state<THREE.Group>();
+	let legR = $state<THREE.Group>();
 	let armL = $state<THREE.Group>();
 	let armR = $state<THREE.Group>();
-	let gait = 0; // hover-bob + arm-float phase (EVE floats — no walk cycle)
-
-	// ── EVE (WALL-E) — the player avatar ──────────────────────────────────────────────────────────────────────────
-	// A sleek FLOATING white egg-robot: smooth glossy body, a glossy black face screen, two glowing blue eyes. No legs
-	// (she hovers, bobbing gently, and leans into movement). Built from smooth THREE primitives (deliberately HIGH-poly
-	// / smooth-shaded — the Apple-esque look — vs the world's flat-shaded low-poly creatures, so the player stands out).
-	// the body is a LATHE (revolved silhouette) → a TEARDROP: a wide rounded top tapering SMOOTHLY to a small rounded
-	// bottom (EVE's shape), not a symmetric "humpty-dumpty" ellipsoid. Profile = [radius, height], bottom → top.
-	const eveProfile = (
-		[
-			[0.0, 0.0], [0.14, 0.06], [0.22, 0.18], [0.3, 0.38], [0.38, 0.65], [0.44, 0.97], [0.49, 1.24],
-			[0.51, 1.42], [0.49, 1.56], [0.41, 1.68], [0.28, 1.77], [0.14, 1.83], [0.0, 1.85]
-		] as [number, number][]
-	).map(([r, y]) => new THREE.Vector2(r, y));
-	const eveBody = new THREE.LatheGeometry(eveProfile, 28); // smooth (28 radial segments); widest ~0.5 high up, tapers down
-	const eveArm = new THREE.CapsuleGeometry(0.1, 0.32, 6, 12); // a floating side arm
-	const eveVisor = new THREE.SphereGeometry(0.45, 28, 20); // the dark face screen (flattened against the front)
-	const eveEye = new THREE.CapsuleGeometry(0.05, 0.13, 5, 10); // a glowing eye (angled on the visor)
-	const eveWhite = new THREE.MeshStandardMaterial({ color: '#eef4fa', roughness: 0.3, metalness: 0.12 }); // clean glossy white
-	const eveDark = new THREE.MeshStandardMaterial({ color: '#0a0d14', roughness: 0.12, metalness: 0.45 }); // glossy black face
-	const eveEyeMat = new THREE.MeshStandardMaterial({ color: '#6fd9ff', emissive: '#37c6ff', emissiveIntensity: 2.6, roughness: 0.4, toneMapped: false }); // bright blue glow
+	let gait = 0;
 
 	const keys = new Set<string>();
 	let yaw = 0;
@@ -108,10 +90,12 @@
 	const CAM_DIST = 10;
 	const PITCH_MIN = -0.45; // tilt right down → camera swings close & under you to look up at the sky
 	const PITCH_MAX = 1.5; // ...up to nearly top-down
-	// EVE has NO GRAVITY (she flies — see the vertical-control block in the task). JUMP_V is the small upward nudge a
-	// touch-jump tap gives (then she holds); CLIMB_V is the hold-to-rise / hold-to-sink speed.
-	const JUMP_V = 6; // a touch-tap pop (gentler than the old 10 → no hard launch now that there's no gravity to fight)
-	const CLIMB_V = 8; // sustained ascent / descent speed while Space (up) or C/Ctrl (down) is held
+	const GRAVITY = 22;
+	const TERMINAL_V = 32; // m/s — cap fall speed. An unbounded vy from a long drop feeds Rapier's kinematic
+	// controller a deep-penetration sweep on landing (into a settlement's collider cluster), which recurses its
+	// collide-and-slide solver until the wasm stack overflows. Capping vy keeps every per-frame sweep shallow.
+	const JUMP_V = 10;
+	const CLIMB_V = 8; // sustained ascent speed while Space is held (infinite jump → bird's-eye)
 	const FLY_CEILING = 85; // max altitude (m above the ground beneath you) the hold-to-rise tops out at
 	const CAPSULE_HALF = 0.9; // capsule centre above the feet
 	const MAX_WALK_SLOPE = 1.3; // max climbable terrain gradient (rise/run ≈ tan 52°); steeper faces block the uphill move
@@ -251,17 +235,13 @@
 			mz /= len;
 		}
 
-		// EVE FLIES — NO GRAVITY pulls her down (WALL-E's hovering robot; user: "she stays up there, gravity doesn't
-		// control her"). Vertical is DIRECTLY controlled: Space rises, C/Ctrl lowers, and with NEITHER held she eases to
-		// a stop and HOLDS her altitude (she hovers, never falls). Bounded below by the ground (she can settle + rest on
-		// it) and above by FLY_CEILING over the ground beneath. The momentary `tryJump` pop (a touch-jump tap) also just
-		// nudges her up then holds — so a tap = rise a little, hold = climb.
+		vy -= GRAVITY * delta;
+		if (vy < -TERMINAL_V) vy = -TERMINAL_V; // cap fall speed (Rapier deep-penetration / stack-overflow guard)
+		// INFINITE JUMP → bird's-eye: while Space is held, keep ascending at CLIMB_V until you reach FLY_CEILING
+		// metres above the ground beneath you (the "ceiling"), then hold there; release and gravity brings you down.
 		const altAbove = py - (heightAt(px, pz, world.terrain) + CAPSULE_HALF);
-		const rise = jumpHeld && altAbove < FLY_CEILING;
-		const fall = keys.has('c') || keys.has('control');
-		const targetVy = rise ? CLIMB_V : fall ? -CLIMB_V : 0;
-		vy += (targetVy - vy) * Math.min(1, delta * 10); // ease toward target → smooth rise / hover / sink (no free-fall)
-		if (Math.abs(vy) < 0.01 && !rise && !fall) vy = 0; // settle exactly to a hover when idle
+		if (jumpHeld && altAbove < FLY_CEILING) vy = Math.max(vy, CLIMB_V);
+		else if (altAbove >= FLY_CEILING && vy > 0) vy = 0; // bonk the ceiling → stop rising
 
 		// wading through a pond slows you right down (you can still enter — animals can't)
 		const wading = submerged(px, pz, py);
@@ -315,12 +295,6 @@
 			grounded = true;
 		}
 
-		// EVE FLIES OVER the world: once she's lifted clearly off the ground, skip every GROUND-object collision
-		// (trees / houses / animals) AND the camera occlusion below. Those push-outs are XZ-only (ignore altitude), so
-		// without this they shoved her around trees + houses FAR beneath her, and the camera kept grabbing buildings
-		// underneath (the wobble). Within 2 m of the ground the normal collisions apply, so walking + landing still work.
-		const flying = py - groundY > 2;
-
 		// predator-strike knockback + stun decay (the hit is detected in the animal loop below)
 		if (stunT > 0) {
 			stunT -= delta;
@@ -337,7 +311,7 @@
 		// `share` ramps 0→1 as more animals press at once, and is always 1 for an apex predator.
 		const PR = 0.5; // player body radius
 		const overlaps: { m: ManagedAgent; nx: number; nz: number; pen: number }[] = [];
-		if (!flying) agentManager.forEach((m) => {
+		agentManager.forEach((m) => {
 			if (m.dead) return;
 			const dx = px - m.agent.x;
 			const dz = pz - m.agent.z;
@@ -368,7 +342,7 @@
 
 		// solid ambient-forest trees — push out of any trunk you'd walk into (deterministic placement, so
 		// this matches exactly what AmbientScatter draws). PR + max trunk radius ≈ 1.4 m → search reach 1.5.
-		if (!flying) forEachTreeNear(px, pz, 1.5, (tr) => {
+		forEachTreeNear(px, pz, 1.5, (tr) => {
 			if (inWater(world.zones, tr.x, tr.z) || onPath(world.paths, tr.x, tr.z)) return; // AmbientScatter culls trees in lakes / on roads → don't collide with the ghost
 			const dx = px - tr.x;
 			const dz = pz - tr.z;
@@ -385,7 +359,7 @@
 		// can't walk through a house. Creatures are skipped (the animal push-out above handles them). XZ-only.
 		// Box-footprint kinds (houses/cabins) use an ORIENTED BOX so you can walk right up to a wall and follow
 		// streets instead of bumping an oversized circle; round kinds (towers/rocks/wells/lamps) stay circles.
-		if (!flying) for (const o of world.objects) {
+		for (const o of world.objects) {
 			if (CREATURES.has(o.kind)) continue;
 			const def = kindDef(o.kind);
 			const sx = o.scale?.[0] ?? 1;
@@ -435,20 +409,18 @@
 		playerState.inWater = submerged(px, pz, py);
 		sink += ((playerState.inWater ? SINK : 0) - sink) * Math.min(1, 8 * delta);
 
-		// EVE FLOATS — a gentle always-on hover bob, a forward LEAN into movement, and arms that ease back as she flies.
-		// No walk cycle (no legs). The bob rides on top of the wading `sink`, so she still dips into water.
-		gait += delta * (len > 0 ? 3.4 : 1.7); // bob a touch faster while moving
-		const bob = 0.06 + Math.sin(gait * 2) * 0.05; // small hover above the feet-baseline
 		if (visual) {
 			visual.rotation.y = yaw;
-			visual.position.y = -sink + bob;
+			visual.position.y = -sink;
 		}
-		// forward lean when moving (negative local-X tips the top toward −Z = forward); smoothed in/out
-		const lean = len > 0 ? -0.26 : 0;
-		if (tilt) tilt.rotation.x += (lean - tilt.rotation.x) * Math.min(1, delta * 8);
-		const trail = (tilt ? -tilt.rotation.x : 0) * 0.8; // arms angle back as she pitches forward
-		if (armL) armL.rotation.x = trail + Math.sin(gait * 2) * 0.06;
-		if (armR) armR.rotation.x = trail + Math.sin(gait * 2 + 0.5) * 0.06;
+
+		// walk cycle on the humanoid limbs (legs/arms swing contralaterally while moving)
+		gait += (len > 0 ? 9 : 0) * delta;
+		const sw = Math.sin(gait) * (len > 0 ? 0.6 : 0);
+		if (legL) legL.rotation.x = sw;
+		if (legR) legR.rotation.x = -sw;
+		if (armL) armL.rotation.x = -sw * 0.7;
+		if (armR) armR.rotation.x = sw * 0.7;
 
 		// as you tilt down (low pitch) the camera swings CLOSE & under you → look up at the sky
 		const dist = CAM_DIST * (0.28 + 0.72 * ss(-0.15, 0.7, pitch));
@@ -460,7 +432,7 @@
 		// in normal play. Pull in promptly for a real wall, but never all the way onto the character.
 		const cdx = Math.sin(yaw);
 		const cdz = Math.cos(yaw);
-		if (!flying) for (const o of world.objects) {
+		for (const o of world.objects) {
 			if (!CAMERA_BLOCKERS.has(o.kind)) continue;
 			const ox = o.pos[0] - px;
 			const oz = o.pos[2] - pz;
@@ -502,22 +474,21 @@
 <RigidBody type="kinematicPosition" bind:rigidBody={body}>
 	<Collider shape="capsule" args={[0.5, 0.4]} bind:collider={collider} />
 	<T.Group bind:ref={visual}>
-		<!-- EVE floats; this inner group leans forward into movement (local X), under the yaw'd visual. Offset down so
-		     the capsule-centre origin maps to the feet — EVE's body then sits ~0.4 m up, leaving a hover gap (no legs). -->
-		<T.Group bind:ref={tilt} position={[0, -CAPSULE_HALF, 0]}>
-			<!-- the white teardrop body (lathe): base raised so she floats, wide top tapering to a rounded bottom -->
-			<T.Mesh geometry={eveBody} material={eveWhite} position={[0, 0.3, 0]} castShadow />
-			<!-- glossy black face screen on the FRONT (−Z = forward), on the WIDE upper body -->
-			<T.Mesh geometry={eveVisor} material={eveDark} position={[0, 1.82, -0.36]} scale={[0.82, 0.56, 0.42]} />
-			<!-- two glowing blue eyes, angled inward (EVE's neutral look) -->
-			<T.Mesh geometry={eveEye} material={eveEyeMat} position={[0.12, 1.84, -0.54]} rotation={[0, 0, -0.5]} />
-			<T.Mesh geometry={eveEye} material={eveEyeMat} position={[-0.12, 1.84, -0.54]} rotation={[0, 0, 0.5]} />
-			<!-- two floating arms at the sides of the wide upper body, a visible gap (animated in the task) -->
-			<T.Group bind:ref={armL} position={[0.58, 1.55, 0]}>
-				<T.Mesh geometry={eveArm} material={eveWhite} position={[0, -0.12, 0]} rotation={[0, 0, 0.16]} castShadow />
+		<!-- humanoid avatar; offset down so the feet sit at the ground (group origin = capsule centre) -->
+		<T.Group position={[0, -CAPSULE_HALF, 0]}>
+			<T.Mesh position={[0, 1.05, 0]} geometry={NPC.torso} material={creatureMat('#e8794b')} castShadow />
+			<T.Mesh position={[0, 1.62, 0]} geometry={NPC.head} material={creatureMat('#f0c293')} castShadow />
+			<T.Group bind:ref={armL} position={[0.34, 1.4, 0]}>
+				<T.Mesh position={[0, -0.3, 0]} geometry={NPC.arm} material={creatureMat('#e8794b')} castShadow />
 			</T.Group>
-			<T.Group bind:ref={armR} position={[-0.58, 1.55, 0]}>
-				<T.Mesh geometry={eveArm} material={eveWhite} position={[0, -0.12, 0]} rotation={[0, 0, -0.16]} castShadow />
+			<T.Group bind:ref={armR} position={[-0.34, 1.4, 0]}>
+				<T.Mesh position={[0, -0.3, 0]} geometry={NPC.arm} material={creatureMat('#e8794b')} castShadow />
+			</T.Group>
+			<T.Group bind:ref={legL} position={[0.14, 0.7, 0]}>
+				<T.Mesh position={[0, -0.35, 0]} geometry={NPC.leg} material={creatureMat('#34507f')} castShadow />
+			</T.Group>
+			<T.Group bind:ref={legR} position={[-0.14, 0.7, 0]}>
+				<T.Mesh position={[0, -0.35, 0]} geometry={NPC.leg} material={creatureMat('#34507f')} castShadow />
 			</T.Group>
 		</T.Group>
 	</T.Group>
